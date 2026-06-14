@@ -131,15 +131,20 @@ anything not yet exercised by a real run is marked `TODO(verify:)`.
 
 ## R10. Reproducible environment
 
-- **Decision**: Update the repo-root `Dockerfile` to a dual-stack image (modern
-  Python 3.11 + Node 20) installing pinned backend `requirements.txt` and building
-  the frontend; pin frontend deps via `package.json` + lockfile. `README.md` and
-  `CLAUDE.md` updated with setup/run instructions; `quickstart.md` is the runnable
-  proof. Cache dir git-ignored.
+- **Decision**: Provide two reproducible cross-stack mechanisms (Constitution V
+  allows "containerized AND/OR pinned dependencies"): (a) a primary `environment.yml`
+  for conda/mamba that pins **both** Python 3.11 and Node 20 in one isolated env and
+  pip-installs the backend; (b) a repo-root `Dockerfile` (same dual stack) for hosts
+  with a Docker daemon. Backend deps come from `pyproject.toml` with exact pins
+  frozen in `requirements.lock`; frontend deps pinned via `package.json` + lockfile.
+  `README.md`/`CLAUDE.md`/`quickstart.md` document both; `quickstart.md` is the
+  runnable proof. Cache dir git-ignored.
 - **Rationale**: Enforces Principle V (reproducible, independently runnable) and
-  Principle IV (docs co-updated) and the constraint to keep manifests in sync.
+  Principle IV (docs co-updated). The conda/mamba env is the verified primary path
+  because it needs no Docker daemon and still pins both stacks.
 - **Alternatives**: Keep the legacy Python 3.7 conda Dockerfile (cannot run modern
-  transformers/Svelte) — rejected; the legacy stack is replaced deliberately.
+  transformers/Svelte) — rejected. Docker-only — rejected as sole mechanism since a
+  daemon may be unavailable; the conda/mamba env covers that case.
 
 ## Open questions deferred (not blocking this feature)
 

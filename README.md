@@ -40,11 +40,24 @@ Open <http://localhost:5173>, keep the default model (`gpt2`) or type any open-w
 HuggingFace id, edit the prompt, and adjust temperature / layer to watch the cached
 data update.
 
-### Docker (reproducible, both stacks)
+### Reproducible environments
+
+A `conda`/`mamba` environment pins **both** stacks (Python 3.11 + Node 20) in one
+isolated env:
+
+```bash
+mamba env create -f environment.yml   # or: conda env create -f environment.yml
+conda activate llm-geometry
+uvicorn llm_geometry.api.app:app --port 8000          # backend
+cd code/frontend && npm install && npm run dev        # frontend
+```
+
+A `Dockerfile` is also provided (same dual stack) for hosts with a running Docker
+daemon:
 
 ```bash
 docker build -t llm-geometry .
-docker run -it -p 8000:8000 llm-geometry          # serves API + built UI on :8000
+docker run -it -p 8000:8000 llm-geometry              # serves API + built UI on :8000
 ```
 
 ## Tests

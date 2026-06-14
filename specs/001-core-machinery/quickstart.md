@@ -24,7 +24,14 @@ cd ../frontend
 npm ci                                    # from package.json + lockfile
 ```
 
-Docker (reproducible, both stacks):
+Reproducible cross-stack env via conda/mamba (pins Python 3.11 + Node 20; no daemon):
+
+```bash
+mamba env create -f environment.yml       # repo root (or: conda env create -f ...)
+conda activate llm-geometry
+```
+
+Or a container (requires a running Docker daemon):
 
 ```bash
 docker build -t llm-geometry .            # repo root

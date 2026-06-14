@@ -78,7 +78,9 @@ npm run dev                                           # http://localhost:5173 (p
 npm run check && npm run test                         # svelte-check + vitest
 npx playwright install chromium && npm run test:e2e   # e2e + screenshots
 
-# Reproducible dual-stack container (Python 3.11 + Node 20)
+# Reproducible cross-stack env (pins Python 3.11 + Node 20) — primary, no daemon needed
+mamba env create -f environment.yml && conda activate llm-geometry
+# Or a container (requires a running Docker daemon)
 docker build -t llm-geometry . && docker run -it -p 8000:8000 llm-geometry
 
 # Build the paper (run from paper/; needs a LaTeX toolchain)

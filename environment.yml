@@ -1,0 +1,21 @@
+# Reproducible cross-stack environment for the llm-geometry core machinery.
+# A conda/mamba alternative to the Dockerfile that pins BOTH stacks (Python + Node)
+# in one isolated environment (Constitution V — reproducible environments).
+#
+#   mamba env create -f environment.yml        # (or: conda env create -f environment.yml)
+#   conda activate llm-geometry
+#   # backend:
+#   uvicorn llm_geometry.api.app:app --port 8000
+#   # frontend (from code/frontend):
+#   npm install && npm run dev
+#
+# Run `mamba env create` from the repo root so the editable path resolves.
+name: llm-geometry
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - nodejs=20
+  - pip
+  - pip:
+      - -e ./code/backend[test]
