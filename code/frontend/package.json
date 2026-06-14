@@ -1,0 +1,33 @@
+{
+  "name": "llm-geometry-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Shared web shell + controls + data-access layer for llm-geometry visualizations.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 5173",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "@sveltejs/vite-plugin-svelte": "^4.0.0",
+    "@tsconfig/svelte": "^5.0.4",
+    "@types/d3": "^7.4.3",
+    "@types/three": "^0.169.0",
+    "jsdom": "^25.0.0",
+    "svelte": "^5.0.0",
+    "svelte-check": "^4.0.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0",
+    "vitest": "^2.1.0"
+  },
+  "dependencies": {
+    "d3": "^7.9.0",
+    "three": "^0.169.0"
+  }
+}

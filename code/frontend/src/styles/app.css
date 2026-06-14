@@ -1,0 +1,102 @@
+/* Design tokens + base styles for the llm-geometry shell.
+   Modern, clean, dark, with a single accent gradient (Constitution III). */
+:root {
+  --bg: #0b0e14;
+  --bg-elev: #131826;
+  --bg-elev-2: #1b2235;
+  --border: #2a3349;
+  --text: #e8ecf5;
+  --text-dim: #9aa6c0;
+  --accent: #6ea8fe;
+  --accent-2: #b794f6;
+  --accent-grad: linear-gradient(135deg, #6ea8fe 0%, #b794f6 100%);
+  --good: #5be0b0;
+  --bad: #ff7a90;
+  --radius: 14px;
+  --shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+  --mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background:
+    radial-gradient(1200px 600px at 80% -10%, rgba(110, 168, 254, 0.10), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, rgba(183, 148, 246, 0.10), transparent 60%),
+    var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); }
+
+.panel {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.control { display: flex; flex-direction: column; gap: 0.4rem; }
+.control .label { font-size: 0.82rem; color: var(--text-dim); letter-spacing: 0.02em; }
+.control .label b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg-elev-2);
+  outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-grad);
+  cursor: pointer;
+  box-shadow: 0 0 0 4px rgba(110, 168, 254, 0.15);
+  transition: transform 0.12s ease;
+}
+input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.15); }
+input[type="range"]:disabled { opacity: 0.4; }
+
+textarea, input[type="text"], select {
+  width: 100%;
+  background: var(--bg-elev-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.6rem 0.7rem;
+  font-family: var(--font);
+  font-size: 0.92rem;
+  resize: vertical;
+}
+textarea:focus, input:focus, select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(110, 168, 254, 0.2);
+}
+
+button {
+  background: var(--accent-grad);
+  color: #0b0e14;
+  border: none;
+  border-radius: 10px;
+  padding: 0.55rem 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.1s ease, filter 0.1s ease;
+}
+button:hover { filter: brightness(1.08); }
+button:active { transform: translateY(1px); }
+
+.badge { font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 999px; }
+.badge.ok { color: var(--good); background: rgba(91, 224, 176, 0.12); }
+.badge.error { color: var(--bad); background: rgba(255, 122, 144, 0.12); }
+.badge.resolving { color: var(--text-dim); background: rgba(154, 166, 192, 0.12); }
