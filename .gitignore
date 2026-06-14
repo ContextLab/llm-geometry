@@ -139,3 +139,9 @@ dmypy.json
 *.fff
 *.synctex.gz
 *.bbl
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# oh-my-claudecode local state
+.omc/

@@ -1,4 +1,2 @@
 The notebooks folder contains code for replicating the analyses and figures
-reported in the paper:
-
-1. `demo.ipynb`: code for generating Figure 1
+reported in the paper. One notebook per figure will be added here.

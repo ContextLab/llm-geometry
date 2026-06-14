@@ -1,0 +1,74 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this project is
+
+`llm-geometry` studies LLMs through **geometric visualizations**. The deliverable described in `project_description.md` is a set of **interactive web pages** with smooth animations and responsive interactions that make the geometry of a transformer's embedding space explorable. The aesthetic bar is explicit: modern, striking, beautiful, clean, intuitive, and thoroughly documented. Anything expensive is **precomputed once and cached**, with an animated progress indicator while it runs.
+
+Read `project_description.md` in full before designing anything — it is the source of truth for the science and the UX, and the snippets below only summarize it.
+
+### The three visualizations (core architecture)
+1. **Transformer layers as vector fields** — Reduce embeddings to 2D (UMAP/PCA), lay an *n×n* grid over the space, snap each grid vertex to its nearest token ("reference points"), then draw a quiver arrow from each reference token to the next token it predicts. Interactions: hover to reveal tokens, a layer slider, an editable prompt/context prefix, response shown as a colored trajectory, a temperature slider (>0 fans out into multiple semi-transparent vectors estimated over ~100 reps), and a model selector (incl. arbitrary open-weights HF models).
+2. **Token sequences as Sankey diagrams** — A particle swarm estimates the next-token distribution at each position. X = sequence position, Y = token ID. Start from a prompt, sample *n* particles from the position-0 distribution, advance each particle by conditioning on its own draw, combine per-particle distributions into the displayed distribution, and stop a particle once it emits end-of-stream. Same interaction palette (hover, context prefix, temperature, model selector).
+3. **Reachable "thoughts" as a manifold** — Reduce embeddings to 3D spherical coordinates (spherical MDS). Place all tokens on a radius-2 sphere and morph a unit sphere toward them, with displacement proportional to emission probability and neighbors dragged along via **RBF interpolation + Open3D `deform_as_rigid_as_possible` (ARAP)**. The order-invariance of combining per-token warps is an **open research question** flagged in the description — do not assume it is solved.
+
+### Hard technical constraints
+- Token-level probability distributions are required, so the models must be **open-weights** (HuggingFace), not closed APIs.
+- Reductions and per-grid/per-token computations are heavy → design around a **precompute-and-cache** pipeline from the start, not as an afterthought.
+
+## Current state — read before assuming code exists
+
+This repo was generated from the **ContextLab `latex-template`** (see `README.md`). The web visualization framework **does not exist yet**; building it is the first task. What is currently present is template scaffolding:
+- `paper/main.tex` is the boilerplate "Template paper" whose only figure is a sin/cos demo.
+- `code/notebooks/demo.ipynb` only generates that trig demo figure.
+- `.specify/memory/constitution.md` is still unfilled placeholder text (`[PRINCIPLE_1_NAME]`, etc.).
+
+When you add the framework, expect to also replace/extend the paper, notebooks, and data scaffolding rather than treat them as fixed.
+
+## How work happens here: Spec-Driven Development (Spec Kit)
+
+This project is initialized with **Spec Kit** (`.specify/`, integration = `claude`). Features are built through a spec → plan → tasks → implement pipeline, exposed as `speckit-*` skills (and `/speckit.*` slash commands). Use them rather than free-styling large features:
+
+| Stage | Skill | Purpose |
+|-|-|-|
+| Constitution | `speckit-constitution` | Fill the project principles (currently template placeholders) |
+| Specify | `speckit-specify` | Create `specs/NNN-<slug>/spec.md` from a feature description |
+| Clarify | `speckit-clarify` | Resolve underspecified areas before planning |
+| Plan | `speckit-plan` | Produce `plan.md` (+ research/data-model/quickstart) |
+| Tasks | `speckit-tasks` | Generate dependency-ordered `tasks.md` |
+| Analyze | `speckit-analyze` | Cross-check spec/plan/tasks consistency |
+| Implement | `speckit-implement` | Execute the tasks |
+
+- New features live under `specs/NNN-<slug>/` (created by `.specify/scripts/bash/create-new-feature.sh`; the active feature is tracked in `.specify/feature.json`). The `specs/` directory does not exist until the first feature is specified.
+- The `<!-- SPECKIT START/END -->` block at the bottom of this file is **auto-managed** by the `speckit-agent-context-update` extension (config: `.specify/extensions/agent-context/agent-context-config.yml`). It is rewritten to point at the active plan — leave its contents to the tooling; edit only the human-authored sections above it.
+
+## Repository layout
+
+- `code/notebooks/` — Jupyter notebooks, one per paper figure (`demo.ipynb` = Figure 1).
+- `data/raw/`, `data/processed/` — inputs before/after processing.
+- `paper/` — LaTeX sources (`main.tex`, `supplement.tex`), `figs/` (final PDFs) and `figs/source/` (panel sources — `trig.pdf` links to `source/sin.pdf`/`cos.pdf` and is meant to be re-linked in Illustrator), `admin/` (cover letters, forms), and the `CDL-bibliography` git submodule.
+
+## Commands
+
+```bash
+# One-time setup: pull the CDL-bibliography submodule
+sh setup.sh
+
+# Reproducible environment (conda-based, defined in Dockerfile)
+docker build -t cdl .
+docker run -it -p 9999:9999 --name cdl -v $PWD:/mnt cdl     # maps repo to /mnt, exposes port 9999
+docker start --attach cdl                                    # restart later
+# inside the container:
+jupyter notebook --port=9999 --no-browser --ip=0.0.0.0 --allow-root   # → localhost:9999
+
+# Build the paper (run from paper/; needs a LaTeX toolchain)
+cd paper && sh compile.sh      # main.{tex→pdf} + supplement, then cleans aux files
+```
+
+Note: the existing `Dockerfile` pins an old scientific-Python stack (Python 3.7, conda). The visualization framework will need its own dependency setup (open-weights model inference, dimensionality reduction, Open3D, a web stack) — extend the environment deliberately and keep `Dockerfile`/requirements in sync with what the code actually imports.
+
+<!-- SPECKIT START -->
+For additional context about technologies to be used, project structure,
+shell commands, and other important information, read the current plan
+<!-- SPECKIT END -->
