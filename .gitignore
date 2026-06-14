@@ -145,3 +145,12 @@ dmypy.json
 
 # oh-my-claudecode local state
 .omc/
+
+# llm-geometry: derived precompute cache (regenerable from model+params) and JS deps/build
+data/processed/cache/
+node_modules/
+code/frontend/node_modules/
+code/frontend/dist/
+code/frontend/test-results/
+code/frontend/playwright-report/
+code/frontend/tests/e2e/__screenshots__/*.tmp.png

@@ -17,14 +17,24 @@ Read `project_description.md` in full before designing anything — it is the so
 - Token-level probability distributions are required, so the models must be **open-weights** (HuggingFace), not closed APIs.
 - Reductions and per-grid/per-token computations are heavy → design around a **precompute-and-cache** pipeline from the start, not as an afterthought.
 
-## Current state — read before assuming code exists
+## Current state
 
-This repo was generated from the **ContextLab `latex-template`** (see `README.md`). The web visualization framework **does not exist yet**; building it is the first task. What is currently present is template scaffolding:
-- `paper/main.tex` is the boilerplate "Template paper" whose only figure is a sin/cos demo.
+The **core machinery** (feature `001-core-machinery`) is implemented and verified with
+real models — the shared foundation all three visualizations will run on:
+- `code/backend/` — Python package `llm_geometry`: open-weights model loading +
+  capability detection (`models/`), real next-token distributions + per-layer embeddings
+  (`compute/`), 2D/grid/3D-spherical reductions (`reduce/`), integrity-checked
+  precompute-and-cache (`cache/`), single-flight job registry (`jobs/`), and a FastAPI
+  service with SSE progress (`api/`). Real-model tests in `code/backend/tests/`.
+- `code/frontend/` — Svelte + TypeScript + Vite shell: shared controls (model selector,
+  prompt prefix, temperature, layer), a cached-data client (`lib/dataClient.ts`), and a
+  minimal live preview. Vitest unit + Playwright e2e tests.
+- The three production visualizations are **not built yet** — they are separate upcoming
+  features that consume this machinery.
+
+Still template scaffolding (to be replaced/extended as the science lands):
+- `paper/main.tex` is the boilerplate "Template paper" (sin/cos demo figure).
 - `code/notebooks/demo.ipynb` only generates that trig demo figure.
-- `.specify/memory/constitution.md` is still unfilled placeholder text (`[PRINCIPLE_1_NAME]`, etc.).
-
-When you add the framework, expect to also replace/extend the paper, notebooks, and data scaffolding rather than treat them as fixed.
 
 ## How work happens here: Spec-Driven Development (Spec Kit)
 
@@ -45,8 +55,10 @@ This project is initialized with **Spec Kit** (`.specify/`, integration = `claud
 
 ## Repository layout
 
+- `code/backend/` — Python package `llm_geometry` (`src/llm_geometry/{models,compute,reduce,cache,jobs,api}`) + `tests/{unit,integration,contract}`; `pyproject.toml`, `requirements.txt`, pinned `requirements.lock`.
+- `code/frontend/` — Svelte + TS + Vite app (`src/{controls,lib,preview,styles}`) + `tests/{unit,e2e}`.
 - `code/notebooks/` — Jupyter notebooks, one per paper figure (`demo.ipynb` = Figure 1).
-- `data/raw/`, `data/processed/` — inputs before/after processing.
+- `data/raw/`, `data/processed/` — inputs before/after processing; `data/processed/cache/` holds derived precompute artifacts (git-ignored, regenerable from model+params).
 - `paper/` — LaTeX sources (`main.tex`, `supplement.tex`), `figs/` (final PDFs) and `figs/source/` (panel sources — `trig.pdf` links to `source/sin.pdf`/`cos.pdf` and is meant to be re-linked in Illustrator), `admin/` (cover letters, forms), and the `CDL-bibliography` git submodule.
 
 ## Commands
@@ -55,20 +67,36 @@ This project is initialized with **Spec Kit** (`.specify/`, integration = `claud
 # One-time setup: pull the CDL-bibliography submodule
 sh setup.sh
 
-# Reproducible environment (conda-based, defined in Dockerfile)
-docker build -t cdl .
-docker run -it -p 9999:9999 --name cdl -v $PWD:/mnt cdl     # maps repo to /mnt, exposes port 9999
-docker start --attach cdl                                    # restart later
-# inside the container:
-jupyter notebook --port=9999 --no-browser --ip=0.0.0.0 --allow-root   # → localhost:9999
+# Backend (FastAPI + PyTorch/transformers + reductions)
+cd code/backend && python -m venv .venv && . .venv/bin/activate && pip install -e ".[test]"
+uvicorn llm_geometry.api.app:app --port 8000          # JSON API on :8000
+pytest -q                                             # real-model tests (no mocks)
+
+# Frontend (Svelte + Vite)
+cd code/frontend && npm install
+npm run dev                                           # http://localhost:5173 (proxies /api)
+npm run check && npm run test                         # svelte-check + vitest
+npx playwright install chromium && npm run test:e2e   # e2e + screenshots
+
+# Reproducible dual-stack container (Python 3.11 + Node 20)
+docker build -t llm-geometry . && docker run -it -p 8000:8000 llm-geometry
 
 # Build the paper (run from paper/; needs a LaTeX toolchain)
 cd paper && sh compile.sh      # main.{tex→pdf} + supplement, then cleans aux files
 ```
 
+Note: `data/processed/cache/` holds derived precompute artifacts — git-ignored and
+regenerable from `(model + params)`; delete it freely to force a rebuild.
+
 Note: the existing `Dockerfile` pins an old scientific-Python stack (Python 3.7, conda). The visualization framework will need its own dependency setup (open-weights model inference, dimensionality reduction, Open3D, a web stack) — extend the environment deliberately and keep `Dockerfile`/requirements in sync with what the code actually imports.
 
 <!-- SPECKIT START -->
-For additional context about technologies to be used, project structure,
-shell commands, and other important information, read the current plan
+Active feature: **001-core-machinery** — Core Project Machinery (the shared
+backend+frontend foundation all three visualizations run on). For technologies,
+project structure, and commands, read the current plan and its artifacts:
+- Plan: `specs/001-core-machinery/plan.md`
+- Spec: `specs/001-core-machinery/spec.md`
+- Research / data model / API contract / quickstart:
+  `specs/001-core-machinery/{research.md,data-model.md,contracts/api.md,quickstart.md}`
+- Tasks: `specs/001-core-machinery/tasks.md`
 <!-- SPECKIT END -->
