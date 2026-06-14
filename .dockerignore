@@ -1,0 +1,22 @@
+# Keep the Docker build context small + reproducible: exclude local envs, deps,
+# derived artifacts, VCS, and paper/agent scaffolding the image doesn't need.
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.pyc
+**/*.egg-info/
+code/backend/.pytest_cache/
+data/processed/cache/
+**/node_modules/
+code/frontend/dist/
+code/frontend/test-results/
+code/frontend/playwright-report/
+code/frontend/tests/e2e/__screenshots__/
+.git/
+.github/
+paper/
+.specify/
+.claude/
+.omc/
+*.log
+.DS_Store
