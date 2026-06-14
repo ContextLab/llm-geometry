@@ -71,6 +71,17 @@
     }
   }
 
+  function robustDomain(values: number[]): [number, number] {
+    const sorted = [...values].sort((a, b) => a - b);
+    let lo = d3.quantileSorted(sorted, 0.02) ?? sorted[0];
+    let hi = d3.quantileSorted(sorted, 0.98) ?? sorted[sorted.length - 1];
+    if (hi <= lo) {
+      lo -= 1;
+      hi += 1;
+    }
+    return [lo, hi];
+  }
+
   function drawScatter() {
     if (!scatterEl || !red) return;
     const w = scatterEl.clientWidth || 520;
@@ -80,8 +91,10 @@
     if (!red.coords.length) return;
     const xs = red.coords.map((c) => c[0]);
     const ys = red.coords.map((c) => c[1]);
-    const x = d3.scaleLinear().domain(d3.extent(xs) as [number, number]).range([24, w - 24]);
-    const y = d3.scaleLinear().domain(d3.extent(ys) as [number, number]).range([h - 24, 24]);
+    // Robust (2nd–98th percentile) axes so a few extreme-norm outlier tokens don't
+    // compress the bulk of points into a single dot; outliers clamp to the edges.
+    const x = d3.scaleLinear().domain(robustDomain(xs)).range([28, w - 28]).clamp(true);
+    const y = d3.scaleLinear().domain(robustDomain(ys)).range([h - 28, 28]).clamp(true);
     svg
       .append("g")
       .selectAll("circle")
@@ -91,16 +104,24 @@
       .attr("cy", (d) => y(d[1]))
       .attr("r", 0)
       .attr("fill", "#6ea8fe")
-      .attr("opacity", 0.5)
+      .attr("stroke", "#b794f6")
+      .attr("stroke-width", 0.5)
+      .attr("opacity", 0.7)
       .transition()
       .duration(400)
-      .attr("r", 2.6);
+      .attr("r", 3.2);
   }
 
   const maxProb = $derived(dist?.top?.length ? Math.max(...dist.top.map((t) => t.prob)) : 1);
   function showToken(s: string): string {
     if (s === "") return "∅";
     return s.replace(/\n/g, "⏎").replace(/ /g, "␣");
+  }
+  function fmtPct(p: number): string {
+    const pct = p * 100;
+    if (pct >= 0.1) return pct.toFixed(1) + "%";
+    if (pct > 0) return pct.toFixed(3) + "%";
+    return "0%";
   }
 </script>
 
@@ -130,7 +151,7 @@
             <li>
               <span class="tok" title={t.token_str}>{showToken(t.token_str)}</span>
               <span class="track"><span class="fill" style="width: {(t.prob / maxProb) * 100}%"></span></span>
-              <span class="pct">{(t.prob * 100).toFixed(1)}%</span>
+              <span class="pct">{fmtPct(t.prob)}</span>
             </li>
           {/each}
         </ul>

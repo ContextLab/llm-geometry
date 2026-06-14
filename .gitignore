@@ -153,4 +153,4 @@ code/frontend/node_modules/
 code/frontend/dist/
 code/frontend/test-results/
 code/frontend/playwright-report/
-code/frontend/tests/e2e/__screenshots__/*.tmp.png
+code/frontend/tests/e2e/__screenshots__/

@@ -23,6 +23,16 @@ test("shell renders with shared controls and the preview", async ({ page }) => {
   await expect(page.getByTestId("layer-input")).toBeVisible();
 });
 
+test("default model (gpt2) renders a real distribution and embedding scatter", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("model-status")).toHaveText("ok");
+  // First load may download/load gpt2 then compute — generous timeout.
+  await expect(page.getByTestId("dist-bars")).toBeVisible({ timeout: 200_000 });
+  await expect(page.locator('[data-testid="scatter"] circle').first()).toBeVisible({ timeout: 200_000 });
+  await expect(page.getByTestId("updated")).toBeVisible({ timeout: 200_000 });
+  await page.screenshot({ path: "tests/e2e/__screenshots__/shell-gpt2.png", fullPage: true });
+});
+
 test("controls drive real cached data into the preview", async ({ page }) => {
   await page.goto("/");
 
