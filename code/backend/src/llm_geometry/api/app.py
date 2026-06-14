@@ -32,6 +32,15 @@ def create_app() -> FastAPI:
     async def _handle_llm_error(_request: Request, exc: LLMGeometryError) -> JSONResponse:
         return JSONResponse(status_code=exc.http_status, content=exc.to_envelope())
 
+    @app.exception_handler(Exception)
+    async def _handle_unexpected(_request: Request, exc: Exception) -> JSONResponse:
+        # Any non-typed failure still returns the contract error envelope with the real
+        # message (never a fabricated result, never a bare traceback) — FR-021.
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"type": "InternalError", "message": str(exc), "detail": {}}},
+        )
+
     app.include_router(router, prefix="/api")
 
     # Serve the built frontend if present (production). Mounted last so /api wins.
