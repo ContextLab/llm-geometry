@@ -1,0 +1,5 @@
+# Pinned at install time via `pip install -e .[test]`; see pyproject.toml for the
+# canonical dependency spec. This file is the convenience entrypoint used by the
+# Dockerfile and quickstart. Exact resolved versions are frozen in requirements.lock
+# after a successful install (Constitution V — reproducible environments).
+-e .[test]
