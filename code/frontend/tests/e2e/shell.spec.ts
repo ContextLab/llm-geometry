@@ -45,14 +45,14 @@ test("controls drive real cached data into the preview", async ({ page }) => {
   await expect(page.getByTestId("dist-bars")).toBeVisible();
   await expect(page.locator('[data-testid="scatter"] circle').first()).toBeVisible();
 
-  // Changing the layer triggers a recompute -> the "updated" stamp changes.
-  await expect(page.getByTestId("updated")).toBeVisible();
-  const before = await page.getByTestId("updated").textContent();
+  // Changing the layer triggers a recompute -> the preview's render counter increments
+  // (a deterministic signal, unlike the 1s-resolution timestamp).
+  const rendersBefore = Number(await page.getByTestId("preview").getAttribute("data-renders"));
   await setRange(page, "layer-input", "1");
   await expect(page.getByTestId("layer-value")).toHaveText("1");
   await expect
-    .poll(async () => page.getByTestId("updated").textContent(), { timeout: 120_000 })
-    .not.toBe(before);
+    .poll(async () => Number(await page.getByTestId("preview").getAttribute("data-renders")), { timeout: 120_000 })
+    .toBeGreaterThan(rendersBefore);
 
   // Changing temperature is reflected in the control + refetches the distribution.
   await setRange(page, "temp-input", "0.10");

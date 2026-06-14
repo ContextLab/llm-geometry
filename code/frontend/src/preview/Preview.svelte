@@ -15,6 +15,7 @@
   let dist = $state<Distribution | null>(null);
   let red = $state<Reduction2D | null>(null);
   let lastUpdated = $state("");
+  let renders = $state(0); // monotonic count of successful loads (stable test signal)
 
   let scatterEl: SVGSVGElement | undefined;
   const REF = 256; // embedding reference-set size for the preview (snappy, cached)
@@ -64,6 +65,7 @@
       if (myRun !== runId) return;
       drawScatter();
       lastUpdated = new Date().toLocaleTimeString();
+      renders += 1;
     } catch (e: any) {
       if (myRun === runId) error = `${e.type ?? "Error"}: ${e.message ?? e}`;
     } finally {
@@ -125,7 +127,7 @@
   }
 </script>
 
-<section class="preview panel" data-testid="preview">
+<section class="preview panel" data-testid="preview" data-renders={renders}>
   <header class="phead">
     <div>
       <h2>Live preview</h2>
