@@ -26,6 +26,19 @@ def test_pca_2d_with_grid():
     assert set(refs.tolist()).issubset(token_ids)
 
 
+def test_umap_2d_reduction_real():
+    """The UMAP option (FR-010) really runs and is reproducible with a fixed seed."""
+    params = {"method": "umap", "reference_set_size": 150, "seed": 0}
+    key = precompute.cache_key_for("reduction_2d", MODEL, params)
+    precompute.get_store().delete(key)
+    coords = get_or_compute_sync("reduction_2d", MODEL, params)["arrays"]["coords"]
+    assert coords.shape == (150, 2)
+    assert np.isfinite(coords).all()
+    precompute.get_store().delete(key)
+    coords2 = get_or_compute_sync("reduction_2d", MODEL, params)["arrays"]["coords"]
+    assert np.array_equal(coords, coords2)  # seeded UMAP is deterministic (FR-013)
+
+
 def test_reduction_2d_reproducible_with_seed():
     params = {"method": "pca", "reference_set_size": REF, "seed": 0}
     key = precompute.cache_key_for("reduction_2d", MODEL, params)

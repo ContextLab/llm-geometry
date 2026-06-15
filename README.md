@@ -65,7 +65,7 @@ docker run -it -p 8000:8000 llm-geometry              # serves API + built UI on
 All tests use **real** models (no mocks):
 
 ```bash
-cd code/backend && . .venv/bin/activate && pytest -q          # 36 tests, real tiny-gpt2/distilgpt2
+cd code/backend && . .venv/bin/activate && pytest -q          # 39 tests, real tiny-gpt2/distilgpt2
 cd code/frontend && npm run test                              # vitest unit tests
 cd code/frontend && npx playwright install chromium && npm run test:e2e   # e2e + screenshots
 ```

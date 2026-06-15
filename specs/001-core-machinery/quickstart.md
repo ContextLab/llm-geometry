@@ -114,9 +114,12 @@ Key automated checks:
 ## Expected outcomes (verified 2026-06-14 on the reference machine)
 
 - [x] V1–V4 pass; e2e screenshots saved under `code/frontend/tests/e2e/__screenshots__/`
-      (`shell.png`, `error.png`).
-- [x] Backend `pytest` green: **36 passed** with real models (`sshleifer/tiny-gpt2`,
-      `distilgpt2`). Frontend: **vitest 5 passed**, **Playwright e2e 3 passed**.
+      (`shell-gpt2.png`, `shell.png`, `error.png`).
+- [x] Backend `pytest` green: **39 passed** with real models (`sshleifer/tiny-gpt2`,
+      `distilgpt2`) — incl. SSE streaming, UMAP, and MDS paths. Frontend: **vitest 5
+      passed**, **Playwright e2e 4 passed**.
+- [x] Reproducibility verified in a fresh `conda`/`mamba` env from `environment.yml`
+      (Python 3.11 + Node 20): backend 39 passed + frontend `npm ci`/build/vitest green.
 - [x] **SC-001** cache-hit latency: mean **0.30 ms**, p95 **0.36 ms** (budget < 100 ms).
 - [x] **SC-003** first-time precompute (gpt2, 256 contextual embeddings → 2D): **1.5 s**
       (budget ≤ 180 s), with SSE progress emitted ≥ 1/s.
