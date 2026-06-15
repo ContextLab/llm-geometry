@@ -83,3 +83,5 @@ def test_manifold_warped_sphere():
     assert np.allclose(token_radii, 2.0, atol=1e-3)
     assert a["token_points"].shape == (150, 3)
     assert len(m["top_tokens"]) >= 1
+    # token strings align with token_points (used by the manifold raycast hover)
+    assert len(m["token_strs"]) == a["token_points"].shape[0]

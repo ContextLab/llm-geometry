@@ -130,6 +130,7 @@ def manifold(
             {"token_str": lm.tokenizer.decode([int(token_ids[i])]), "prob": float(emis[i])}
             for i in top_list
         ],
+        "token_strs": [lm.tokenizer.decode([int(t)]) for t in token_ids],  # aligned with token_points
     }
     arrays = {
         "vertices": final_verts.astype(np.float32),
