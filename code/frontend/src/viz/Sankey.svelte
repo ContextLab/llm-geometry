@@ -59,25 +59,31 @@
   function draw() {
     if (!svgEl || !data) return;
     const w = svgEl.clientWidth || 680;
-    const h = 480;
+    const h = 560;
+    const STRIP = 104; // top band for the per-position combined distribution
     const svg = d3.select(svgEl).attr("viewBox", `0 0 ${w} ${h}`);
     svg.selectAll("*").remove();
     const d = data;
+    const color = d3.scaleSequential(d3.interpolateCool).domain([0, d.n_steps]);
+    const label = (tok: number) => d.token_strs[String(tok)] ?? String(tok);
 
     const key = (pos: number, token: number) => `${pos}:${token}`;
     const indexOf = new Map<string, number>();
     const nodes = d.nodes.map((n, i) => {
       indexOf.set(key(n.pos, n.token), i);
-      return { name: d.token_strs[String(n.token)] ?? String(n.token), pos: n.pos };
+      return { name: label(n.token), pos: n.pos, token: n.token, count: n.count };
     });
     const links = d.links
       .map((l) => ({
         source: indexOf.get(key(l.pos, l.source_token)),
         target: indexOf.get(key(l.pos + 1, l.target_token)),
         value: l.value,
+        st: l.source_token,
+        tt: l.target_token,
       }))
-      .filter((l) => l.source !== undefined && l.target !== undefined) as
-      { source: number; target: number; value: number }[];
+      .filter((l) => l.source !== undefined && l.target !== undefined) as any[];
+
+    const xByPos = new Map<number, number>();
 
     if (!links.length) {
       svg
@@ -87,52 +93,115 @@
         .attr("fill", "var(--text-dim)")
         .attr("text-anchor", "middle")
         .text("Not enough transitions to draw flows — try a longer prompt or higher temperature.");
-      return;
+    } else {
+      const layout = d3sankey<any, any>()
+        .nodeWidth(14)
+        .nodePadding(9)
+        .extent([[8, STRIP + 12], [w - 8, h - 12]]);
+      const graph = layout({
+        nodes: nodes.map((n) => ({ ...n })),
+        links: links.map((l) => ({ ...l })),
+      });
+
+      svg
+        .append("g")
+        .attr("fill", "none")
+        .selectAll("path")
+        .data(graph.links)
+        .join("path")
+        .attr("d", sankeyLinkHorizontal())
+        .attr("stroke", (l: any) => color(l.source.pos))
+        .attr("stroke-width", (l: any) => Math.max(1, l.width))
+        .attr("stroke-opacity", 0.4)
+        .append("title")
+        .text((l: any) => `${label(l.st)} → ${label(l.tt)}  ×${l.value}`);
+
+      const node = svg.append("g").selectAll("g").data(graph.nodes).join("g");
+      node
+        .append("rect")
+        .attr("x", (n: any) => n.x0)
+        .attr("y", (n: any) => n.y0)
+        .attr("width", (n: any) => n.x1 - n.x0)
+        .attr("height", (n: any) => Math.max(1, n.y1 - n.y0))
+        .attr("fill", (n: any) => color(n.pos))
+        .attr("rx", 2)
+        .append("title")
+        .text((n: any) => `position ${n.pos}: ${n.name}  (${n.count} particles)`);
+      node
+        .append("text")
+        .attr("x", (n: any) => (n.x0 < w / 2 ? n.x1 + 5 : n.x0 - 5))
+        .attr("y", (n: any) => (n.y0 + n.y1) / 2)
+        .attr("dy", "0.35em")
+        .attr("text-anchor", (n: any) => (n.x0 < w / 2 ? "start" : "end"))
+        .attr("fill", "#cdd6ec")
+        .attr("font-size", "10px")
+        .attr("font-family", "var(--mono)")
+        .text((n: any) => n.name)
+        .filter((n: any) => n.y1 - n.y0 < 9)
+        .remove();
+
+      graph.nodes.forEach((n: any) => {
+        if (!xByPos.has(n.pos)) xByPos.set(n.pos, (n.x0 + n.x1) / 2);
+      });
     }
 
-    const layout = d3sankey<any, any>()
-      .nodeWidth(14)
-      .nodePadding(9)
-      .extent([[8, 12], [w - 8, h - 12]]);
-    const graph = layout({
-      nodes: nodes.map((n) => ({ ...n })),
-      links: links.map((l) => ({ ...l })),
-    });
-
-    const color = d3.scaleSequential(d3.interpolateCool).domain([0, N_STEPS]);
-
-    svg
-      .append("g")
-      .attr("fill", "none")
-      .selectAll("path")
-      .data(graph.links)
-      .join("path")
-      .attr("d", sankeyLinkHorizontal())
-      .attr("stroke", (l: any) => color(l.source.pos))
-      .attr("stroke-width", (l: any) => Math.max(1, l.width))
-      .attr("stroke-opacity", 0.4);
-
-    const node = svg.append("g").selectAll("g").data(graph.nodes).join("g");
-    node
-      .append("rect")
-      .attr("x", (n: any) => n.x0)
-      .attr("y", (n: any) => n.y0)
-      .attr("width", (n: any) => n.x1 - n.x0)
-      .attr("height", (n: any) => Math.max(1, n.y1 - n.y0))
-      .attr("fill", (n: any) => color(n.pos))
-      .attr("rx", 2);
-    node
-      .append("text")
-      .attr("x", (n: any) => (n.x0 < w / 2 ? n.x1 + 5 : n.x0 - 5))
-      .attr("y", (n: any) => (n.y0 + n.y1) / 2)
-      .attr("dy", "0.35em")
-      .attr("text-anchor", (n: any) => (n.x0 < w / 2 ? "start" : "end"))
-      .attr("fill", "#cdd6ec")
-      .attr("font-size", "10px")
-      .attr("font-family", "var(--mono)")
-      .text((n: any) => n.name)
-      .filter((n: any) => n.y1 - n.y0 < 9)
-      .remove();
+    // Per-position combined next-token distribution (violin-style stacked bars) on top.
+    const pp = d.per_position ?? [];
+    if (pp.length) {
+      const positions = pp.map((e) => e.pos);
+      if (xByPos.size === 0) {
+        positions.forEach((p, i) => xByPos.set(p, 24 + (i + 0.5) * ((w - 48) / positions.length)));
+      }
+      const colW =
+        positions.length > 1
+          ? Math.abs(
+              (xByPos.get(positions[positions.length - 1])! - xByPos.get(positions[0])!) /
+                (positions.length - 1),
+            )
+          : w / 2;
+      const barMax = Math.max(24, colW * 0.82);
+      const rowH = 16;
+      const strip = svg.append("g");
+      strip
+        .append("text")
+        .attr("x", 8)
+        .attr("y", 12)
+        .attr("fill", "var(--text-dim)")
+        .attr("font-size", "11px")
+        .text("combined next-token distribution per position");
+      pp.forEach((entry) => {
+        const cx = xByPos.get(entry.pos);
+        if (cx === undefined) return;
+        const top = entry.top.slice(0, 5);
+        const maxp = Math.max(...top.map((t) => t.prob), 1e-6);
+        top.forEach((t, i) => {
+          const bw = (t.prob / maxp) * barMax;
+          const y = 24 + i * rowH;
+          strip
+            .append("rect")
+            .attr("x", cx - bw / 2)
+            .attr("y", y)
+            .attr("width", bw)
+            .attr("height", rowH - 4)
+            .attr("rx", 2)
+            .attr("fill", color(entry.pos))
+            .attr("opacity", 0.85)
+            .append("title")
+            .text(`position ${entry.pos}: ${label(t.token)}  ${(t.prob * 100).toFixed(1)}%`);
+          if (i === 0) {
+            strip
+              .append("text")
+              .attr("x", cx)
+              .attr("y", y - 2)
+              .attr("text-anchor", "middle")
+              .attr("fill", "#cdd6ec")
+              .attr("font-size", "9px")
+              .attr("font-family", "var(--mono)")
+              .text(label(t.token).slice(0, 9));
+          }
+        });
+      });
+    }
   }
 </script>
 
@@ -145,8 +214,8 @@
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}
   {#if error}<div class="error" data-testid="viz-sankey-error">{error}</div>{/if}
-  <svg bind:this={svgEl} class="canvas" height="480" data-testid="sankey-svg"></svg>
-  {#if data}<p class="caption">{data.nodes.length} nodes · {data.links.length} transitions · {N_PARTICLES} particles</p>{/if}
+  <svg bind:this={svgEl} class="canvas" height="560" data-testid="sankey-svg"></svg>
+  {#if data}<p class="caption">top: combined distribution per position · below: {data.nodes.length} nodes · {data.links.length} transitions · {N_PARTICLES} particles</p>{/if}
 </section>
 
 <style>

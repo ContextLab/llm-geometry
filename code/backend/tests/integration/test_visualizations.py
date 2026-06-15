@@ -48,6 +48,13 @@ def test_sankey_swarm():
     pos0 = sum(n["count"] for n in m["nodes"] if n["pos"] == 0)
     assert 1 <= pos0 <= 10  # particles seeded at position 0
     assert all(str(n["token"]) in m["token_strs"] for n in m["nodes"])
+    # combined next-token distribution recorded per position (FR §2)
+    assert len(m["per_position"]) >= 1
+    for entry in m["per_position"]:
+        assert 0 <= entry["pos"] < 5
+        assert len(entry["top"]) >= 1
+        assert all(0.0 <= t["prob"] <= 1.0 for t in entry["top"])
+        assert all(str(t["token"]) in m["token_strs"] for t in entry["top"])
 
 
 def test_sankey_reproducible_with_seed():

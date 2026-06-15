@@ -96,6 +96,7 @@ export interface SankeyData {
   nodes: SankeyNode[];
   links: SankeyLink[];
   token_strs: Record<string, string>;
+  per_position: { pos: number; top: { token: number; prob: number }[] }[];
 }
 
 export interface ManifoldData {

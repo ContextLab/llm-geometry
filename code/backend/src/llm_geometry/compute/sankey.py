@@ -53,6 +53,9 @@ def sankey(
     prev_tok = [None] * n_particles
     node_count: dict[tuple[int, int], int] = defaultdict(int)
     link_count: dict[tuple[int, int, int], int] = defaultdict(int)
+    per_position: list[dict] = []  # combined next-token distribution per position (FR §2)
+    dist_tokens: set[int] = set()
+    distribution_k = 10
 
     for step in range(n_steps):
         idxs = [i for i in range(n_particles) if alive[i]]
@@ -62,6 +65,17 @@ def sankey(
         with torch.no_grad():
             logits = lm.model(input_ids=ids).logits[:, -1, :].float()
         probs = torch.softmax(logits / t, dim=-1)
+
+        # Combine across particles -> the full distribution displayed at this position.
+        combined = probs.mean(dim=0)
+        kk = min(distribution_k, int(combined.shape[0]))
+        dv, di = torch.topk(combined, k=kk)
+        per_position.append({
+            "pos": step,
+            "top": [{"token": int(di[q]), "prob": round(float(dv[q]), 5)} for q in range(kk)],
+        })
+        dist_tokens.update(int(di[q]) for q in range(kk))
+
         draws = torch.multinomial(probs, num_samples=1, generator=gen).squeeze(-1)
         for j, i in enumerate(idxs):
             tok = int(draws[j].item())
@@ -75,7 +89,7 @@ def sankey(
         if progress_cb:
             progress_cb((step + 1) / n_steps, f"swarm step {step + 1}/{n_steps}")
 
-    tokens_seen = {tok for (_, tok) in node_count}
+    tokens_seen = {tok for (_, tok) in node_count} | dist_tokens
     token_strs = {str(tok): lm.tokenizer.decode([tok]) for tok in tokens_seen}
     nodes = [
         {"pos": p, "token": tok, "count": c}
@@ -90,6 +104,7 @@ def sankey(
         "model_id": lm.model_id, "revision": lm.revision, "prefix_text": prefix_text or "",
         "temperature": float(temperature), "n_particles": n_particles, "n_steps": n_steps,
         "token_strs": token_strs, "nodes": nodes, "links": links,
+        "per_position": per_position,
     }
     # one real array so the npz payload is non-empty
     arrays = {"node_counts": np.array([n["count"] for n in nodes] or [0], dtype=np.int64)}
