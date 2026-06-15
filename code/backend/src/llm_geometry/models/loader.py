@@ -139,7 +139,12 @@ def load_model(model_id: str) -> LoadedModel:
 
         try:
             tokenizer = AutoTokenizer.from_pretrained(mid)
-            model = AutoModelForCausalLM.from_pretrained(mid, output_hidden_states=True)
+            # Force float32: many models (e.g. Qwen) default to bfloat16, which (a) has no
+            # numpy bridge and (b) is not faster on CPU; float32 keeps embeddings/logits
+            # exact and convertible everywhere.
+            model = AutoModelForCausalLM.from_pretrained(
+                mid, output_hidden_states=True, torch_dtype=torch.float32
+            )
         except Exception as exc:  # download failure/partial, gated, OOM, etc.
             raise UnsupportedModelError(
                 f"Failed to load model '{mid}': {exc}. The download may have failed or "

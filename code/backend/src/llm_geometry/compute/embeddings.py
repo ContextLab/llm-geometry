@@ -27,9 +27,16 @@ ProgressCb = Callable[[float, str], None]
 
 
 def reference_token_ids(lm: LoadedModel, reference_set_size: int | None) -> np.ndarray:
-    """Deterministic reference set: the first N token ids (N = size or full vocab)."""
-    n = lm.vocab_size if reference_set_size is None else min(int(reference_set_size), lm.vocab_size)
-    return np.arange(n, dtype=np.int64)
+    """Deterministic, representative reference set.
+
+    The first-N token ids are mostly byte/special tokens and are unrepresentative, so we
+    take N ids evenly spaced across the whole vocabulary instead (or the full vocab when
+    no size is given). Deterministic -> reproducible cache (FR-013)."""
+    vocab = lm.vocab_size
+    if reference_set_size is None or int(reference_set_size) >= vocab:
+        return np.arange(vocab, dtype=np.int64)
+    n = int(reference_set_size)
+    return np.unique(np.linspace(0, vocab - 1, n).astype(np.int64))
 
 
 def _contextual_embeddings(
@@ -65,7 +72,7 @@ def per_layer_embeddings(
     token_ids = reference_token_ids(lm, reference_set_size)
 
     if source == "static":
-        weight = lm.model.get_input_embeddings().weight.detach().cpu().numpy().astype(np.float32)
+        weight = lm.model.get_input_embeddings().weight.detach().float().cpu().numpy().astype(np.float32)
         vectors = weight[token_ids]
         if progress_cb is not None:
             progress_cb(1.0, f"static embeddings for {token_ids.shape[0]} tokens")

@@ -15,6 +15,17 @@ def test_unknown_model_raises_and_creates_no_artifact():
     # and crucially no fallback model was substituted (SC-007).
 
 
+def test_model_loads_as_float32():
+    """Models load in float32 so embeddings/logits convert to numpy everywhere
+    (regression: Qwen defaults to bfloat16, which has no numpy bridge)."""
+    import torch
+
+    from llm_geometry.models.loader import load_model
+
+    lm = load_model("sshleifer/tiny-gpt2")
+    assert next(lm.model.parameters()).dtype == torch.float32
+
+
 def test_non_causal_model_is_rejected():
     # BERT is a masked-LM encoder, not a causal LM exposing next-token probabilities.
     with pytest.raises(UnsupportedModelError):

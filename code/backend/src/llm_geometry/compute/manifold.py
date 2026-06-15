@@ -77,7 +77,7 @@ def manifold(
 
     lm = load_model(model_id)
     token_ids = reference_token_ids(lm, reference_set_size)
-    matrix = lm.model.get_input_embeddings().weight.detach().cpu().numpy().astype(np.float64)
+    matrix = lm.model.get_input_embeddings().weight.detach().float().cpu().numpy().astype(np.float64)
     emb = matrix[token_ids]
 
     from ..reduce.sphere import reduce_3d_sphere
