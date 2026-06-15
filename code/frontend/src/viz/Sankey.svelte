@@ -1,8 +1,9 @@
 <script lang="ts">
   import * as d3 from "d3";
   import { sankey as d3sankey, sankeyLinkHorizontal } from "d3-sankey";
-  import { modelId, prefixText, temperature } from "../lib/stores";
+  import { modelId, prefixText, temperature, responseText, responseStep } from "../lib/stores";
   import { client, type SankeyData } from "../lib/dataClient";
+  import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
 
   // Visualization 2 — particle-swarm next-token sampling across positions, as a Sankey
@@ -24,14 +25,16 @@
     const m = $modelId;
     const pfx = $prefixText;
     const temp = $temperature;
+    const resp = $responseText;
+    const step = $responseStep;
     if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => void load(m, pfx, temp), 350);
+    debounce = setTimeout(() => void load(m, pfx, temp, resp, step), 350);
     return () => {
       if (debounce) clearTimeout(debounce);
     };
   });
 
-  async function load(m: string, pfx: string, temp: number) {
+  async function load(m: string, pfx: string, temp: number, resp: string, step: number) {
     const my = ++runId;
     error = "";
     loading = true;
@@ -39,14 +42,15 @@
     progressMsg = "starting…";
     try {
       const params = { temperature: temp, n_particles: N_PARTICLES, n_steps: N_STEPS, seed: SEED };
-      await client.ensureArtifact("sankey", m, params, { prefix_text: pfx }, (p, msg) => {
+      const inputs = { prefix_text: pfx, response_text: resp, response_step: step };
+      await client.ensureArtifact("sankey", m, params, inputs, (p, msg) => {
         if (my === runId) {
           progress = p;
           progressMsg = msg;
         }
       });
       if (my !== runId) return;
-      data = await client.getSankey(m, { prefix_text: pfx, ...params });
+      data = await client.getSankey(m, { prefix_text: pfx, response_text: resp, response_step: step, ...params });
       if (my !== runId) return;
       draw();
     } catch (e: any) {
@@ -113,8 +117,8 @@
         .attr("stroke", (l: any) => color(l.source.pos))
         .attr("stroke-width", (l: any) => Math.max(1, l.width))
         .attr("stroke-opacity", 0.4)
-        .append("title")
-        .text((l: any) => `${label(l.st)} → ${label(l.tt)}  ×${l.value}`);
+        .on("mousemove", (event, l: any) => showTip(event, `${label(l.st)} → ${label(l.tt)}   ${l.value} particles`))
+        .on("mouseleave", hideTip);
 
       const node = svg.append("g").selectAll("g").data(graph.nodes).join("g");
       node
@@ -125,8 +129,8 @@
         .attr("height", (n: any) => Math.max(1, n.y1 - n.y0))
         .attr("fill", (n: any) => color(n.pos))
         .attr("rx", 2)
-        .append("title")
-        .text((n: any) => `position ${n.pos}: ${n.name}  (${n.count} particles)`);
+        .on("mousemove", (event, n: any) => showTip(event, `position ${n.pos}: ${n.name}   ${n.count} particles`))
+        .on("mouseleave", hideTip);
       node
         .append("text")
         .attr("x", (n: any) => (n.x0 < w / 2 ? n.x1 + 5 : n.x0 - 5))
@@ -186,8 +190,8 @@
             .attr("rx", 2)
             .attr("fill", color(entry.pos))
             .attr("opacity", 0.85)
-            .append("title")
-            .text(`position ${entry.pos}: ${label(t.token)}  ${(t.prob * 100).toFixed(1)}%`);
+            .on("mousemove", (event) => showTip(event, `position ${entry.pos}: ${label(t.token)}   ${(t.prob * 100).toFixed(1)}%`))
+            .on("mouseleave", hideTip);
           if (i === 0) {
             strip
               .append("text")
@@ -209,7 +213,7 @@
   <header>
     <div>
       <h2>Token sequences as a Sankey diagram</h2>
-      <p class="sub">A particle swarm samples next tokens across positions; flow width = particle count.</p>
+      <p class="sub">A particle swarm samples next tokens across positions. <b>Top strip = the full combined distribution per position; flow width = particle count.</b> Hover any node or flow for its tokens.</p>
     </div>
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}

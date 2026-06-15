@@ -2,8 +2,9 @@
   import { onMount, onDestroy } from "svelte";
   import * as THREE from "three";
   import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-  import { modelId, prefixText, temperature } from "../lib/stores";
+  import { modelId, prefixText, temperature, responseText, responseStep } from "../lib/stores";
   import { client, type ManifoldData } from "../lib/dataClient";
+  import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
 
   // Visualization 3 — reachable "thoughts" as a sphere warped (RBF) toward likely next
@@ -65,6 +66,26 @@
     controls.enableDamping = true;
     controls.autoRotate = true;
     controls.autoRotateSpeed = 0.7;
+
+    // Interactive hover: raycast the token points to reveal the token under the cursor.
+    const raycaster = new THREE.Raycaster();
+    raycaster.params.Points = { threshold: 0.1 };
+    const ndc = new THREE.Vector2();
+    renderer.domElement.addEventListener("pointermove", (ev: PointerEvent) => {
+      if (!points || !camera || !renderer || !data) return;
+      const rect = renderer.domElement.getBoundingClientRect();
+      ndc.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+      ndc.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(ndc, camera);
+      const hits = raycaster.intersectObject(points);
+      if (hits.length && hits[0].index != null && data.token_strs) {
+        const i = hits[0].index;
+        showTip(ev, `${data.token_strs[i] ?? ""}   emission ${((data.token_emis?.[i] ?? 0) * 100).toFixed(1)}%`);
+      } else {
+        hideTip();
+      }
+    });
+    renderer.domElement.addEventListener("pointerleave", () => hideTip());
 
     const animate = () => {
       raf = requestAnimationFrame(animate);
@@ -153,14 +174,16 @@
     const m = $modelId;
     const pfx = $prefixText;
     const temp = $temperature;
+    const resp = $responseText;
+    const step = $responseStep;
     if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => void load(m, pfx, temp), 350);
+    debounce = setTimeout(() => void load(m, pfx, temp, resp, step), 350);
     return () => {
       if (debounce) clearTimeout(debounce);
     };
   });
 
-  async function load(m: string, pfx: string, temp: number) {
+  async function load(m: string, pfx: string, temp: number, resp: string, step: number) {
     const my = ++runId;
     error = "";
     loading = true;
@@ -168,14 +191,15 @@
     progressMsg = "starting…";
     try {
       const params = { temperature: temp, reference_set_size: REF, seed: SEED };
-      await client.ensureArtifact("manifold", m, params, { prefix_text: pfx }, (p, msg) => {
+      const inputs = { prefix_text: pfx, response_text: resp, response_step: step };
+      await client.ensureArtifact("manifold", m, params, inputs, (p, msg) => {
         if (my === runId) {
           progress = p;
           progressMsg = msg;
         }
       });
       if (my !== runId) return;
-      data = await client.getManifold(m, { prefix_text: pfx, ...params });
+      data = await client.getManifold(m, { prefix_text: pfx, response_text: resp, response_step: step, ...params });
       if (my !== runId) return;
       buildMesh(data);
     } catch (e: any) {
@@ -190,7 +214,7 @@
   <header>
     <div>
       <h2>Reachable "thoughts" as a manifold</h2>
-      <p class="sub">A sphere warped (RBF) toward likely next tokens — drag to rotate, scroll to zoom.</p>
+      <p class="sub">A unit sphere warped (RBF + ARAP) toward likely next tokens. <b>Bulges = high emission probability; dots = tokens on the radius-2 sphere.</b> Drag to rotate, scroll to zoom, hover a dot for its token.</p>
     </div>
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}

@@ -10,6 +10,14 @@ async function selectTinyModel(page: Page) {
   await expect(page.getByTestId("model-status")).toHaveText("ok");
 }
 
+async function setRange(page: Page, testid: string, value: string) {
+  await page.getByTestId(testid).evaluate((el: HTMLInputElement, v: string) => {
+    el.value = v;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }, value);
+}
+
 async function ready(page: Page, testid: string) {
   await expect
     .poll(async () => page.getByTestId(testid).getAttribute("data-ready"), { timeout: 200_000 })
@@ -53,6 +61,47 @@ test("manifold renders a 3D canvas", async ({ page }) => {
   await ready(page, "viz-manifold");
   await expect(page.locator('[data-testid="manifold-canvas"] canvas')).toBeVisible();
   await page.screenshot({ path: "tests/e2e/__screenshots__/viz-manifold.png", fullPage: true });
+});
+
+test("layer range overlays multiple layers in the vector field", async ({ page }) => {
+  await page.goto("/");
+  await selectTinyModel(page);
+  await page.getByTestId("tab-vector").click();
+  await ready(page, "viz-vector");
+  await setRange(page, "layer-to", "2"); // tiny-gpt2 has 2 layers -> range 0..2
+  await expect(page.getByTestId("layer-value")).toContainText("–");
+  await expect
+    .poll(async () => page.getByTestId("viz-vector").getAttribute("data-ready"), { timeout: 200_000 })
+    .toBe("1");
+  await expect(page.getByTestId("viz-vector")).toContainText(/layers/);
+});
+
+test("response animator plays through the tokens", async ({ page }) => {
+  await page.goto("/");
+  await selectTinyModel(page);
+  await page.getByTestId("response-input").fill("Paris is nice");
+  await expect(page.getByTestId("play-button")).toBeVisible({ timeout: 60_000 });
+  const before = await page.getByTestId("step-label").textContent();
+  await page.getByTestId("play-button").click();
+  await expect
+    .poll(async () => page.getByTestId("step-label").textContent(), { timeout: 60_000 })
+    .not.toBe(before);
+});
+
+test("interactive hover shows a tooltip on the vector field", async ({ page }) => {
+  await page.goto("/");
+  await selectTinyModel(page);
+  await page.getByTestId("tab-vector").click();
+  await ready(page, "viz-vector");
+  await page.locator('[data-testid="vector-svg"] line').first().hover({ force: true });
+  await expect(page.getByTestId("hover-tooltip")).toBeVisible({ timeout: 10_000 });
+});
+
+test("prompt presets dropdown updates the prefix", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("prompt-presets").selectOption({ index: 2 });
+  const txt = await page.getByTestId("prefix-input").inputValue();
+  expect(txt.length).toBeGreaterThan(0);
 });
 
 test("an unsupported model shows a clear error and no fabricated data", async ({ page }) => {

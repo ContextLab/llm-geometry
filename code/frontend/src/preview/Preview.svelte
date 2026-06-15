@@ -1,6 +1,6 @@
 <script lang="ts">
   import * as d3 from "d3";
-  import { modelId, prefixText, temperature, layer } from "../lib/stores";
+  import { modelId, prefixText, temperature, layerFrom } from "../lib/stores";
   import { client, type Distribution, type Reduction2D } from "../lib/dataClient";
   import Progress from "../lib/Progress.svelte";
 
@@ -27,7 +27,7 @@
     const m = $modelId;
     const pfx = $prefixText;
     const temp = $temperature;
-    const lyr = $layer;
+    const lyr = $layerFrom;
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => void load(m, pfx, temp, lyr), 300);
     return () => {
@@ -163,7 +163,7 @@
     </div>
 
     <div class="card">
-      <h3>Embedding space (2D, layer {$layer})</h3>
+      <h3>Embedding space (2D, layer {$layerFrom})</h3>
       <svg bind:this={scatterEl} class="scatter" data-testid="scatter" height="340"></svg>
       {#if red}<p class="caption">{red.coords.length} tokens · PCA of contextual embeddings</p>{/if}
     </div>

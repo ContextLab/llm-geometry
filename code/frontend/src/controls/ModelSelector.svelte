@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { modelId, numLayers, layer } from "../lib/stores";
+  import { modelId, numLayers, layerFrom, layerTo } from "../lib/stores";
   import { client, type ModelReference } from "../lib/dataClient";
 
   let models = $state<ModelReference[]>([]);
@@ -28,8 +28,10 @@
         if (cancelled) return;
         status = "ok";
         message = `${ref.display_name} · ${ref.capabilities.num_layers ?? "?"} layers`;
-        numLayers.set(ref.capabilities.num_layers ?? 0);
-        layer.update((l) => Math.min(l, ref.capabilities.num_layers ?? 0));
+        const nl = ref.capabilities.num_layers ?? 0;
+        numLayers.set(nl);
+        layerFrom.update((l: number) => Math.min(l, nl));
+        layerTo.update((l: number) => Math.min(l, nl));
       })
       .catch((e) => {
         if (cancelled) return;

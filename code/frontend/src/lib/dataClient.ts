@@ -66,18 +66,26 @@ export interface Reduction2D {
 export interface VectorField {
   grid_n: number;
   layer: number;
+  layers: number[];
   num_layers: number;
   temperature: number;
   fanout: number;
   reference_points: number;
+  response_step: number;
   starts: number[][];
   ends: number[][];
   probs: number[];
+  arrow_layers: number[];
   start_token_strs: string[];
   end_token_strs: string[];
   trajectory?: number[][];
   trajectory_probs?: number[];
   trajectory_token_strs?: string[];
+}
+
+export interface TokenizeResult {
+  model_id: string;
+  tokens: { token: number; token_str: string }[];
 }
 
 export interface SankeyNode {
@@ -105,6 +113,7 @@ export interface ManifoldData {
   warp: number[];
   token_points: number[][];
   token_emis: number[];
+  token_strs: string[];
   top_tokens: { token_str: string; prob: number }[];
 }
 
@@ -209,6 +218,10 @@ export function createClient(opts: ClientOptions = {}) {
     return request("/api/manifold" + qs({ model_id, ...params }));
   }
 
+  function tokenize(model_id: string, text: string): Promise<TokenizeResult> {
+    return request("/api/tokenize" + qs({ model_id, text }));
+  }
+
   async function pollJob(job_id: string, onProgress?: ProgressFn): Promise<void> {
     for (;;) {
       const job = await getJob(job_id);
@@ -284,6 +297,7 @@ export function createClient(opts: ClientOptions = {}) {
     getVectorField,
     getSankey,
     getManifold,
+    tokenize,
     pollJob,
     subscribeProgress,
     ensureArtifact,

@@ -1,13 +1,14 @@
 <script lang="ts">
   import ModelSelector from "./controls/ModelSelector.svelte";
   import PromptPrefix from "./controls/PromptPrefix.svelte";
-  import ResponseInput from "./controls/ResponseInput.svelte";
+  import ResponseAnimator from "./controls/ResponseAnimator.svelte";
   import Temperature from "./controls/Temperature.svelte";
   import LayerSlider from "./controls/LayerSlider.svelte";
   import Preview from "./preview/Preview.svelte";
   import VectorField from "./viz/VectorField.svelte";
   import Sankey from "./viz/Sankey.svelte";
   import Manifold from "./viz/Manifold.svelte";
+  import Tooltip from "./lib/Tooltip.svelte";
   import { view, type View } from "./lib/stores";
 
   const tabs: { id: View; label: string }[] = [
@@ -35,10 +36,10 @@
       <h2>Controls</h2>
       <ModelSelector />
       <PromptPrefix />
-      <ResponseInput />
+      <ResponseAnimator />
       <Temperature />
       <LayerSlider />
-      <p class="hint">Cached results return instantly; the first computation streams progress.</p>
+      <p class="hint">Cached results return instantly; the first computation streams progress. ▶ Play animates every view across the response tokens.</p>
     </aside>
 
     <div class="main">
@@ -63,6 +64,8 @@
       {/if}
     </div>
   </main>
+
+  <Tooltip />
 </div>
 
 <style>
