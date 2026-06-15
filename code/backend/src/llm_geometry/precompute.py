@@ -189,22 +189,27 @@ def _plan(
         temperature = float(params.get("temperature", 1.0))
         if temperature < 0:
             raise InvalidParamError(f"temperature must be >= 0, got {temperature}")
+        layer = int(params.get("layer", 0))
         grid_n = int(params.get("grid_n", DEFAULT_GRID_N))
+        fanout = int(params.get("fanout", 4))
         rss = params.get("reference_set_size", DEFAULT_REFERENCE_SET_SIZE)
         rss = int(rss) if rss is not None else None
         seed = int(params.get("seed", DEFAULT_SEED))
         prefix_text = inputs.get("prefix_text", "") or ""
-        norm_params = {"temperature": temperature, "grid_n": grid_n, "reference_set_size": rss, "seed": seed}
+        response_text = inputs.get("response_text", "") or ""
+        norm_params = {"temperature": temperature, "layer": layer, "grid_n": grid_n,
+                       "fanout": fanout, "reference_set_size": rss, "seed": seed}
         key, spec = make_cache_key(
             model_id=mid, revision=revision, artifact_type="vector_field",
-            inputs={"prefix_text": prefix_text}, params=norm_params,
+            inputs={"prefix_text": prefix_text, "response_text": response_text}, params=norm_params,
         )
 
         def compute(cb: ProgressCb | None) -> dict[str, Any]:
             from .compute.vector_field import vector_field
 
-            return vector_field(mid, prefix_text=prefix_text, temperature=temperature,
-                                grid_n=grid_n, reference_set_size=rss, seed=seed, progress_cb=cb)
+            return vector_field(mid, prefix_text=prefix_text, temperature=temperature, layer=layer,
+                                grid_n=grid_n, reference_set_size=rss, seed=seed, fanout=fanout,
+                                response_text=response_text, progress_cb=cb)
 
         return key, spec, compute
 

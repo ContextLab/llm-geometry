@@ -8,14 +8,36 @@ M = "sshleifer/tiny-gpt2"
 
 
 def test_vector_field_arrows():
-    p = get_or_compute_sync("vector_field", M, {"grid_n": 8, "reference_set_size": 150}, {"prefix_text": "Hello"})
+    # temperature 0 -> one argmax arrow per reference point, at the chosen layer
+    p = get_or_compute_sync(
+        "vector_field", M,
+        {"grid_n": 8, "reference_set_size": 150, "temperature": 0.0, "layer": 1},
+        {"prefix_text": "Hello"},
+    )
     a = p["arrays"]
-    assert a["starts"].shape == (64, 2)
-    assert a["ends"].shape == (64, 2)
-    assert a["probs"].shape == (64,)
+    m = p["meta"]
+    assert m["fanout"] == 1
+    assert m["layer"] == 1
+    assert a["starts"].shape == (m["reference_points"], 2)
+    assert a["ends"].shape == (m["reference_points"], 2)
+    assert m["count"] == m["reference_points"]
     assert (a["probs"] >= 0).all() and (a["probs"] <= 1).all()
-    assert len(p["meta"]["start_token_strs"]) == 64
-    assert len(p["meta"]["end_token_strs"]) == 64
+
+
+def test_vector_field_fanout_and_trajectory():
+    # temperature > 0 -> fan-out of `fanout` arrows per reference point; response traced
+    p = get_or_compute_sync(
+        "vector_field", M,
+        {"grid_n": 8, "reference_set_size": 150, "temperature": 0.9, "fanout": 3, "layer": 0},
+        {"prefix_text": "Hello", "response_text": "world peace"},
+    )
+    a = p["arrays"]
+    m = p["meta"]
+    assert m["fanout"] == 3
+    assert m["count"] == m["reference_points"] * 3
+    assert "trajectory" in a and a["trajectory"].shape[1] == 2
+    assert a["trajectory"].shape[0] == len(m["trajectory_token_strs"])
+    assert (a["trajectory_probs"] >= 0).all() and (a["trajectory_probs"] <= 1).all()
 
 
 def test_sankey_swarm():

@@ -1,6 +1,7 @@
 <script lang="ts">
   import ModelSelector from "./controls/ModelSelector.svelte";
   import PromptPrefix from "./controls/PromptPrefix.svelte";
+  import ResponseInput from "./controls/ResponseInput.svelte";
   import Temperature from "./controls/Temperature.svelte";
   import LayerSlider from "./controls/LayerSlider.svelte";
   import Preview from "./preview/Preview.svelte";
@@ -34,6 +35,7 @@
       <h2>Controls</h2>
       <ModelSelector />
       <PromptPrefix />
+      <ResponseInput />
       <Temperature />
       <LayerSlider />
       <p class="hint">Cached results return instantly; the first computation streams progress.</p>

@@ -9,11 +9,26 @@ M = "sshleifer/tiny-gpt2"
 
 
 def test_vector_field_endpoint():
-    r = client.get("/api/vector_field", params={"model_id": M, "prefix_text": "Hi", "grid_n": 6, "reference_set_size": 120})
+    r = client.get("/api/vector_field", params={
+        "model_id": M, "prefix_text": "Hi", "grid_n": 6, "reference_set_size": 120,
+        "temperature": 0.0, "layer": 1,
+    })
     assert r.status_code == 200
     b = r.json()
-    assert len(b["starts"]) == 36 and len(b["starts"][0]) == 2
-    assert len(b["ends"]) == 36 and len(b["probs"]) == 36
+    assert len(b["starts"]) == b["reference_points"] and len(b["starts"][0]) == 2
+    assert len(b["ends"]) == len(b["starts"]) and len(b["probs"]) == len(b["starts"])
+    assert b["layer"] == 1
+
+
+def test_vector_field_trajectory_endpoint():
+    r = client.get("/api/vector_field", params={
+        "model_id": M, "prefix_text": "Hi", "grid_n": 6, "reference_set_size": 120,
+        "temperature": 0.8, "fanout": 3, "response_text": "and then",
+    })
+    assert r.status_code == 200
+    b = r.json()
+    assert "trajectory" in b and len(b["trajectory"][0]) == 2
+    assert len(b["trajectory"]) == len(b["trajectory_probs"])
 
 
 def test_sankey_endpoint():

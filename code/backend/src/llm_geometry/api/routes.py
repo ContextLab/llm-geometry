@@ -197,21 +197,30 @@ def vector_field_route(
     model_id: str,
     prefix_text: str = "",
     temperature: float = 1.0,
+    layer: int = 0,
     grid_n: int = DEFAULT_GRID_N,
+    fanout: int = 4,
     seed: int = DEFAULT_SEED,
     reference_set_size: int | None = None,
+    response_text: str = "",
 ) -> dict[str, Any]:
-    params: dict[str, Any] = {"temperature": temperature, "grid_n": grid_n, "seed": seed}
+    params: dict[str, Any] = {"temperature": temperature, "layer": layer, "grid_n": grid_n, "fanout": fanout, "seed": seed}
     if reference_set_size is not None:
         params["reference_set_size"] = reference_set_size
-    payload = get_or_compute_sync("vector_field", model_id, params, {"prefix_text": prefix_text})
+    payload = get_or_compute_sync(
+        "vector_field", model_id, params, {"prefix_text": prefix_text, "response_text": response_text}
+    )
     meta = dict(payload["meta"])
     a = payload["arrays"]
-    return _jsonable({
+    resp: dict[str, Any] = {
         **meta,
         "starts": a["starts"].tolist(), "ends": a["ends"].tolist(), "probs": a["probs"].tolist(),
         "start_tokens": a["start_tokens"].tolist(), "end_tokens": a["end_tokens"].tolist(),
-    })
+    }
+    if "trajectory" in a:
+        resp["trajectory"] = a["trajectory"].tolist()
+        resp["trajectory_probs"] = a["trajectory_probs"].tolist()
+    return _jsonable(resp)
 
 
 @router.get("/sankey")

@@ -1,6 +1,6 @@
 <script lang="ts">
   import * as d3 from "d3";
-  import { modelId, prefixText, temperature } from "../lib/stores";
+  import { modelId, prefixText, temperature, layer, responseText } from "../lib/stores";
   import { client, type VectorField } from "../lib/dataClient";
   import Progress from "../lib/Progress.svelte";
 
@@ -13,8 +13,9 @@
   let data = $state<VectorField | null>(null);
   let svgEl: SVGSVGElement | undefined;
 
-  const GRID_N = 20;
-  const REF = 256;
+  const GRID_N = 14;
+  const REF = 120;
+  const FANOUT = 4;
   const SEED = 0;
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let runId = 0;
@@ -23,29 +24,32 @@
     const m = $modelId;
     const pfx = $prefixText;
     const temp = $temperature;
+    const lyr = $layer;
+    const resp = $responseText;
     if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => void load(m, pfx, temp), 350);
+    debounce = setTimeout(() => void load(m, pfx, temp, lyr, resp), 350);
     return () => {
       if (debounce) clearTimeout(debounce);
     };
   });
 
-  async function load(m: string, pfx: string, temp: number) {
+  async function load(m: string, pfx: string, temp: number, lyr: number, resp: string) {
     const my = ++runId;
     error = "";
     loading = true;
     progress = 0;
     progressMsg = "starting…";
     try {
-      const params = { temperature: temp, grid_n: GRID_N, reference_set_size: REF, seed: SEED };
-      await client.ensureArtifact("vector_field", m, params, { prefix_text: pfx }, (p, msg) => {
+      const params = { temperature: temp, layer: lyr, grid_n: GRID_N, fanout: FANOUT, reference_set_size: REF, seed: SEED };
+      const inputs = { prefix_text: pfx, response_text: resp };
+      await client.ensureArtifact("vector_field", m, params, inputs, (p, msg) => {
         if (my === runId) {
           progress = p;
           progressMsg = msg;
         }
       });
       if (my !== runId) return;
-      data = await client.getVectorField(m, { prefix_text: pfx, ...params });
+      data = await client.getVectorField(m, { prefix_text: pfx, response_text: resp, ...params });
       if (my !== runId) return;
       draw();
     } catch (e: any) {
@@ -119,6 +123,32 @@
       .attr("r", 1.7)
       .attr("fill", "#b794f6")
       .attr("opacity", 0.6);
+
+    // Response trajectory: a path through the same space, points colored by probability.
+    if (d.trajectory && d.trajectory.length) {
+      const traj = d.trajectory;
+      const tp = d.trajectory_probs ?? [];
+      const tl = svg.append("g");
+      for (let i = 0; i < traj.length - 1; i++) {
+        tl.append("line")
+          .attr("x1", x(traj[i][0])).attr("y1", y(traj[i][1]))
+          .attr("x2", x(traj[i + 1][0])).attr("y2", y(traj[i + 1][1]))
+          .attr("stroke", "#5be0b0").attr("stroke-width", 2.5).attr("opacity", 0.85);
+      }
+      const cscale = d3.scaleSequential(d3.interpolateViridis).domain([0, 1]);
+      tl.selectAll("circle.tp")
+        .data(traj)
+        .join("circle")
+        .attr("class", "tp")
+        .attr("cx", (t) => x(t[0]))
+        .attr("cy", (t) => y(t[1]))
+        .attr("r", 5)
+        .attr("fill", (_t, i) => cscale(tp[i] ?? 0))
+        .attr("stroke", "#fff")
+        .attr("stroke-width", 1)
+        .append("title")
+        .text((_t, i) => `${d.trajectory_token_strs?.[i] ?? ""} (${((tp[i] ?? 0) * 100).toFixed(1)}%)`);
+    }
   }
 </script>
 
@@ -132,7 +162,7 @@
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}
   {#if error}<div class="error" data-testid="viz-vector-error">{error}</div>{/if}
   <svg bind:this={svgEl} class="canvas" height="480" data-testid="vector-svg"></svg>
-  {#if data}<p class="caption">{data.starts.length} arrows · {data.grid_n}×{data.grid_n} grid</p>{/if}
+  {#if data}<p class="caption">{data.reference_points} reference points · {data.starts.length} arrows · layer {data.layer}/{data.num_layers} · fan-out {data.fanout}{#if data.trajectory} · trajectory {data.trajectory.length} tokens{/if}</p>{/if}
 </section>
 
 <style>
