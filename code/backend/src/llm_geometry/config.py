@@ -33,11 +33,14 @@ CACHE_DIR = _default_cache_dir()
 # Default app model + curated menu (id -> display name). Arbitrary open-weights
 # HuggingFace ids are also accepted at runtime (FR-001); the menu is just a
 # convenience starting point.
-DEFAULT_MODEL = "gpt2"
+DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 CURATED_MODELS: dict[str, str] = {
+    "Qwen/Qwen2.5-0.5B-Instruct": "Qwen2.5 0.5B Instruct (default)",
+    "Qwen/Qwen2.5-1.5B-Instruct": "Qwen2.5 1.5B Instruct",
+    "HuggingFaceTB/SmolLM2-1.7B-Instruct": "SmolLM2 1.7B Instruct",
+    "openai-community/gpt2-large": "GPT-2 Large (774M)",
     "gpt2": "GPT-2 (124M)",
-    "distilgpt2": "DistilGPT-2 (82M)",
-    "sshleifer/tiny-gpt2": "Tiny GPT-2 (test fixture)",
+    "distilgpt2": "DistilGPT-2 (82M, fast)",
 }
 
 # Reproducibility: a single fixed default seed keeps reductions deterministic (FR-013).
