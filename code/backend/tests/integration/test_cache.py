@@ -56,6 +56,33 @@ def test_schema_version_mismatch_is_a_miss(tmp_path):
     assert store.get(key) is None  # FR-007 stale format detected
 
 
+def test_concurrent_model_load_does_not_race():
+    """Concurrent first-loads of the same model must not hit the meta-tensor race
+    (regression: the live UI fires several requests at once on page load)."""
+    import llm_geometry.models.loader as loader
+
+    with loader._loaded_lock:
+        loader._loaded.pop("distilgpt2", None)
+
+    errors: list = []
+    loaded: list = []
+
+    def work():
+        try:
+            loaded.append(loader.load_model("distilgpt2"))
+        except Exception as exc:  # pragma: no cover - failure path is the bug
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=work) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"concurrent load raced: {errors[:1]}"
+    assert len(loaded) == 4 and all(m.model_id == "distilgpt2" for m in loaded)
+
+
 def test_single_flight_computes_once_under_concurrency():
     params = {"source": "static", "reference_set_size": 50}
     key = precompute.cache_key_for("embeddings", MODEL, params)

@@ -111,70 +111,81 @@ def resolve_model(model_id: str) -> dict[str, Any]:
 
 
 _loaded: "OrderedDict[str, LoadedModel]" = OrderedDict()
-_load_lock = threading.Lock()
+_loaded_lock = threading.Lock()     # guards the _loaded dict (fast path)
+_load_serialize = threading.Lock()  # serializes the heavy, non-thread-safe from_pretrained
 
 
 def load_model(model_id: str) -> LoadedModel:
     """Load tokenizer + causal LM (CPU, eval, no-grad) and verify it really exposes
     logits + hidden states. Cached in-process (small LRU)."""
     mid = normalize_model_id(model_id)
-    with _load_lock:
+    with _loaded_lock:
         if mid in _loaded:
             _loaded.move_to_end(mid)
             return _loaded[mid]
 
-    ref = resolve_model(mid)  # validates + pins revision (raises if unsupported)
-    revision = ref["revision"]
+    # transformers' from_pretrained is NOT safe to call concurrently for the same
+    # model — racing loads land in a half-initialized "meta tensor" state (RuntimeError
+    # "Cannot copy out of meta tensor"). Serialize the heavy load; the cache check above
+    # stays lock-free so a warmed model is still instant.
+    with _load_serialize:
+        with _loaded_lock:
+            if mid in _loaded:  # another thread finished the load while we waited
+                _loaded.move_to_end(mid)
+                return _loaded[mid]
 
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(mid)
-        model = AutoModelForCausalLM.from_pretrained(mid, output_hidden_states=True)
-    except Exception as exc:  # download failure/partial, gated, OOM, etc.
-        raise UnsupportedModelError(
-            f"Failed to load model '{mid}': {exc}. The download may have failed or "
-            "been interrupted, the model may be gated, or there may be insufficient "
-            "memory for it on this machine.",
-            detail={"model_id": mid},
-        ) from exc
+        ref = resolve_model(mid)  # validates + pins revision (raises if unsupported)
+        revision = ref["revision"]
 
-    torch.set_grad_enabled(False)
-    model.eval()
-    device = "cpu"
-    model.to(device)
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(mid)
+            model = AutoModelForCausalLM.from_pretrained(mid, output_hidden_states=True)
+        except Exception as exc:  # download failure/partial, gated, OOM, etc.
+            raise UnsupportedModelError(
+                f"Failed to load model '{mid}': {exc}. The download may have failed or "
+                "been interrupted, the model may be gated, or there may be insufficient "
+                "memory for it on this machine.",
+                detail={"model_id": mid},
+            ) from exc
 
-    # Real forward-pass verification (Constitution I): must yield logits over the
-    # vocabulary AND per-layer hidden states.
-    try:
-        enc = tokenizer("hello world", return_tensors="pt")
-        out = model(**{k: v.to(device) for k, v in enc.items()}, output_hidden_states=True)
-        logits = out.logits
-        hidden = out.hidden_states
-        if logits is None or hidden is None or len(hidden) < 2:
-            raise ValueError("model did not return logits and per-layer hidden states")
-    except Exception as exc:
-        raise UnsupportedModelError(
-            f"Model '{mid}' loaded but does not expose the required token-level "
-            f"probabilities and per-layer hidden states: {exc}.",
-            detail={"model_id": mid},
-        ) from exc
+        torch.set_grad_enabled(False)
+        model.eval()
+        device = "cpu"
+        model.to(device)
 
-    vocab_size = int(getattr(model.config, "vocab_size", logits.shape[-1]))
-    hidden_size = int(hidden[0].shape[-1])
-    num_layers = ref["capabilities"]["num_layers"] or (len(hidden) - 1)
+        # Real forward-pass verification (Constitution I): must yield logits over the
+        # vocabulary AND per-layer hidden states.
+        try:
+            enc = tokenizer("hello world", return_tensors="pt")
+            out = model(**{k: v.to(device) for k, v in enc.items()}, output_hidden_states=True)
+            logits = out.logits
+            hidden = out.hidden_states
+            if logits is None or hidden is None or len(hidden) < 2:
+                raise ValueError("model did not return logits and per-layer hidden states")
+        except Exception as exc:
+            raise UnsupportedModelError(
+                f"Model '{mid}' loaded but does not expose the required token-level "
+                f"probabilities and per-layer hidden states: {exc}.",
+                detail={"model_id": mid},
+            ) from exc
 
-    lm = LoadedModel(
-        model_id=mid,
-        revision=revision,
-        model=model,
-        tokenizer=tokenizer,
-        num_layers=int(num_layers),
-        hidden_size=hidden_size,
-        vocab_size=vocab_size,
-        device=device,
-    )
-    with _load_lock:
-        _loaded[mid] = lm
-        _loaded.move_to_end(mid)
-        while len(_loaded) > _MAX_LOADED:
-            _loaded.popitem(last=False)
-    return lm
+        vocab_size = int(getattr(model.config, "vocab_size", logits.shape[-1]))
+        hidden_size = int(hidden[0].shape[-1])
+        num_layers = ref["capabilities"]["num_layers"] or (len(hidden) - 1)
+
+        lm = LoadedModel(
+            model_id=mid,
+            revision=revision,
+            model=model,
+            tokenizer=tokenizer,
+            num_layers=int(num_layers),
+            hidden_size=hidden_size,
+            vocab_size=vocab_size,
+            device=device,
+        )
+        with _loaded_lock:
+            _loaded[mid] = lm
+            _loaded.move_to_end(mid)
+            while len(_loaded) > _MAX_LOADED:
+                _loaded.popitem(last=False)
+        return lm
