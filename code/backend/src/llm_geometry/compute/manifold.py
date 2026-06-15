@@ -66,6 +66,8 @@ def manifold(
     seed: int = DEFAULT_SEED,
     width: float = 0.3,
     warp_top: int = 24,
+    response_text: str = "",
+    response_step: int = 0,
     progress_cb: ProgressCb | None = None,
 ) -> dict[str, Any]:
     if temperature < 0:
@@ -86,7 +88,10 @@ def manifold(
 
     if progress_cb:
         progress_cb(0.35, "computing emission distribution")
-    probs_full = next_token_distribution(model_id, prefix_text=prefix_text, temperature=temperature)["arrays"]["probs"]
+    probs_full = next_token_distribution(
+        model_id, prefix_text=prefix_text, temperature=temperature,
+        response_text=response_text, response_step=response_step,
+    )["arrays"]["probs"]
     emis = probs_full[token_ids].astype(np.float64)
     if emis.max() > 0:
         emis = emis / emis.max()

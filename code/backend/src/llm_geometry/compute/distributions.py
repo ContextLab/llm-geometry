@@ -15,20 +15,7 @@ import torch
 
 from ..errors import InvalidParamError
 from ..models.loader import LoadedModel, load_model
-
-
-def _context_input_ids(lm: LoadedModel, prefix_text: str) -> torch.Tensor:
-    if prefix_text:
-        enc = lm.tokenizer(prefix_text, return_tensors="pt")
-        return enc["input_ids"]
-    # Empty context: condition on a single start token so the model has something to
-    # predict from.
-    start = lm.tokenizer.bos_token_id
-    if start is None:
-        start = lm.tokenizer.eos_token_id
-    if start is None:
-        start = 0
-    return torch.tensor([[start]], dtype=torch.long)
+from .context import effective_context_ids
 
 
 def next_token_distribution(
@@ -36,12 +23,15 @@ def next_token_distribution(
     prefix_text: str = "",
     temperature: float = 1.0,
     top_k: int | None = None,
+    response_text: str = "",
+    response_step: int = 0,
 ) -> dict[str, Any]:
     if temperature is None or temperature < 0:
         raise InvalidParamError(f"temperature must be >= 0, got {temperature!r}")
 
     lm = load_model(model_id)
-    input_ids = _context_input_ids(lm, prefix_text).to(lm.device)
+    ids = effective_context_ids(lm, prefix_text, response_text, response_step)
+    input_ids = torch.tensor([ids], dtype=torch.long).to(lm.device)
 
     with torch.no_grad():
         out = lm.model(input_ids=input_ids, output_hidden_states=False)

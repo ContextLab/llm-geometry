@@ -79,8 +79,10 @@ def _plan(
         top_k = params.get("top_k")
         top_k = int(top_k) if top_k else None
         prefix_text = inputs.get("prefix_text", "") or ""
+        response_text = inputs.get("response_text", "") or ""
+        response_step = int(inputs.get("response_step", 0) or 0)
         norm_params = {"temperature": temperature, "top_k": top_k}
-        norm_inputs = {"prefix_text": prefix_text}
+        norm_inputs = {"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step}
         key, spec = make_cache_key(
             model_id=mid, revision=revision, artifact_type="distribution",
             inputs=norm_inputs, params=norm_params,
@@ -91,7 +93,8 @@ def _plan(
 
             if cb:
                 cb(0.1, "running forward pass")
-            res = next_token_distribution(mid, prefix_text=prefix_text, temperature=temperature, top_k=top_k)
+            res = next_token_distribution(mid, prefix_text=prefix_text, temperature=temperature, top_k=top_k,
+                                          response_text=response_text, response_step=response_step)
             if cb:
                 cb(1.0, "done")
             return res
@@ -189,7 +192,11 @@ def _plan(
         temperature = float(params.get("temperature", 1.0))
         if temperature < 0:
             raise InvalidParamError(f"temperature must be >= 0, got {temperature}")
-        layer = int(params.get("layer", 0))
+        layer_from = int(params.get("layer_from", params.get("layer", 0)))
+        layer_to = int(params.get("layer_to", layer_from))
+        if layer_to < layer_from:
+            layer_from, layer_to = layer_to, layer_from
+        layers = list(range(layer_from, layer_to + 1))
         grid_n = int(params.get("grid_n", DEFAULT_GRID_N))
         fanout = int(params.get("fanout", 4))
         rss = params.get("reference_set_size", DEFAULT_REFERENCE_SET_SIZE)
@@ -197,19 +204,21 @@ def _plan(
         seed = int(params.get("seed", DEFAULT_SEED))
         prefix_text = inputs.get("prefix_text", "") or ""
         response_text = inputs.get("response_text", "") or ""
-        norm_params = {"temperature": temperature, "layer": layer, "grid_n": grid_n,
-                       "fanout": fanout, "reference_set_size": rss, "seed": seed}
+        response_step = int(inputs.get("response_step", 0) or 0)
+        norm_params = {"temperature": temperature, "layer_from": layer_from, "layer_to": layer_to,
+                       "grid_n": grid_n, "fanout": fanout, "reference_set_size": rss, "seed": seed}
         key, spec = make_cache_key(
             model_id=mid, revision=revision, artifact_type="vector_field",
-            inputs={"prefix_text": prefix_text, "response_text": response_text}, params=norm_params,
+            inputs={"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step},
+            params=norm_params,
         )
 
         def compute(cb: ProgressCb | None) -> dict[str, Any]:
             from .compute.vector_field import vector_field
 
-            return vector_field(mid, prefix_text=prefix_text, temperature=temperature, layer=layer,
+            return vector_field(mid, prefix_text=prefix_text, temperature=temperature, layers=layers,
                                 grid_n=grid_n, reference_set_size=rss, seed=seed, fanout=fanout,
-                                response_text=response_text, progress_cb=cb)
+                                response_text=response_text, response_step=response_step, progress_cb=cb)
 
         return key, spec, compute
 
@@ -221,17 +230,21 @@ def _plan(
         n_steps = int(params.get("n_steps", 8))
         seed = int(params.get("seed", DEFAULT_SEED))
         prefix_text = inputs.get("prefix_text", "") or ""
+        response_text = inputs.get("response_text", "") or ""
+        response_step = int(inputs.get("response_step", 0) or 0)
         norm_params = {"temperature": temperature, "n_particles": n_particles, "n_steps": n_steps, "seed": seed}
         key, spec = make_cache_key(
             model_id=mid, revision=revision, artifact_type="sankey",
-            inputs={"prefix_text": prefix_text}, params=norm_params,
+            inputs={"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step},
+            params=norm_params,
         )
 
         def compute(cb: ProgressCb | None) -> dict[str, Any]:
             from .compute.sankey import sankey
 
             return sankey(mid, prefix_text=prefix_text, temperature=temperature,
-                          n_particles=n_particles, n_steps=n_steps, seed=seed, progress_cb=cb)
+                          n_particles=n_particles, n_steps=n_steps, seed=seed,
+                          response_text=response_text, response_step=response_step, progress_cb=cb)
 
         return key, spec, compute
 
@@ -243,17 +256,21 @@ def _plan(
         rss = int(rss) if rss is not None else None
         seed = int(params.get("seed", DEFAULT_SEED))
         prefix_text = inputs.get("prefix_text", "") or ""
+        response_text = inputs.get("response_text", "") or ""
+        response_step = int(inputs.get("response_step", 0) or 0)
         norm_params = {"temperature": temperature, "reference_set_size": rss, "seed": seed}
         key, spec = make_cache_key(
             model_id=mid, revision=revision, artifact_type="manifold",
-            inputs={"prefix_text": prefix_text}, params=norm_params,
+            inputs={"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step},
+            params=norm_params,
         )
 
         def compute(cb: ProgressCb | None) -> dict[str, Any]:
             from .compute.manifold import manifold
 
             return manifold(mid, prefix_text=prefix_text, temperature=temperature,
-                            reference_set_size=rss, seed=seed, progress_cb=cb)
+                            reference_set_size=rss, seed=seed,
+                            response_text=response_text, response_step=response_step, progress_cb=cb)
 
         return key, spec, compute
 

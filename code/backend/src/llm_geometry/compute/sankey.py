@@ -17,15 +17,9 @@ import torch
 from ..config import DEFAULT_SEED
 from ..errors import InvalidParamError
 from ..models.loader import load_model
+from .context import effective_context_ids
 
 ProgressCb = Callable[[float, str], None]
-
-
-def _context_ids(lm, prefix_text: str) -> list[int]:
-    if prefix_text:
-        return list(lm.tokenizer(prefix_text)["input_ids"])
-    start = lm.tokenizer.bos_token_id or lm.tokenizer.eos_token_id or 0
-    return [int(start)]
 
 
 def sankey(
@@ -35,6 +29,8 @@ def sankey(
     n_particles: int = 24,
     n_steps: int = 8,
     seed: int = DEFAULT_SEED,
+    response_text: str = "",
+    response_step: int = 0,
     progress_cb: ProgressCb | None = None,
 ) -> dict[str, Any]:
     if n_particles < 1 or n_steps < 1:
@@ -44,7 +40,7 @@ def sankey(
 
     lm = load_model(model_id)
     gen = torch.Generator(device=lm.device).manual_seed(int(seed))
-    base = _context_ids(lm, prefix_text)
+    base = effective_context_ids(lm, prefix_text, response_text, response_step)
     eos = lm.tokenizer.eos_token_id
     t = max(float(temperature), 1e-6)
 

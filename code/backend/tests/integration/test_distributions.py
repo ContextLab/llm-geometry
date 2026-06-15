@@ -40,6 +40,19 @@ def test_negative_temperature_raises_invalid_param():
         get_or_compute_sync("distribution", MODEL, {"temperature": -0.5}, {"prefix_text": "x"})
 
 
+def test_response_step_advances_the_context():
+    """Stepping response_step conditions on the next response token (animation basis)."""
+    base = get_or_compute_sync(
+        "distribution", MODEL, {"temperature": 1.0},
+        {"prefix_text": "The capital of France is", "response_text": " Paris", "response_step": 0},
+    )["arrays"]["probs"]
+    stepped = get_or_compute_sync(
+        "distribution", MODEL, {"temperature": 1.0},
+        {"prefix_text": "The capital of France is", "response_text": " Paris", "response_step": 1},
+    )["arrays"]["probs"]
+    assert not np.array_equal(base, stepped)
+
+
 def test_higher_temperature_increases_entropy():
     """Temperature should flatten the distribution (sanity on the real math)."""
     low = get_or_compute_sync("distribution", MODEL, {"temperature": 0.5}, {"prefix_text": "Hello"})["arrays"]["probs"]

@@ -23,7 +23,8 @@ from ..config import (
 )
 from ..errors import NotFoundError
 from ..jobs.registry import registry
-from ..models.loader import resolve_model
+from ..compute.context import tokenize_strings
+from ..models.loader import load_model, resolve_model
 from ..models.registry import curated_models
 from ..precompute import get_or_compute_sync, request_precompute
 from . import progress as progress_mod
@@ -105,12 +106,14 @@ def distribution(
     prefix_text: str = "",
     temperature: float = 1.0,
     top_k: int | None = None,
+    response_text: str = "",
+    response_step: int = 0,
 ) -> dict[str, Any]:
     payload = get_or_compute_sync(
         "distribution",
         model_id,
         {"temperature": temperature, "top_k": top_k},
-        {"prefix_text": prefix_text},
+        {"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step},
     )
     meta = dict(payload["meta"])
     resp: dict[str, Any] = {**meta}
@@ -197,18 +200,25 @@ def vector_field_route(
     model_id: str,
     prefix_text: str = "",
     temperature: float = 1.0,
-    layer: int = 0,
+    layer_from: int = 0,
+    layer_to: int | None = None,
     grid_n: int = DEFAULT_GRID_N,
     fanout: int = 4,
     seed: int = DEFAULT_SEED,
     reference_set_size: int | None = None,
     response_text: str = "",
+    response_step: int = 0,
 ) -> dict[str, Any]:
-    params: dict[str, Any] = {"temperature": temperature, "layer": layer, "grid_n": grid_n, "fanout": fanout, "seed": seed}
+    params: dict[str, Any] = {
+        "temperature": temperature, "layer_from": layer_from,
+        "layer_to": layer_from if layer_to is None else layer_to,
+        "grid_n": grid_n, "fanout": fanout, "seed": seed,
+    }
     if reference_set_size is not None:
         params["reference_set_size"] = reference_set_size
     payload = get_or_compute_sync(
-        "vector_field", model_id, params, {"prefix_text": prefix_text, "response_text": response_text}
+        "vector_field", model_id, params,
+        {"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step},
     )
     meta = dict(payload["meta"])
     a = payload["arrays"]
@@ -216,6 +226,7 @@ def vector_field_route(
         **meta,
         "starts": a["starts"].tolist(), "ends": a["ends"].tolist(), "probs": a["probs"].tolist(),
         "start_tokens": a["start_tokens"].tolist(), "end_tokens": a["end_tokens"].tolist(),
+        "arrow_layers": a["arrow_layers"].tolist(),
     }
     if "trajectory" in a:
         resp["trajectory"] = a["trajectory"].tolist()
@@ -231,11 +242,13 @@ def sankey_route(
     n_particles: int = 24,
     n_steps: int = 8,
     seed: int = DEFAULT_SEED,
+    response_text: str = "",
+    response_step: int = 0,
 ) -> dict[str, Any]:
     payload = get_or_compute_sync(
         "sankey", model_id,
         {"temperature": temperature, "n_particles": n_particles, "n_steps": n_steps, "seed": seed},
-        {"prefix_text": prefix_text},
+        {"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step},
     )
     return _jsonable(dict(payload["meta"]))  # nodes / links / token_strs live in meta
 
@@ -247,11 +260,16 @@ def manifold_route(
     temperature: float = 1.0,
     seed: int = DEFAULT_SEED,
     reference_set_size: int | None = None,
+    response_text: str = "",
+    response_step: int = 0,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {"temperature": temperature, "seed": seed}
     if reference_set_size is not None:
         params["reference_set_size"] = reference_set_size
-    payload = get_or_compute_sync("manifold", model_id, params, {"prefix_text": prefix_text})
+    payload = get_or_compute_sync(
+        "manifold", model_id, params,
+        {"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step},
+    )
     meta = dict(payload["meta"])
     a = payload["arrays"]
     return _jsonable({
@@ -259,3 +277,10 @@ def manifold_route(
         "vertices": a["vertices"].tolist(), "faces": a["faces"].tolist(), "warp": a["warp"].tolist(),
         "token_points": a["token_points"].tolist(), "token_emis": a["token_emis"].tolist(),
     })
+
+
+@router.get("/tokenize")
+def tokenize_route(model_id: str, text: str = "") -> dict[str, Any]:
+    """Token ids + strings for a text — lets the UI animate over response tokens."""
+    lm = load_model(model_id)
+    return {"model_id": lm.model_id, "tokens": tokenize_strings(lm, text)}

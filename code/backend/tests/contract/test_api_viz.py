@@ -11,13 +11,32 @@ M = "sshleifer/tiny-gpt2"
 def test_vector_field_endpoint():
     r = client.get("/api/vector_field", params={
         "model_id": M, "prefix_text": "Hi", "grid_n": 6, "reference_set_size": 120,
-        "temperature": 0.0, "layer": 1,
+        "temperature": 0.0, "layer_from": 1, "layer_to": 1,
     })
     assert r.status_code == 200
     b = r.json()
     assert len(b["starts"]) == b["reference_points"] and len(b["starts"][0]) == 2
     assert len(b["ends"]) == len(b["starts"]) and len(b["probs"]) == len(b["starts"])
-    assert b["layer"] == 1
+    assert b["layer"] == 1 and b["layers"] == [1]
+    assert set(b["arrow_layers"]) == {1}
+
+
+def test_vector_field_layer_range_endpoint():
+    r = client.get("/api/vector_field", params={
+        "model_id": M, "prefix_text": "Hi", "grid_n": 6, "reference_set_size": 120,
+        "temperature": 0.0, "layer_from": 0, "layer_to": 2,
+    })
+    assert r.status_code == 200
+    b = r.json()
+    assert b["layers"] == [0, 1, 2]
+    assert set(b["arrow_layers"]) == {0, 1, 2}  # arrows overlaid across the layer range
+
+
+def test_tokenize_endpoint():
+    r = client.get("/api/tokenize", params={"model_id": M, "text": "Paris is nice"})
+    assert r.status_code == 200
+    toks = r.json()["tokens"]
+    assert len(toks) >= 1 and "token_str" in toks[0] and "token" in toks[0]
 
 
 def test_vector_field_trajectory_endpoint():
