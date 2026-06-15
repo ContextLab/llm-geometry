@@ -226,7 +226,6 @@ def vector_field_route(
         **meta,
         "starts": a["starts"].tolist(), "ends": a["ends"].tolist(), "probs": a["probs"].tolist(),
         "start_tokens": a["start_tokens"].tolist(), "end_tokens": a["end_tokens"].tolist(),
-        "arrow_layers": a["arrow_layers"].tolist(),
     }
     if "trajectory" in a:
         resp["trajectory"] = a["trajectory"].tolist()

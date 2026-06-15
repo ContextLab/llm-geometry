@@ -84,12 +84,9 @@
     const x = d3.scaleLinear().domain(robust(xs)).range([30, w - 30]).clamp(true);
     const y = d3.scaleLinear().domain(robust(ys)).range([h - 30, 30]).clamp(true);
 
-    const multi = d.layers.length > 1;
-    const layerColor = d3.scaleSequential(d3.interpolatePlasma).domain([d.layers[0], d.layers[d.layers.length - 1] + 0.001]);
-    const colorOf = (L: number) => (multi ? layerColor(L) : "#6ea8fe");
-
     const maxp = Math.max(...d.probs, 1e-6);
-    const rows = d.starts.map((s, i) => ({ s, e: d.ends[i], p: d.probs[i], i, L: d.arrow_layers[i] }));
+    const pcolor = d3.scaleSequential(d3.interpolateCool).domain([0, maxp]);
+    const rows = d.starts.map((s, i) => ({ s, e: d.ends[i], p: d.probs[i], i }));
 
     const g = svg.append("g");
     g.selectAll("line")
@@ -97,11 +94,11 @@
       .join("line")
       .attr("x1", (r) => x(r.s[0])).attr("y1", (r) => y(r.s[1]))
       .attr("x2", (r) => x(r.e[0])).attr("y2", (r) => y(r.e[1]))
-      .attr("stroke", (r) => colorOf(r.L))
+      .attr("stroke", (r) => pcolor(r.p))
       .attr("stroke-width", 1.2)
       .attr("opacity", (r) => 0.12 + 0.8 * (r.p / maxp))
       .on("mousemove", (event, r: any) =>
-        showTip(event, `${d.start_token_strs[r.i]} → ${d.end_token_strs[r.i]}\nlayer ${r.L} · ${(r.p * 100).toFixed(1)}%`))
+        showTip(event, `${d.start_token_strs[r.i]} → ${d.end_token_strs[r.i]}\nlayer ${d.layer_from}→${d.layer_to} · ${(r.p * 100).toFixed(1)}%`))
       .on("mouseleave", hideTip);
 
     // reference points (interactive hover reveals the token)
@@ -119,43 +116,40 @@
       })
       .on("mouseleave", hideTip);
 
-    // response trajectory + current-step highlight
+    // Response trajectory — grows as ▶ Play advances (step = tokens consumed into context).
     if (d.trajectory && d.trajectory.length) {
       const traj = d.trajectory;
       const tp = d.trajectory_probs ?? [];
+      const step = d.response_step; // 0 = full path; while playing, reveal up to `step`
+      const cur = step - 1;
+      const shown = step > 0 ? step : traj.length;
       const tl = svg.append("g");
       for (let i = 0; i < traj.length - 1; i++) {
+        const active = step === 0 || i < shown - 1;
         tl.append("line")
           .attr("x1", x(traj[i][0])).attr("y1", y(traj[i][1]))
           .attr("x2", x(traj[i + 1][0])).attr("y2", y(traj[i + 1][1]))
-          .attr("stroke", "#5be0b0").attr("stroke-width", 2.5).attr("opacity", 0.85);
+          .attr("stroke", "#5be0b0")
+          .attr("stroke-width", active ? 2.6 : 1.2)
+          .attr("opacity", active ? 0.9 : 0.18);
       }
       const cscale = d3.scaleSequential(d3.interpolateViridis).domain([0, 1]);
-      const cur = d.response_step - 1;
       tl.selectAll("circle.tp")
         .data(traj)
         .join("circle")
         .attr("class", "tp")
         .attr("cx", (t) => x(t[0])).attr("cy", (t) => y(t[1]))
-        .attr("r", (_t, i) => (i === cur ? 8 : 5))
+        .attr("r", (_t, i) => (i === cur ? 9 : step === 0 || i < shown ? 5 : 3))
         .attr("fill", (_t, i) => cscale(tp[i] ?? 0))
         .attr("stroke", (_t, i) => (i === cur ? "#5be0b0" : "#fff"))
-        .attr("stroke-width", (_t, i) => (i === cur ? 2.5 : 1))
+        .attr("stroke-width", (_t, i) => (i === cur ? 3 : 1))
+        .attr("opacity", (_t, i) => (step === 0 || i < shown ? 1 : 0.3))
         .each(function (_t, i) {
           d3.select(this)
             .on("mousemove", (event) =>
               showTip(event, `${d.trajectory_token_strs?.[i] ?? ""}  ${((tp[i] ?? 0) * 100).toFixed(1)}%`))
             .on("mouseleave", hideTip);
         });
-    }
-
-    // layer legend
-    if (multi) {
-      const lg = svg.append("g").attr("transform", `translate(${w - 70}, 16)`);
-      d.layers.forEach((L, i) => {
-        lg.append("rect").attr("x", 0).attr("y", i * 16).attr("width", 11).attr("height", 11).attr("rx", 2).attr("fill", colorOf(L));
-        lg.append("text").attr("x", 16).attr("y", i * 16 + 9).attr("fill", "var(--text-dim)").attr("font-size", "10px").text(`layer ${L}`);
-      });
     }
   }
 </script>
@@ -164,7 +158,7 @@
   <header>
     <div>
       <h2>Transformer layers as a vector field</h2>
-      <p class="sub">Each reference token points to its most-likely next token in PCA embedding space. <b>Arrow opacity = probability; color = layer.</b> Hover any arrow or point; set a layer range; add a response + ▶ Play to animate.</p>
+      <p class="sub">Each reference token (layer <i>n</i>) points to its most-likely next token (layer <i>m</i>) in a shared, spread-out embedding layout. <b>Arrow color/opacity = probability.</b> Hover any arrow or point; set the layer range (from→to); add a response + ▶ Play to animate.</p>
     </div>
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}
@@ -173,7 +167,7 @@
   {#if data}
     <p class="caption">
       {data.reference_points} reference points · {data.starts.length} arrows ·
-      layer{data.layers.length > 1 ? "s" : ""} {data.layers.join(", ")}/{data.num_layers} ·
+      layer {data.layer_from}{#if data.layer_to !== data.layer_from}→{data.layer_to}{/if}/{data.num_layers} ·
       fan-out {data.fanout}{#if data.trajectory} · trajectory {data.trajectory.length} tokens (step {data.response_step}){/if}
     </p>
   {/if}

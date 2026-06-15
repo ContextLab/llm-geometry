@@ -64,7 +64,7 @@ def manifold(
     temperature: float = 1.0,
     reference_set_size: int | None = DEFAULT_REFERENCE_SET_SIZE,
     seed: int = DEFAULT_SEED,
-    width: float = 0.3,
+    width: float = 0.8,
     warp_top: int = 24,
     response_text: str = "",
     response_step: int = 0,

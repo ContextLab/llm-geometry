@@ -65,8 +65,8 @@ export interface Reduction2D {
 
 export interface VectorField {
   grid_n: number;
-  layer: number;
-  layers: number[];
+  layer_from: number;
+  layer_to: number;
   num_layers: number;
   temperature: number;
   fanout: number;
@@ -75,7 +75,6 @@ export interface VectorField {
   starts: number[][];
   ends: number[][];
   probs: number[];
-  arrow_layers: number[];
   start_token_strs: string[];
   end_token_strs: string[];
   trajectory?: number[][];

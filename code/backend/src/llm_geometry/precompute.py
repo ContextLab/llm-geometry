@@ -194,11 +194,9 @@ def _plan(
             raise InvalidParamError(f"temperature must be >= 0, got {temperature}")
         layer_from = int(params.get("layer_from", params.get("layer", 0)))
         layer_to = int(params.get("layer_to", layer_from))
-        if layer_to < layer_from:
-            layer_from, layer_to = layer_to, layer_from
-        layers = list(range(layer_from, layer_to + 1))
         grid_n = int(params.get("grid_n", DEFAULT_GRID_N))
         fanout = int(params.get("fanout", 4))
+        spread_mu = float(params.get("spread_mu", 0.85))
         rss = params.get("reference_set_size", DEFAULT_REFERENCE_SET_SIZE)
         rss = int(rss) if rss is not None else None
         seed = int(params.get("seed", DEFAULT_SEED))
@@ -206,7 +204,8 @@ def _plan(
         response_text = inputs.get("response_text", "") or ""
         response_step = int(inputs.get("response_step", 0) or 0)
         norm_params = {"temperature": temperature, "layer_from": layer_from, "layer_to": layer_to,
-                       "grid_n": grid_n, "fanout": fanout, "reference_set_size": rss, "seed": seed}
+                       "grid_n": grid_n, "fanout": fanout, "spread_mu": spread_mu,
+                       "reference_set_size": rss, "seed": seed}
         key, spec = make_cache_key(
             model_id=mid, revision=revision, artifact_type="vector_field",
             inputs={"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step},
@@ -216,8 +215,9 @@ def _plan(
         def compute(cb: ProgressCb | None) -> dict[str, Any]:
             from .compute.vector_field import vector_field
 
-            return vector_field(mid, prefix_text=prefix_text, temperature=temperature, layers=layers,
-                                grid_n=grid_n, reference_set_size=rss, seed=seed, fanout=fanout,
+            return vector_field(mid, prefix_text=prefix_text, temperature=temperature,
+                                layer_from=layer_from, layer_to=layer_to, grid_n=grid_n,
+                                reference_set_size=rss, seed=seed, fanout=fanout, spread_mu=spread_mu,
                                 response_text=response_text, response_step=response_step, progress_cb=cb)
 
         return key, spec, compute

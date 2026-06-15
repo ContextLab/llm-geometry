@@ -11,13 +11,13 @@ def test_vector_field_arrows():
     # temperature 0 -> one argmax arrow per reference point, at the chosen layer
     p = get_or_compute_sync(
         "vector_field", M,
-        {"grid_n": 8, "reference_set_size": 150, "temperature": 0.0, "layer": 1},
+        {"grid_n": 8, "reference_set_size": 150, "temperature": 0.0, "layer_from": 1, "layer_to": 1},
         {"prefix_text": "Hello"},
     )
     a = p["arrays"]
     m = p["meta"]
     assert m["fanout"] == 1
-    assert m["layer"] == 1
+    assert m["layer_from"] == 1 and m["layer_to"] == 1
     assert a["starts"].shape == (m["reference_points"], 2)
     assert a["ends"].shape == (m["reference_points"], 2)
     assert m["count"] == m["reference_points"]

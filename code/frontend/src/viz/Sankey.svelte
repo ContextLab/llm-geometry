@@ -15,7 +15,7 @@
   let data = $state<SankeyData | null>(null);
   let svgEl: SVGSVGElement | undefined;
 
-  const N_PARTICLES = 28;
+  const N_PARTICLES = 600;
   const N_STEPS = 8;
   const SEED = 0;
   let debounce: ReturnType<typeof setTimeout> | undefined;

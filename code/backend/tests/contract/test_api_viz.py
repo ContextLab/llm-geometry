@@ -17,19 +17,19 @@ def test_vector_field_endpoint():
     b = r.json()
     assert len(b["starts"]) == b["reference_points"] and len(b["starts"][0]) == 2
     assert len(b["ends"]) == len(b["starts"]) and len(b["probs"]) == len(b["starts"])
-    assert b["layer"] == 1 and b["layers"] == [1]
-    assert set(b["arrow_layers"]) == {1}
+    assert b["layer_from"] == 1 and b["layer_to"] == 1
 
 
 def test_vector_field_layer_range_endpoint():
+    # from = layer 0 (start positions), to = layer 2 (end positions)
     r = client.get("/api/vector_field", params={
         "model_id": M, "prefix_text": "Hi", "grid_n": 6, "reference_set_size": 120,
         "temperature": 0.0, "layer_from": 0, "layer_to": 2,
     })
     assert r.status_code == 200
     b = r.json()
-    assert b["layers"] == [0, 1, 2]
-    assert set(b["arrow_layers"]) == {0, 1, 2}  # arrows overlaid across the layer range
+    assert b["layer_from"] == 0 and b["layer_to"] == 2
+    assert len(b["starts"]) == len(b["ends"]) == b["reference_points"]
 
 
 def test_tokenize_endpoint():
