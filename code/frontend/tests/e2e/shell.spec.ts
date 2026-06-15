@@ -29,7 +29,7 @@ test("shell renders with controls and the view switcher", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "llm-geometry" })).toBeVisible();
   await expect(page.getByTestId("controls")).toBeVisible();
   await expect(page.getByTestId("view-tabs")).toBeVisible();
-  for (const id of ["vector", "sankey", "manifold", "preview"]) {
+  for (const id of ["vector", "sankey", "manifold"]) {
     await expect(page.getByTestId(`tab-${id}`)).toBeVisible();
   }
 });
@@ -39,7 +39,13 @@ test("vector field renders real arrows", async ({ page }) => {
   await selectTinyModel(page);
   await page.getByTestId("tab-vector").click();
   await ready(page, "viz-vector");
-  await expect(page.locator('[data-testid="vector-svg"] line').first()).toBeVisible();
+  // The drift flow field is a regular grid of many uniform arrows + the full-vocab cloud.
+  // (Assert the field rendered rather than one arrow's bbox: a horizontal arrow has a
+  // ~zero-height bounding box and would read as "hidden" — same flat-geometry caveat as
+  // the Sankey links.)
+  await expect.poll(async () => page.locator('[data-testid="vector-svg"] g.arrows line').count(),
+    { timeout: 60_000 }).toBeGreaterThan(50);
+  await expect(page.getByTestId("vector-cloud")).toBeVisible();
   await page.screenshot({ path: "tests/e2e/__screenshots__/viz-vector.png", fullPage: true });
 });
 

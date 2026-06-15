@@ -4,7 +4,6 @@
   import ResponseAnimator from "./controls/ResponseAnimator.svelte";
   import Temperature from "./controls/Temperature.svelte";
   import LayerSlider from "./controls/LayerSlider.svelte";
-  import Preview from "./preview/Preview.svelte";
   import VectorField from "./viz/VectorField.svelte";
   import Sankey from "./viz/Sankey.svelte";
   import Manifold from "./viz/Manifold.svelte";
@@ -15,7 +14,6 @@
     { id: "vector", label: "Vector field" },
     { id: "sankey", label: "Sankey" },
     { id: "manifold", label: "Manifold" },
-    { id: "preview", label: "Preview" },
   ];
 </script>
 
@@ -59,8 +57,6 @@
         <Sankey />
       {:else if $view === "manifold"}
         <Manifold />
-      {:else}
-        <Preview />
       {/if}
     </div>
   </main>

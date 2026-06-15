@@ -18,7 +18,7 @@ export const responseTokenCount = writable<number>(0);
 export const isPlaying = writable<boolean>(false);
 
 // Which view is active in the main panel.
-export type View = "vector" | "sankey" | "manifold" | "preview";
+export type View = "vector" | "sankey" | "manifold";
 export const view = writable<View>("vector");
 
 export function clampTemperature(value: number): number {

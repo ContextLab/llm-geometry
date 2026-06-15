@@ -5,11 +5,12 @@
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
 
-  // Visualization 1 (project_description.md §1): a dot for EVERY vocabulary token (the
-  // spread static-embedding cloud, drawn on a canvas) with quiver arrows on top — each
-  // reference token (layer n) points to its most-likely next token (layer m) in that SAME
-  // shared layout. Supports a layer range, temperature fan-out, response trajectory, and
-  // step animation. Hover any arrow, reference point, or background dot.
+  // Visualization 1 (project_description.md §1) — a macOS "Drift"-style flow field. A dot
+  // for every vocabulary token (the spread embedding cloud, on a canvas) under a REGULAR
+  // grid of fixed-origin, uniform-length arrows. Each arrow's orientation is the local
+  // prediction flow (nearest token at layer n → its predicted next token at layer m); the
+  // orientations rotate smoothly as the prompt reshapes the output. Hover any arrow, grid
+  // origin, or background dot; ▶ Play traces the response as a growing trajectory.
   let loading = $state(false);
   let progress = $state(0);
   let progressMsg = $state("");
@@ -21,7 +22,7 @@
   let stageEl: HTMLDivElement | undefined;
 
   const H = 480;
-  const GRID_N = 14;
+  const GRID_N = 16;
   const REF = 220;
   const FANOUT = 3;
   const SEED = 0;
@@ -72,8 +73,8 @@
       });
       if (my !== runId) return;
       const vf = await client.getVectorField(m, { prefix_text: pfx, response_text: resp, response_step: step, ...params });
-      // Fetch the cloud with the EXACT seed/spread_mu the field used, so dots & arrows
-      // share one layout. The full-vocab cloud is model-only and multi-MB → memoized.
+      // Fetch the cloud with the EXACT seed/spread_mu the field used so dots & arrows share
+      // one layout. The full-vocab cloud is model-only and multi-MB → memoized client-side.
       const cl = await client.getTokenCloud(m, vf.seed, vf.spread_mu).catch(() => null);
       if (my !== runId) return;
       data = vf;
@@ -94,8 +95,7 @@
     return [lo, hi];
   }
 
-  // One coordinate→pixel mapping shared by the cloud (canvas) and arrows (svg). Prefer the
-  // cloud's extent (it spans the whole token space) so arrows sit correctly among the dots.
+  // One coordinate→pixel mapping shared by the cloud (canvas) and arrows (svg).
   function scales(w: number) {
     const d = data!;
     const xs = cloud ? cloud.coords.map((c) => c[0]) : [...d.starts.map((s) => s[0]), ...d.ends.map((e) => e[0])];
@@ -111,7 +111,7 @@
     lastW = w;
     const { x, y } = scales(w);
     drawCloud(w, x, y);
-    drawArrows(w, x, y);
+    drawField(w, x, y);
   }
 
   // Background: a dim dot for every vocabulary token, on a canvas (an SVG node per token
@@ -131,102 +131,126 @@
     for (let i = 0; i < c.length; i++) ctx.fillRect(x(c[i][0]) - 0.7, y(c[i][1]) - 0.7, 1.4, 1.4);
   }
 
-  function drawArrows(w: number, x: d3.ScaleLinear<number, number>, y: d3.ScaleLinear<number, number>) {
+  // Persistent SVG structure so keyed joins can TRANSITION arrow orientations between
+  // renders (the "drift" rotation). Origins are a fixed grid → indices align across prompts.
+  function ensure() {
+    const svg = d3.select(svgEl!);
+    if (svg.select("defs").empty()) {
+      svg.append("defs").append("marker")
+        .attr("id", "vf-arrow").attr("viewBox", "0 0 10 10")
+        .attr("refX", 8).attr("refY", 5).attr("markerWidth", 6).attr("markerHeight", 6)
+        .attr("orient", "auto-start-reverse")
+        .append("path").attr("d", "M0,0 L10,5 L0,10 z").attr("fill", "context-stroke");
+      svg.append("rect").attr("class", "bg").attr("fill", "transparent");
+      svg.append("g").attr("class", "arrows");
+      svg.append("g").attr("class", "origins");
+      svg.append("g").attr("class", "traj");
+    }
+    return svg;
+  }
+
+  function drawField(w: number, x: d3.ScaleLinear<number, number>, y: d3.ScaleLinear<number, number>) {
     const d = data!;
-    const svg = d3.select(svgEl!).attr("viewBox", `0 0 ${w} ${H}`);
-    svg.selectAll("*").remove();
+    const svg = ensure().attr("viewBox", `0 0 ${w} ${H}`);
 
     // Background hit area: hovering empty space reveals the nearest cloud token.
-    const bg = svg.append("rect").attr("width", w).attr("height", H).attr("fill", "transparent");
+    const bg = svg.select<SVGRectElement>("rect.bg").attr("width", w).attr("height", H);
     if (cloud) {
       const pts = cloud.coords.map((c, i) => ({ px: x(c[0]), py: y(c[1]), id: cloud!.token_ids[i] }));
       const qt = d3.quadtree<{ px: number; py: number; id: number }>().x((p) => p.px).y((p) => p.py).addAll(pts);
       bg.on("mousemove", (event) => {
         const [mx, my] = d3.pointer(event);
         const f = qt.find(mx, my, 12);
-        if (f) showTip(event, `token #${f.id}`);
-        else hideTip();
+        if (f) showTip(event, `token #${f.id}`); else hideTip();
       }).on("mouseleave", hideTip);
     }
 
-    // Arrowhead that inherits each line's stroke colour (SVG2 context-stroke, Chromium).
-    const defs = svg.append("defs");
-    defs.append("marker")
-      .attr("id", "vf-arrow").attr("viewBox", "0 0 10 10")
-      .attr("refX", 8).attr("refY", 5).attr("markerWidth", 6).attr("markerHeight", 6)
-      .attr("orient", "auto-start-reverse")
-      .append("path").attr("d", "M0,0 L10,5 L0,10 z").attr("fill", "context-stroke");
-
     const maxp = Math.max(...d.probs, 1e-6);
-    const pcolor = d3.scaleSequential(d3.interpolateCool).domain([0, maxp]);
-    const rows = d.starts.map((s, i) => ({ s, e: d.ends[i], p: d.probs[i], i }));
+    // Warm palette so arrows pop against the cool-blue token cloud.
+    const pcolor = d3.scaleSequential(d3.interpolatePlasma).domain([-0.15 * maxp, maxp]);
     const rel = (p: number) => Math.min(1, p / maxp);
+    const rows = d.starts.map((s, i) => ({ s, e: d.ends[i], p: d.probs[i], i }));
 
-    const g = svg.append("g");
-    g.selectAll("line")
-      .data(rows)
-      .join("line")
+    const onMove = (event: any, r: any) =>
+      showTip(event, `${d.start_token_strs[r.i]} → ${d.end_token_strs[r.i]}\nlayer ${d.layer_from}→${d.layer_to} · ${(r.p * 100).toFixed(1)}%`);
+
+    const arrows = svg.select("g.arrows").selectAll<SVGLineElement, any>("line")
+      .data(rows, (r: any) => r.i)
+      .join(
+        (enter) => enter.append("line")
+          .attr("x1", (r) => x(r.s[0])).attr("y1", (r) => y(r.s[1]))
+          .attr("x2", (r) => x(r.s[0])).attr("y2", (r) => y(r.s[1])) // grow from the origin
+          .attr("marker-end", "url(#vf-arrow)")
+          .attr("opacity", 0),
+        (update) => update,
+        (exit) => exit.remove(),
+      );
+    arrows.on("mousemove", onMove).on("mouseleave", hideTip);
+    arrows.transition().duration(600).ease(d3.easeCubicOut)
       .attr("x1", (r) => x(r.s[0])).attr("y1", (r) => y(r.s[1]))
       .attr("x2", (r) => x(r.e[0])).attr("y2", (r) => y(r.e[1]))
       .attr("stroke", (r) => pcolor(r.p))
-      .attr("stroke-width", (r) => 1.0 + 1.8 * rel(r.p))
-      .attr("marker-end", "url(#vf-arrow)")
-      // emphasise likely arrows, fade unlikely fan-out (prob² contrast) so the field reads
-      .attr("opacity", (r) => 0.12 + 0.85 * rel(r.p) * rel(r.p))
-      .on("mousemove", (event, r: any) =>
-        showTip(event, `${d.start_token_strs[r.i]} → ${d.end_token_strs[r.i]}\nlayer ${d.layer_from}→${d.layer_to} · ${(r.p * 100).toFixed(1)}%`))
-      .on("mouseleave", hideTip);
+      .attr("stroke-width", (r) => 1.3 + 1.6 * rel(r.p))
+      .attr("opacity", (r) => 0.4 + 0.55 * rel(r.p)); // every arrow visible; confident ones pop
 
-    // reference points (interactive hover reveals the token)
-    const refIdx = new Map<string, number>();
-    d.starts.forEach((s, i) => refIdx.set(`${s[0]},${s[1]}`, i));
-    g.selectAll("circle.ref")
-      .data(d.starts)
-      .join("circle")
-      .attr("class", "ref")
-      .attr("cx", (s) => x(s[0])).attr("cy", (s) => y(s[1]))
-      .attr("r", 2.6).attr("fill", "#b794f6").attr("opacity", 0.7)
-      .on("mousemove", (event, s: any) => {
-        const i = refIdx.get(`${s[0]},${s[1]}`) ?? 0;
-        showTip(event, `reference point: ${d.start_token_strs[i]}`);
-      })
-      .on("mouseleave", hideTip);
+    // Fixed grid origins (one dot per origin, dedup by position).
+    const seen = new Set<string>();
+    const origins: { s: number[]; i: number }[] = [];
+    d.starts.forEach((s, i) => {
+      const k = `${s[0]},${s[1]}`;
+      if (!seen.has(k)) { seen.add(k); origins.push({ s, i }); }
+    });
+    svg.select("g.origins").selectAll<SVGCircleElement, any>("circle")
+      .data(origins, (o: any) => `${o.s[0]},${o.s[1]}`)
+      .join(
+        (enter) => enter.append("circle").attr("r", 1.6).attr("fill", "#8aa0d8").attr("opacity", 0.55)
+          .attr("cx", (o) => x(o.s[0])).attr("cy", (o) => y(o.s[1])),
+        (update) => update,
+        (exit) => exit.remove(),
+      )
+      .on("mousemove", (event, o: any) => showTip(event, `grid origin · nearest token: ${d.start_token_strs[o.i]}`))
+      .on("mouseleave", hideTip)
+      .transition().duration(600)
+      .attr("cx", (o) => x(o.s[0])).attr("cy", (o) => y(o.s[1]));
 
-    // Response trajectory — grows as ▶ Play advances (step = tokens consumed into context).
-    if (d.trajectory && d.trajectory.length) {
-      const traj = d.trajectory;
-      const tp = d.trajectory_probs ?? [];
-      const step = d.response_step; // 0 = full path; while playing, reveal up to `step`
-      const cur = step - 1;
-      const shown = step > 0 ? step : traj.length;
-      const tl = svg.append("g");
-      for (let i = 0; i < traj.length - 1; i++) {
-        const active = step === 0 || i < shown - 1;
-        tl.append("line")
-          .attr("x1", x(traj[i][0])).attr("y1", y(traj[i][1]))
-          .attr("x2", x(traj[i + 1][0])).attr("y2", y(traj[i + 1][1]))
-          .attr("stroke", "#5be0b0")
-          .attr("stroke-width", active ? 2.6 : 1.2)
-          .attr("opacity", active ? 0.9 : 0.18);
-      }
-      const cscale = d3.scaleSequential(d3.interpolateViridis).domain([0, 1]);
-      tl.selectAll("circle.tp")
-        .data(traj)
-        .join("circle")
-        .attr("class", "tp")
-        .attr("cx", (t) => x(t[0])).attr("cy", (t) => y(t[1]))
-        .attr("r", (_t, i) => (i === cur ? 9 : step === 0 || i < shown ? 5 : 3))
-        .attr("fill", (_t, i) => cscale(tp[i] ?? 0))
-        .attr("stroke", (_t, i) => (i === cur ? "#5be0b0" : "#fff"))
-        .attr("stroke-width", (_t, i) => (i === cur ? 3 : 1))
-        .attr("opacity", (_t, i) => (step === 0 || i < shown ? 1 : 0.3))
-        .each(function (_t, i) {
-          d3.select(this)
-            .on("mousemove", (event) =>
-              showTip(event, `${d.trajectory_token_strs?.[i] ?? ""}  ${((tp[i] ?? 0) * 100).toFixed(1)}%`))
-            .on("mouseleave", hideTip);
-        });
+    drawTrajectory(svg, x, y);
+  }
+
+  function drawTrajectory(svg: any, x: d3.ScaleLinear<number, number>, y: d3.ScaleLinear<number, number>) {
+    const d = data!;
+    const g = svg.select("g.traj");
+    g.selectAll("*").remove();
+    if (!d.trajectory || !d.trajectory.length) return;
+    const traj = d.trajectory;
+    const tp = d.trajectory_probs ?? [];
+    const step = d.response_step; // 0 = full path; while playing, reveal up to `step`
+    const cur = step - 1;
+    const shown = step > 0 ? step : traj.length;
+    for (let i = 0; i < traj.length - 1; i++) {
+      const active = step === 0 || i < shown - 1;
+      g.append("line")
+        .attr("x1", x(traj[i][0])).attr("y1", y(traj[i][1]))
+        .attr("x2", x(traj[i + 1][0])).attr("y2", y(traj[i + 1][1]))
+        .attr("stroke", "#5be0b0").attr("stroke-width", active ? 2.6 : 1.2)
+        .attr("opacity", active ? 0.9 : 0.18);
     }
+    const cscale = d3.scaleSequential(d3.interpolateViridis).domain([0, 1]);
+    g.selectAll("circle.tp")
+      .data(traj)
+      .join("circle")
+      .attr("class", "tp")
+      .attr("cx", (t: any) => x(t[0])).attr("cy", (t: any) => y(t[1]))
+      .attr("r", (_t: any, i: number) => (i === cur ? 9 : step === 0 || i < shown ? 5 : 3))
+      .attr("fill", (_t: any, i: number) => cscale(tp[i] ?? 0))
+      .attr("stroke", (_t: any, i: number) => (i === cur ? "#5be0b0" : "#fff"))
+      .attr("stroke-width", (_t: any, i: number) => (i === cur ? 3 : 1))
+      .attr("opacity", (_t: any, i: number) => (step === 0 || i < shown ? 1 : 0.3))
+      .each(function (this: any, _t: any, i: number) {
+        d3.select(this)
+          .on("mousemove", (event) =>
+            showTip(event, `${d.trajectory_token_strs?.[i] ?? ""}  ${((tp[i] ?? 0) * 100).toFixed(1)}%`))
+          .on("mouseleave", hideTip);
+      });
   }
 </script>
 
@@ -234,7 +258,7 @@
   <header>
     <div>
       <h2>Transformer layers as a vector field</h2>
-      <p class="sub">A dot for every vocabulary token (the spread embedding cloud), with each reference token (layer <i>n</i>) pointing to its most-likely next token (layer <i>m</i>). <b>Arrow color/opacity = probability.</b> Hover any arrow, point, or background dot; set the layer range (from→to); add a response + ▶ Play to animate.</p>
+      <p class="sub">A dot for every vocabulary token under a fixed grid of flow arrows. Each arrow points the way the model is "pulled" locally — from a token (layer <i>n</i>) toward its predicted next token (layer <i>m</i>); orientations rotate as the prompt changes. <b>Colour/opacity = probability.</b> Hover any arrow, origin, or dot; add a response + ▶ Play to trace it.</p>
     </div>
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}
@@ -245,7 +269,7 @@
   </div>
   {#if data}
     <p class="caption">
-      {#if cloud}{cloud.vocab_size.toLocaleString()} token dots · {/if}{data.reference_points} reference points · {data.starts.length} arrows ·
+      {#if cloud}{cloud.vocab_size.toLocaleString()} token dots · {/if}{data.reference_points} grid arrows ·
       layer {data.layer_from}{#if data.layer_to !== data.layer_from}→{data.layer_to}{/if}/{data.num_layers} ·
       fan-out {data.fanout}{#if data.trajectory} · trajectory {data.trajectory.length} tokens (step {data.response_step}){/if}
     </p>

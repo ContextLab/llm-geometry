@@ -128,9 +128,11 @@ Query: `model_id`, `seed` (default fixed), `spread_mu` (0..1 grid-flattening, de
 
 ## GET /api/vector_field
 
-Visualization 1 (FR §1). Quiver arrows from each grid-snapped reference token (layer
-`layer_from`) to its predicted next token (layer `layer_to`), placed in the
-`/api/token_cloud` layout (same `seed`/`spread_mu`).
+Visualization 1 (FR §1). A "Drift"-style flow field: a regular `grid_n`×`grid_n` grid of
+FIXED origins over the `/api/token_cloud` layout (same `seed`/`spread_mu`). Each `start` is
+a grid origin and `end = start + unit·L` (uniform length); the unit direction is the local
+prediction flow — nearest reference token at layer `layer_from` → its predicted next token
+at layer `layer_to` — so orientations rotate as the prompt reshapes the output.
 
 Query: `model_id`, `prefix_text`, `temperature` (>0 fans out), `layer_from`, `layer_to`,
 `grid_n`, `fanout`, `seed`, `reference_set_size`, `response_text`, `response_step`.

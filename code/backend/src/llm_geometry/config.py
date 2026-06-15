@@ -13,7 +13,7 @@ from pathlib import Path
 
 # Bump whenever any cached artifact's on-disk format changes. Reads of artifacts
 # tagged with a different schema version are treated as cache misses (FR-007).
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Repo root resolved from this file:
 # .../code/backend/src/llm_geometry/config.py -> parents[4] == repo root

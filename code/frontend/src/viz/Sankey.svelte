@@ -1,7 +1,7 @@
 <script lang="ts">
   import * as d3 from "d3";
   import { sankey as d3sankey, sankeyLinkHorizontal } from "d3-sankey";
-  import { modelId, prefixText, temperature, responseText, responseStep } from "../lib/stores";
+  import { modelId, prefixText, temperature, responseText, responseStep, layerFrom, layerTo } from "../lib/stores";
   import { client, type SankeyData } from "../lib/dataClient";
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
@@ -27,6 +27,7 @@
     const temp = $temperature;
     const resp = $responseText;
     const step = $responseStep;
+    void $layerFrom; void $layerTo; // refresh on ANY control change (layers don't alter the swarm)
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(() => void load(m, pfx, temp, resp, step), 350);
     return () => {
@@ -107,7 +108,7 @@
         links: links.map((l) => ({ ...l })),
       });
 
-      svg
+      const linkSel = svg
         .append("g")
         .attr("fill", "none")
         .selectAll("path")
@@ -116,12 +117,40 @@
         .attr("d", sankeyLinkHorizontal())
         .attr("stroke", (l: any) => color(l.source.pos))
         .attr("stroke-width", (l: any) => Math.max(1, l.width))
-        .attr("stroke-opacity", 0.4)
-        .on("mousemove", (event, l: any) => showTip(event, `${label(l.st)} → ${label(l.tt)}   ${l.value} particles`))
-        .on("mouseleave", hideTip);
+        .attr("stroke-opacity", 0.4);
+
+      // The dominant trajectory through a link: walk the max-flow chain backward from its
+      // source and forward from its target, collecting the ordered token sequence.
+      const tracePath = (link: any) => {
+        const set = new Set<any>([link]);
+        let n = link.source;
+        const back = [n.name];
+        for (let g = 0; g < 64 && n.targetLinks?.length; g++) {
+          const best = n.targetLinks.reduce((a: any, b: any) => (b.value > a.value ? b : a));
+          set.add(best); n = best.source; back.unshift(n.name);
+        }
+        n = link.target;
+        const fwd = [n.name];
+        for (let g = 0; g < 64 && n.sourceLinks?.length; g++) {
+          const best = n.sourceLinks.reduce((a: any, b: any) => (b.value > a.value ? b : a));
+          set.add(best); n = best.target; fwd.push(n.name);
+        }
+        return { set, tokens: [...back, ...fwd] };
+      };
+      const restoreLinks = () =>
+        linkSel.attr("stroke-opacity", 0.4).attr("stroke-width", (l: any) => Math.max(1, l.width));
+      linkSel
+        .on("mousemove", (event, l: any) => {
+          const { set, tokens } = tracePath(l);
+          linkSel
+            .attr("stroke-opacity", (ll: any) => (set.has(ll) ? 0.92 : 0.05))
+            .attr("stroke-width", (ll: any) => Math.max(1, ll.width) * (set.has(ll) ? 1.5 : 1));
+          showTip(event, `trajectory (${l.value} particles):\n${tokens.join(" → ")}`);
+        })
+        .on("mouseleave", () => { restoreLinks(); hideTip(); });
 
       const node = svg.append("g").selectAll("g").data(graph.nodes).join("g");
-      node
+      const rectSel = node
         .append("rect")
         .attr("x", (n: any) => n.x0)
         .attr("y", (n: any) => n.y0)
@@ -129,8 +158,20 @@
         .attr("height", (n: any) => Math.max(1, n.y1 - n.y0))
         .attr("fill", (n: any) => color(n.pos))
         .attr("rx", 2)
-        .on("mousemove", (event, n: any) => showTip(event, `position ${n.pos}: ${n.name}   ${n.count} particles`))
-        .on("mouseleave", hideTip);
+        .attr("stroke", "none")
+        .on("mousemove", (event, n: any) => {
+          // highlight the hovered token + the links that touch it
+          rectSel.attr("opacity", (m: any) => (m === n ? 1 : 0.35));
+          rectSel.filter((m: any) => m === n).attr("stroke", "#eaf0ff").attr("stroke-width", 2);
+          const touch = new Set<any>([...(n.sourceLinks ?? []), ...(n.targetLinks ?? [])]);
+          linkSel.attr("stroke-opacity", (l: any) => (touch.has(l) ? 0.92 : 0.05));
+          showTip(event, `position ${n.pos}: ${n.name}   ${n.count} particles`);
+        })
+        .on("mouseleave", () => {
+          rectSel.attr("opacity", 1).attr("stroke", "none");
+          restoreLinks();
+          hideTip();
+        });
       node
         .append("text")
         .attr("x", (n: any) => (n.x0 < w / 2 ? n.x1 + 5 : n.x0 - 5))
@@ -213,7 +254,7 @@
   <header>
     <div>
       <h2>Token sequences as a Sankey diagram</h2>
-      <p class="sub">A particle swarm samples next tokens across positions. <b>Top strip = the full combined distribution per position; flow width = particle count.</b> Hover any node or flow for its tokens.</p>
+      <p class="sub">A particle swarm samples next tokens across positions. <b>Top strip = the full combined distribution per position; flow width = particle count.</b> Hover a flow to light up its full trajectory + token sequence; hover a token to highlight it.</p>
     </div>
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}

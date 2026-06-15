@@ -30,8 +30,10 @@
         message = `${ref.display_name} · ${ref.capabilities.num_layers ?? "?"} layers`;
         const nl = ref.capabilities.num_layers ?? 0;
         numLayers.set(nl);
-        layerFrom.update((l: number) => Math.min(l, nl));
-        layerTo.update((l: number) => Math.min(l, nl));
+        // Default to the FULL model: layer 0 (input) → last layer (output), so the view
+        // shows how input tokens become output tokens across the whole network.
+        layerFrom.set(0);
+        layerTo.set(nl);
       })
       .catch((e) => {
         if (cancelled) return;
@@ -51,7 +53,9 @@
 
 <div class="control">
   <span class="label">Model <span class="badge {status}" data-testid="model-status">{status}</span></span>
-  <select bind:value={$modelId} data-testid="model-select">
+  <!-- One-way (value + onchange), NOT bind:value: the store is the single source of truth,
+       so the DOM can never write a spurious option back while the list loads async. -->
+  <select value={$modelId} onchange={(e) => modelId.set(e.currentTarget.value)} data-testid="model-select">
     {#each models as m (m.model_id)}
       <option value={m.model_id}>{m.display_name ?? m.model_id}</option>
     {/each}

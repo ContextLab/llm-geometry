@@ -1,15 +1,13 @@
 """Visualization 3 — reachable "thoughts" as a warped manifold. (project_description.md §3)
 
 Reduce embeddings to 3D unit directions (tokens sit on a radius-2 sphere). Start from a
-unit sphere mesh and, for each likely next token, move the nearest sphere vertex TOWARD
-that token's radius-2 coordinate (distance ∝ emission probability), dragging neighbors
-along via a normalized RBF, then apply Open3D `deform_as_rigid_as_possible` (ARAP).
-Looping over the top emitting tokens produces the final reachable-thoughts manifold.
-
-Follows the `normed_rbf` / `warp_mesh` recipe in project_description.md. The ARAP step
-constrains the warped (bump) region and lets the rest deform rigidly. NOTE: the
-order-invariant combination of per-token warps is flagged as open research in the
-description; here warps are applied sequentially over the top tokens.
+unit sphere mesh and raise a smooth outward bump in the direction of each likely next
+token (height ∝ emission probability) via a radial RBF lift, then apply Open3D
+`deform_as_rigid_as_possible` (ARAP). The per-token RBF caps are SUMMED into one lift
+field (commutative → order-invariant, the open question flagged in the description) and
+the total is capped, so the surface is a set of gentle rounded domes rather than a sharp
+teardrop spiking toward a single token. Lifting each vertex along its own radial direction
+(not toward one shared point) is what keeps the bumps rounded.
 """
 
 from __future__ import annotations
@@ -28,44 +26,14 @@ from .embeddings import reference_token_ids
 ProgressCb = Callable[[float, str], None]
 
 
-def _normed_rbf(x: np.ndarray, center: np.ndarray, width: float, exponent: int = 2) -> np.ndarray:
-    vals = np.exp(-np.power(cdist(x, np.atleast_2d(center)), exponent) / width)
-    vals -= vals.min()
-    top = vals.max()
-    if top > 0:
-        vals /= top
-    return vals  # [V, 1] in [0, 1]
-
-
-def _warp_mesh(o3d, mesh, target: np.ndarray, p: float, width: float, exponent: int = 2):
-    """Move the closest vertex toward ``target`` by proportion ``p`` (RBF-weighted over
-    neighbors), then ARAP-deform. Mirrors project_description.md's warp_mesh."""
-    verts = np.asarray(mesh.vertices)
-    closest = int(np.argmin(cdist(verts, np.atleast_2d(target))))
-    weights = p * _normed_rbf(verts, verts[closest], width, exponent)  # [V,1]
-    tgt = np.tile(np.asarray(target, dtype=float), (verts.shape[0], 1))
-    w = np.tile(weights, (1, verts.shape[1]))
-    warped = tgt * w + verts * (1.0 - w)
-
-    # Constrain the meaningfully-warped (bump) region; ARAP rigidly deforms the rest.
-    moved = np.where(weights[:, 0] > 0.02)[0]
-    if moved.size == 0:
-        return mesh
-    ids = o3d.utility.IntVector([int(i) for i in moved])
-    positions = o3d.utility.Vector3dVector(warped[moved])
-    deformed = mesh.deform_as_rigid_as_possible(ids, positions, max_iter=3)
-    deformed.compute_vertex_normals()
-    return deformed
-
-
 def manifold(
     model_id: str,
     prefix_text: str = "",
     temperature: float = 1.0,
     reference_set_size: int | None = None,  # None = a dot for EVERY vocab token
     seed: int = DEFAULT_SEED,
-    width: float = 0.8,
-    warp_top: int = 24,
+    width: float = 0.3,  # RBF cap width on the UNIT sphere (small = localized rounded domes)
+    warp_top: int = 48,
     response_text: str = "",
     response_step: int = 0,
     progress_cb: ProgressCb | None = None,
@@ -98,19 +66,39 @@ def manifold(
 
     if progress_cb:
         progress_cb(0.45, "building sphere mesh")
-    mesh = o3d.geometry.TriangleMesh.create_sphere(radius=1.0, resolution=24)
+    mesh = o3d.geometry.TriangleMesh.create_sphere(radius=1.0, resolution=30)
     mesh.compute_vertex_normals()
-    orig = np.asarray(mesh.vertices).copy()
+    verts = np.asarray(mesh.vertices)
+    orig = verts.copy()
+    vdir = verts / (np.linalg.norm(verts, axis=1, keepdims=True) + 1e-9)
 
+    # Accumulate ONE smooth outward-lift field over the top emitting tokens. Summing the
+    # per-token RBF caps is order-invariant (the description's open question) and avoids the
+    # spiky overshoot of stacking sequential ARAP warps; the cap keeps every bulge a gentle
+    # rounded dome. sqrt compresses the dominant token so the surface is lumpy, not a spike.
+    if progress_cb:
+        progress_cb(0.55, "accumulating warp field")
     order = np.argsort(-emis)[:max(1, int(warp_top))]
-    for rank, ti in enumerate(order):
-        p = float(emis[ti]) * 0.9
+    lift = np.zeros(verts.shape[0])
+    for ti in order:
+        p = float(np.sqrt(max(0.0, emis[ti]))) * 0.5
         if p <= 1e-3:
             continue
-        target = dirs[ti] * 2.0  # the token's coordinate on the radius-2 sphere
-        mesh = _warp_mesh(o3d, mesh, target, p, width)
+        d = cdist(verts, np.atleast_2d(dirs[ti]))[:, 0]  # distance to the token's direction
+        lift += p * np.exp(-(d * d) / width)
+    cap = 0.55  # smooth (tanh) saturation keeps overlapping bumps rounded, never a flat mesa
+    lift = cap * np.tanh(lift / cap)
+    warped = verts + vdir * lift[:, None]  # rounded radial bumps (radius ≤ ~1.55)
+
+    # ARAP: constrain the bumped caps, let the rest deform rigidly (keeps it smooth).
+    moved = np.where(lift > 0.02)[0]
+    if moved.size:
         if progress_cb:
-            progress_cb(0.45 + 0.5 * (rank + 1) / len(order), f"warping toward token {rank + 1}/{len(order)}")
+            progress_cb(0.8, "ARAP smoothing")
+        ids = o3d.utility.IntVector([int(i) for i in moved])
+        positions = o3d.utility.Vector3dVector(warped[moved])
+        mesh = mesh.deform_as_rigid_as_possible(ids, positions, max_iter=5)
+        mesh.compute_vertex_normals()
 
     final_verts = np.asarray(mesh.vertices)
     faces = np.asarray(mesh.triangles)

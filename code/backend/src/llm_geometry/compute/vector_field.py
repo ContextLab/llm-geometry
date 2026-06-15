@@ -1,13 +1,15 @@
 """Visualization 1 — transformer layers as a vector field (quiver). (project_description.md §1)
 
-Each grid vertex snaps to its nearest token (a "reference point"). For a layer range
-n..m, the arrow START is the reference token's embedding at layer n and the arrow END is
-its most-likely next token's embedding at layer m (the doc's "input at the first layer,
-response is from the last layer"). Both layers are projected into ONE shared PCA space,
-then spread toward an even grid-like layout (mapper-style density flattening).
+Rendered as a macOS "Drift"-style flow field: a regular n×n grid of FIXED origins is laid
+over the full-vocabulary token cloud. Each origin's arrow points, at a UNIFORM length, in
+the local prediction-flow direction — from the nearest reference token's layer-`from`
+position toward its predicted next token's layer-`to` position — so the field's
+orientations rotate as the prompt reshapes the model's output. Positions live in the cached
+``token_cloud`` layout (shared with the dots); contextual embeddings are projected through
+its PCA and placed via ``reduce.spread.warp_like``.
 
-- LAYER RANGE (from n, to m): start = layer n, end = layer m.
-- TEMPERATURE fan-out: temperature > 0 draws the top-`fanout` arrows per reference point.
+- LAYER RANGE (from n, to m): direction = predicted@layer-m − reference@layer-n.
+- TEMPERATURE fan-out: temperature > 0 draws the top-`fanout` arrows per grid origin.
 - RESPONSE trajectory + animation: effective context = prefix + response[:response_step].
 """
 
@@ -158,21 +160,31 @@ def vector_field(
         else np.empty((0, 2), dtype=np.float32)
     )
 
+    # "Drift"-style flow field: a regular n×n grid of FIXED origins over the token-cloud
+    # extent. Each origin's arrow points in the local prediction-flow direction (from the
+    # nearest reference token toward the token it predicts) at a UNIFORM length, so the
+    # field reads as a quiver whose orientations rotate as the prompt reshapes the output.
     from scipy.spatial import cKDTree
 
-    xmin, ymin = flat_start.min(0)
-    xmax, ymax = flat_start.max(0)
-    gx, gy = np.meshgrid(np.linspace(xmin, xmax, grid_n), np.linspace(ymin, ymax, grid_n))
-    vertices = np.column_stack([gx.ravel(), gy.ravel()])
-    _, ref_idx = cKDTree(flat_start).query(vertices, k=1)
-    unique_ref = np.unique(ref_idx)
+    lo = np.percentile(cloud_warped, 1, axis=0)
+    hi = np.percentile(cloud_warped, 99, axis=0)
+    gx, gy = np.meshgrid(np.linspace(lo[0], hi[0], grid_n), np.linspace(lo[1], hi[1], grid_n))
+    grid_vertices = np.column_stack([gx.ravel(), gy.ravel()])  # fixed regular-grid origins
+    _, nn = cKDTree(flat_start).query(grid_vertices, k=1)       # nearest predicted reference
+    cell = min((hi[0] - lo[0]) / (grid_n - 1), (hi[1] - lo[1]) / (grid_n - 1))
+    arrow_len = 0.42 * float(cell)  # uniform arrow length
 
     starts, ends, probs, s_tokens, e_tokens = [], [], [], [], []
-    for r in unique_ref:
+    for gi in range(grid_vertices.shape[0]):
+        r = int(nn[gi])
+        v = grid_vertices[gi]
         for f in range(fan):
             p_tok = int(top_tokens[r, f])
-            starts.append(flat_start[r])
-            ends.append(flat_pred[pred_row[p_tok]])
+            d = flat_pred[pred_row[p_tok]] - flat_start[r]
+            norm = float(np.hypot(d[0], d[1]))
+            u = d / norm if norm > 1e-9 else np.zeros(2)
+            starts.append(v)
+            ends.append(v + u * arrow_len)
             probs.append(float(top_probs[r, f]))
             s_tokens.append(int(token_ids[r]))
             e_tokens.append(p_tok)
@@ -181,7 +193,7 @@ def vector_field(
         "model_id": lm.model_id, "revision": lm.revision, "grid_n": grid_n,
         "layer_from": n_from, "layer_to": n_to, "num_layers": lm.num_layers,
         "temperature": float(temperature), "fanout": fan, "prefix_text": prefix_text or "",
-        "count": len(starts), "reference_points": int(unique_ref.shape[0]),
+        "count": len(starts), "reference_points": int(grid_vertices.shape[0]),
         "response_step": int(response_step), "spread_mu": float(spread_mu),
         "seed": int(seed), "vocab_size": int(cloud["meta"]["vocab_size"]),
         "start_token_strs": [lm.tokenizer.decode([t]) for t in s_tokens],
