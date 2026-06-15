@@ -29,8 +29,11 @@ real models — the shared foundation all three visualizations will run on:
 - `code/frontend/` — Svelte + TypeScript + Vite shell: shared controls (model selector,
   prompt prefix, temperature, layer), a cached-data client (`lib/dataClient.ts`), and a
   minimal live preview. Vitest unit + Playwright e2e tests.
-- The three production visualizations are **not built yet** — they are separate upcoming
-  features that consume this machinery.
+- **All three visualizations are implemented** on top of the machinery and selectable
+  via the web app's view switcher: a **vector field** (D3 quiver of next-token arrows),
+  a **Sankey** diagram (d3-sankey over a particle swarm), and a **manifold** (Three.js
+  RBF-warped sphere). Backends live in `code/backend/src/llm_geometry/compute/`
+  (`vector_field.py`, `sankey.py`, `manifold.py`); frontends in `code/frontend/src/viz/`.
 
 Still template scaffolding (to be replaced/extended as the science lands):
 - `paper/main.tex` is the boilerplate "Template paper" (sin/cos demo figure).

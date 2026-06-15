@@ -15,8 +15,17 @@ detection, real next-token distributions and per-layer embeddings, 2D (PCA/UMAP)
 precompute-and-cache pipeline with single-flight dedup and SSE progress, a FastAPI
 service, and a Svelte web shell with the shared controls and a live preview.
 
-Spec, plan, and tasks live in [`specs/001-core-machinery/`](specs/001-core-machinery/).
-The three production visualizations are separate, upcoming features.
+All **three visualizations** are now implemented on top of that foundation and
+selectable via the view switcher in the web app:
+1. **Vector field** — an *n×n* grid of reference tokens, each drawn as an arrow to its
+   most-likely next token in 2D-reduced (PCA) embedding space.
+2. **Sankey diagram** — a particle swarm samples next tokens across positions; flow
+   width is the particle count (d3-sankey).
+3. **Manifold** — a 3D sphere warped (RBF) outward toward likely next tokens, rendered
+   with Three.js (drag to rotate, scroll to zoom).
+
+Spec, plan, and tasks for the foundation live in
+[`specs/001-core-machinery/`](specs/001-core-machinery/).
 
 ## Quickstart
 

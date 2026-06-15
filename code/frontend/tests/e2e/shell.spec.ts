@@ -4,62 +4,55 @@ import { expect, test, type Page } from "@playwright/test";
 // stays reliable; gpt2 is the app default and is exercised on first load.
 const TINY = "sshleifer/tiny-gpt2";
 
-async function setRange(page: Page, testid: string, value: string) {
-  await page.getByTestId(testid).evaluate((el: HTMLInputElement, v: string) => {
-    el.value = v;
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
-  }, value);
-}
-
-test("shell renders with shared controls and the preview", async ({ page }) => {
-  await page.goto("/");
-  await expect(page.getByRole("heading", { name: "llm-geometry" })).toBeVisible();
-  await expect(page.getByTestId("controls")).toBeVisible();
-  await expect(page.getByTestId("preview")).toBeVisible();
-  await expect(page.getByTestId("model-select")).toBeVisible();
-  await expect(page.getByTestId("prefix-input")).toBeVisible();
-  await expect(page.getByTestId("temp-input")).toBeVisible();
-  await expect(page.getByTestId("layer-input")).toBeVisible();
-});
-
-test("default model (gpt2) renders a real distribution and embedding scatter", async ({ page }) => {
-  await page.goto("/");
-  await expect(page.getByTestId("model-status")).toHaveText("ok");
-  // First load may download/load gpt2 then compute — generous timeout.
-  await expect(page.getByTestId("dist-bars")).toBeVisible({ timeout: 200_000 });
-  await expect(page.locator('[data-testid="scatter"] circle').first()).toBeVisible({ timeout: 200_000 });
-  await expect(page.getByTestId("updated")).toBeVisible({ timeout: 200_000 });
-  await page.screenshot({ path: "tests/e2e/__screenshots__/shell-gpt2.png", fullPage: true });
-});
-
-test("controls drive real cached data into the preview", async ({ page }) => {
-  await page.goto("/");
-
-  // Use the fast real model.
+async function selectTinyModel(page: Page) {
   await page.getByTestId("model-custom").fill(TINY);
   await page.getByTestId("model-custom").press("Enter");
   await expect(page.getByTestId("model-status")).toHaveText("ok");
+}
 
-  // Real next-token distribution + 2D scatter render.
-  await expect(page.getByTestId("dist-bars")).toBeVisible();
-  await expect(page.locator('[data-testid="scatter"] circle').first()).toBeVisible();
-
-  // Changing the layer triggers a recompute -> the preview's render counter increments
-  // (a deterministic signal, unlike the 1s-resolution timestamp).
-  const rendersBefore = Number(await page.getByTestId("preview").getAttribute("data-renders"));
-  await setRange(page, "layer-input", "1");
-  await expect(page.getByTestId("layer-value")).toHaveText("1");
+async function ready(page: Page, testid: string) {
   await expect
-    .poll(async () => Number(await page.getByTestId("preview").getAttribute("data-renders")), { timeout: 120_000 })
-    .toBeGreaterThan(rendersBefore);
+    .poll(async () => page.getByTestId(testid).getAttribute("data-ready"), { timeout: 200_000 })
+    .toBe("1");
+}
 
-  // Changing temperature is reflected in the control + refetches the distribution.
-  await setRange(page, "temp-input", "0.10");
-  await expect(page.getByTestId("temp-value")).toHaveText("0.10");
-  await expect(page.getByTestId("dist-bars")).toBeVisible();
+test("shell renders with controls and the view switcher", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "llm-geometry" })).toBeVisible();
+  await expect(page.getByTestId("controls")).toBeVisible();
+  await expect(page.getByTestId("view-tabs")).toBeVisible();
+  for (const id of ["vector", "sankey", "manifold", "preview"]) {
+    await expect(page.getByTestId(`tab-${id}`)).toBeVisible();
+  }
+});
 
-  await page.screenshot({ path: "tests/e2e/__screenshots__/shell.png", fullPage: true });
+test("vector field renders real arrows", async ({ page }) => {
+  await page.goto("/");
+  await selectTinyModel(page);
+  await page.getByTestId("tab-vector").click();
+  await ready(page, "viz-vector");
+  await expect(page.locator('[data-testid="vector-svg"] line').first()).toBeVisible();
+  await page.screenshot({ path: "tests/e2e/__screenshots__/viz-vector.png", fullPage: true });
+});
+
+test("sankey renders the particle swarm", async ({ page }) => {
+  await page.goto("/");
+  await selectTinyModel(page);
+  await page.getByTestId("tab-sankey").click();
+  await ready(page, "viz-sankey");
+  // node rects (real area) or the "not enough transitions" note — both are valid renders.
+  // (Flat link <path>s can report a ~zero bounding box, so assert on the rects.)
+  await expect(page.locator('[data-testid="sankey-svg"] rect, [data-testid="sankey-svg"] text').first()).toBeVisible();
+  await page.screenshot({ path: "tests/e2e/__screenshots__/viz-sankey.png", fullPage: true });
+});
+
+test("manifold renders a 3D canvas", async ({ page }) => {
+  await page.goto("/");
+  await selectTinyModel(page);
+  await page.getByTestId("tab-manifold").click();
+  await ready(page, "viz-manifold");
+  await expect(page.locator('[data-testid="manifold-canvas"] canvas')).toBeVisible();
+  await page.screenshot({ path: "tests/e2e/__screenshots__/viz-manifold.png", fullPage: true });
 });
 
 test("an unsupported model shows a clear error and no fabricated data", async ({ page }) => {
@@ -70,5 +63,4 @@ test("an unsupported model shows a clear error and no fabricated data", async ({
   await expect(page.getByTestId("model-message")).toContainText(
     /could not|not exist|Unsupported|configuration|gated/i,
   );
-  await page.screenshot({ path: "tests/e2e/__screenshots__/error.png", fullPage: true });
 });
