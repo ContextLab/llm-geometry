@@ -72,6 +72,9 @@ export interface VectorField {
   fanout: number;
   reference_points: number;
   response_step: number;
+  seed: number;
+  spread_mu: number;
+  vocab_size: number;
   starts: number[][];
   ends: number[][];
   probs: number[];
@@ -85,6 +88,15 @@ export interface VectorField {
 export interface TokenizeResult {
   model_id: string;
   tokens: { token: number; token_str: string }[];
+}
+
+export interface TokenCloud {
+  model_id: string;
+  vocab_size: number;
+  seed: number;
+  spread_mu: number;
+  coords: number[][]; // one [x, y] per vocabulary token (the spread layout)
+  token_ids: number[];
 }
 
 export interface SankeyNode {
@@ -113,6 +125,7 @@ export interface ManifoldData {
   token_points: number[][];
   token_emis: number[];
   token_strs: string[];
+  token_ids: number[];
   top_tokens: { token_str: string; prob: number }[];
 }
 
@@ -217,6 +230,22 @@ export function createClient(opts: ClientOptions = {}) {
     return request("/api/manifold" + qs({ model_id, ...params }));
   }
 
+  // The full-vocab cloud only depends on (model, seed, spread_mu) and is multi-MB, so it's
+  // fetched once and memoized; the vector field re-fetches only its (small) arrows.
+  const cloudCache = new Map<string, Promise<TokenCloud>>();
+  function getTokenCloud(model_id: string, seed = 0, spread_mu = 0.65): Promise<TokenCloud> {
+    const k = `${model_id}|${seed}|${spread_mu}`;
+    let p = cloudCache.get(k);
+    if (!p) {
+      p = request<TokenCloud>("/api/token_cloud" + qs({ model_id, seed, spread_mu })).catch((e) => {
+        cloudCache.delete(k); // don't memoize failures
+        throw e;
+      });
+      cloudCache.set(k, p);
+    }
+    return p;
+  }
+
   function tokenize(model_id: string, text: string): Promise<TokenizeResult> {
     return request("/api/tokenize" + qs({ model_id, text }));
   }
@@ -296,6 +325,7 @@ export function createClient(opts: ClientOptions = {}) {
     getVectorField,
     getSankey,
     getManifold,
+    getTokenCloud,
     tokenize,
     pollJob,
     subscribeProgress,

@@ -114,6 +114,59 @@ Query: `model_id`, `method` (`mds|pca3`, default `mds`), `seed` (default fixed).
          "coords": [[x,y,z]…],          // each on the unit sphere
          "token_ids": [...] }`
 
+## GET /api/token_cloud
+
+Full-vocabulary 2D cloud — **a dot for every token** (static-embedding PCA → density-
+flattened "spread" layout). Computed once per model (cached) and the shared coordinate
+space the vector-field arrows are placed in. Multi-MB; the browser fetches it once.
+
+Query: `model_id`, `seed` (default fixed), `spread_mu` (0..1 grid-flattening, default 0.65).
+→ `200 { "model_id","revision","vocab_size","seed","spread_mu",
+         "coords": [[x,y]…],            // length = vocab_size (the spread layout)
+         "token_ids": [...] }`          // aligned with coords
+(The internal `raw`/`pca_*` projection arrays used to place arrows are NOT shipped.)
+
+## GET /api/vector_field
+
+Visualization 1 (FR §1). Quiver arrows from each grid-snapped reference token (layer
+`layer_from`) to its predicted next token (layer `layer_to`), placed in the
+`/api/token_cloud` layout (same `seed`/`spread_mu`).
+
+Query: `model_id`, `prefix_text`, `temperature` (>0 fans out), `layer_from`, `layer_to`,
+`grid_n`, `fanout`, `seed`, `reference_set_size`, `response_text`, `response_step`.
+→ `200 { …,"layer_from","layer_to","num_layers","fanout","reference_points","vocab_size",
+         "seed","spread_mu","response_step",
+         "starts": [[x,y]…], "ends": [[x,y]…], "probs": [...],
+         "start_token_strs": [...], "end_token_strs": [...],
+         "trajectory": [[x,y]…]?, "trajectory_probs": [...]?, "trajectory_token_strs": [...]? }`
+
+## GET /api/sankey
+
+Visualization 2 (FR §2). Particle-swarm next-token flow (hundreds–thousands of particles).
+
+Query: `model_id`, `prefix_text`, `temperature`, `n_particles`, `n_steps`, `seed`,
+`response_text`, `response_step`.
+→ `200 { "n_steps","nodes":[{pos,token,count}…],"links":[{pos,source_token,target_token,value}…],
+         "token_strs": { "<id>": "str" }, "per_position": [{pos, top:[{token,prob}…]}…] }`
+
+## GET /api/manifold
+
+Visualization 3 (FR §3). Unit sphere warped (RBF + Open3D ARAP) toward likely next tokens;
+**a dot for every token** on the radius-2 sphere.
+
+Query: `model_id`, `prefix_text`, `temperature`, `seed`, `reference_set_size` (default = full
+vocab), `response_text`, `response_step`.
+→ `200 { …,"n_vertices","n_faces","top_tokens":[{token_str,prob}…],"token_strs":[...],
+         "vertices": [[x,y,z]…], "faces": [[i,j,k]…], "warp": [...],
+         "token_points": [[x,y,z]…], "token_emis": [...], "token_ids": [...] }`
+
+## GET /api/tokenize
+
+Token ids + strings for a text (lets the UI animate over response tokens).
+
+Query: `model_id`, `text`.
+→ `200 { "model_id", "tokens": [{ "token": id, "token_str": "str" }…] }`
+
 ## Static frontend
 
 `GET /` and assets serve the built Svelte bundle in production. In dev the Vite

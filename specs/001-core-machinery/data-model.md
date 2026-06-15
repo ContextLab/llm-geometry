@@ -95,7 +95,7 @@ What it represents: a stored computation result and its provenance/integrity.
 |Field|Type|Notes|
 |-|-|-|
 |`key`|str|hash of `{schema_version, model_id, revision, artifact_type, inputs, params, seed}` (R6)|
-|`artifact_type`|enum|`embeddings` \| `distribution` \| `reduction_2d` \| `reduction_3d` \| `grid`|
+|`artifact_type`|enum|`embeddings` \| `distribution` \| `reduction_2d` \| `reduction_3d` \| `grid` \| `token_cloud` \| `vector_field` \| `sankey` \| `manifold`|
 |`spec`|object|the full, sorted key spec (inspectable sidecar)|
 |`checksum`|str|content hash of the payload (FR-007)|
 |`schema_version`|int|bumped when artifact format changes (FR-007)|

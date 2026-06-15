@@ -94,7 +94,7 @@ def vector_field(
     reference_set_size: int | None = DEFAULT_REFERENCE_SET_SIZE,
     seed: int = DEFAULT_SEED,
     fanout: int = 4,
-    spread_mu: float = 0.85,
+    spread_mu: float = 0.65,
     response_text: str = "",
     response_step: int = 0,
     progress_cb: ProgressCb | None = None,
@@ -128,28 +128,35 @@ def vector_field(
             to_by_token[int(p)] = miss[i]
 
     if progress_cb:
-        progress_cb(0.82, "projecting (shared PCA) + spreading")
-    from sklearn.decomposition import PCA
+        progress_cb(0.82, "projecting into the full-vocab token cloud")
+    # Shared coordinate space: the cached full-vocabulary cloud (a dot per token). Project
+    # the contextual layer-n / layer-m embeddings through the SAME PCA, then map them into
+    # the cloud's spread layout so the arrows overlay the dots coherently. The cloud is
+    # computed once per model and cached (and fetched once by the browser).
+    from ..precompute import get_or_compute_sync
+    from ..reduce.spread import warp_like
 
-    pca = PCA(n_components=2, random_state=seed).fit(np.vstack([emb_from, emb_to]).astype(np.float64))
-    start_coords = pca.transform(emb_from.astype(np.float64))
+    cloud = get_or_compute_sync("token_cloud", model_id, {"seed": seed, "spread_mu": spread_mu})
+    ca = cloud["arrays"]
+    pca_mean = ca["pca_mean"].astype(np.float64)        # (H,)
+    pca_comp = ca["pca_components"].astype(np.float64)  # (2, H)
+    cloud_raw = ca["raw"].astype(np.float64)            # (V, 2) raw PCA projection
+    cloud_warped = ca["warped"].astype(np.float64)      # (V, 2) spread layout
+
+    def _project(emb: np.ndarray) -> np.ndarray:
+        return (np.asarray(emb, dtype=np.float64) - pca_mean) @ pca_comp.T
+
     pred_list = [int(p) for p in predicted]
-    pred_raw = pca.transform(np.vstack([to_by_token[p] for p in pred_list]).astype(np.float64))
     pred_row = {p: i for i, p in enumerate(pred_list)}
+    flat_start = warp_like(_project(emb_from), cloud_raw, cloud_warped)
+    flat_pred = warp_like(_project(np.vstack([to_by_token[p] for p in pred_list])), cloud_raw, cloud_warped)
 
     traj = _trajectory_embeddings(lm, prefix_ids(lm, prefix_text), response_text, n_to) if response_text else None
-    traj_raw = pca.transform(traj[0]) if traj is not None else np.empty((0, 2))
-
-    # Spread the whole field toward an even grid-like layout (mapper density flattening).
-    from ..reduce.spread import flatten_density
-
-    n_ref = start_coords.shape[0]
-    n_pred = pred_raw.shape[0]
-    combined = np.vstack([start_coords, pred_raw, traj_raw])
-    flat = flatten_density(combined, mu=spread_mu, seed=seed)
-    flat_start = flat[:n_ref]
-    flat_pred = flat[n_ref : n_ref + n_pred]
-    flat_traj = flat[n_ref + n_pred :]
+    flat_traj = (
+        warp_like(_project(traj[0]), cloud_raw, cloud_warped)
+        if traj is not None
+        else np.empty((0, 2), dtype=np.float32)
+    )
 
     from scipy.spatial import cKDTree
 
@@ -176,6 +183,7 @@ def vector_field(
         "temperature": float(temperature), "fanout": fan, "prefix_text": prefix_text or "",
         "count": len(starts), "reference_points": int(unique_ref.shape[0]),
         "response_step": int(response_step), "spread_mu": float(spread_mu),
+        "seed": int(seed), "vocab_size": int(cloud["meta"]["vocab_size"]),
         "start_token_strs": [lm.tokenizer.decode([t]) for t in s_tokens],
         "end_token_strs": [lm.tokenizer.decode([t]) for t in e_tokens],
     }

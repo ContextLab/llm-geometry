@@ -7,6 +7,34 @@ from llm_geometry.precompute import get_or_compute_sync
 M = "sshleifer/tiny-gpt2"
 
 
+def test_token_cloud_full_vocab():
+    # a dot for EVERY vocabulary token (static-embedding PCA, spread), cached per model
+    p = get_or_compute_sync("token_cloud", M, {"seed": 0, "spread_mu": 0.85})
+    a, m = p["arrays"], p["meta"]
+    vocab = m["vocab_size"]
+    assert a["warped"].shape == (vocab, 2)
+    assert a["token_ids"].shape == (vocab,)
+    assert np.array_equal(a["token_ids"], np.arange(vocab))
+    assert np.isfinite(a["warped"]).all()
+    # internal projection arrays used to place the vector-field arrows in the same space
+    assert a["pca_components"].shape[0] == 2
+    assert a["pca_mean"].ndim == 1 and a["raw"].shape == (vocab, 2)
+
+
+def test_vector_field_uses_cloud_space():
+    # vector-field arrows must live inside the full-vocab cloud's spread extent
+    cloud = get_or_compute_sync("token_cloud", M, {"seed": 0, "spread_mu": 0.85})["arrays"]["warped"]
+    p = get_or_compute_sync(
+        "vector_field", M,
+        {"grid_n": 8, "reference_set_size": 150, "temperature": 0.0, "layer_from": 0, "layer_to": 1, "seed": 0},
+        {"prefix_text": "Hello"},
+    )
+    a, m = p["arrays"], p["meta"]
+    assert m["vocab_size"] == cloud.shape[0]
+    pad = 0.25 * (cloud.max(0) - cloud.min(0) + 1e-9)
+    assert (a["starts"] >= cloud.min(0) - pad).all() and (a["starts"] <= cloud.max(0) + pad).all()
+
+
 def test_vector_field_arrows():
     # temperature 0 -> one argmax arrow per reference point, at the chosen layer
     p = get_or_compute_sync(

@@ -16,7 +16,6 @@
   let data = $state<ManifoldData | null>(null);
   let containerEl: HTMLDivElement | undefined;
 
-  const REF = 256;
   const SEED = 0;
 
   let renderer: THREE.WebGLRenderer | undefined;
@@ -78,9 +77,10 @@
       ndc.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(ndc, camera);
       const hits = raycaster.intersectObject(points);
-      if (hits.length && hits[0].index != null && data.token_strs) {
+      if (hits.length && hits[0].index != null) {
         const i = hits[0].index;
-        showTip(ev, `${data.token_strs[i] ?? ""}   emission ${((data.token_emis?.[i] ?? 0) * 100).toFixed(1)}%`);
+        const label = data.token_strs?.[i] ?? `token #${data.token_ids?.[i] ?? i}`;
+        showTip(ev, `${label}   emission ${((data.token_emis?.[i] ?? 0) * 100).toFixed(1)}%`);
       } else {
         hideTip();
       }
@@ -148,7 +148,7 @@
       }
       pgeom.setAttribute("color", new THREE.BufferAttribute(pcolors, 3));
       const pmat = new THREE.PointsMaterial({
-        size: 0.06,
+        size: d.token_points.length > 20000 ? 0.018 : 0.05,
         vertexColors: true,
         transparent: true,
         opacity: 0.85,
@@ -190,7 +190,7 @@
     progress = 0;
     progressMsg = "starting…";
     try {
-      const params = { temperature: temp, reference_set_size: REF, seed: SEED };
+      const params = { temperature: temp, seed: SEED }; // full vocab (a dot per token)
       const inputs = { prefix_text: pfx, response_text: resp, response_step: step };
       await client.ensureArtifact("manifold", m, params, inputs, (p, msg) => {
         if (my === runId) {

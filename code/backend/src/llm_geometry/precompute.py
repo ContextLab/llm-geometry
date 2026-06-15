@@ -32,7 +32,7 @@ ProgressCb = Callable[[float, str], None]
 
 ARTIFACT_TYPES = (
     "distribution", "embeddings", "reduction_2d", "reduction_3d",
-    "vector_field", "sankey", "manifold",
+    "token_cloud", "vector_field", "sankey", "manifold",
 )
 
 _store = CacheStore()
@@ -188,6 +188,21 @@ def _plan(
 
         return key, spec, compute
 
+    if artifact_type == "token_cloud":
+        seed = int(params.get("seed", DEFAULT_SEED))
+        spread_mu = float(params.get("spread_mu", 0.65))
+        norm_params = {"seed": seed, "spread_mu": spread_mu}
+        key, spec = make_cache_key(
+            model_id=mid, revision=revision, artifact_type="token_cloud", params=norm_params,
+        )
+
+        def compute(cb: ProgressCb | None) -> dict[str, Any]:
+            from .compute.token_cloud import token_cloud
+
+            return token_cloud(mid, seed=seed, spread_mu=spread_mu, progress_cb=cb)
+
+        return key, spec, compute
+
     if artifact_type == "vector_field":
         temperature = float(params.get("temperature", 1.0))
         if temperature < 0:
@@ -196,7 +211,7 @@ def _plan(
         layer_to = int(params.get("layer_to", layer_from))
         grid_n = int(params.get("grid_n", DEFAULT_GRID_N))
         fanout = int(params.get("fanout", 4))
-        spread_mu = float(params.get("spread_mu", 0.85))
+        spread_mu = float(params.get("spread_mu", 0.65))
         rss = params.get("reference_set_size", DEFAULT_REFERENCE_SET_SIZE)
         rss = int(rss) if rss is not None else None
         seed = int(params.get("seed", DEFAULT_SEED))
@@ -252,7 +267,7 @@ def _plan(
         temperature = float(params.get("temperature", 1.0))
         if temperature < 0:
             raise InvalidParamError(f"temperature must be >= 0, got {temperature}")
-        rss = params.get("reference_set_size", DEFAULT_REFERENCE_SET_SIZE)
+        rss = params.get("reference_set_size", None)  # None = every vocab token
         rss = int(rss) if rss is not None else None
         seed = int(params.get("seed", DEFAULT_SEED))
         prefix_text = inputs.get("prefix_text", "") or ""

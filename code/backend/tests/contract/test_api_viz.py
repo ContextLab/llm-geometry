@@ -32,6 +32,16 @@ def test_vector_field_layer_range_endpoint():
     assert len(b["starts"]) == len(b["ends"]) == b["reference_points"]
 
 
+def test_token_cloud_endpoint():
+    r = client.get("/api/token_cloud", params={"model_id": M, "seed": 0})
+    assert r.status_code == 200
+    b = r.json()
+    assert b["vocab_size"] == len(b["coords"]) == len(b["token_ids"])
+    assert len(b["coords"][0]) == 2
+    # the endpoint must NOT leak the internal projection arrays to the browser
+    assert "raw" not in b and "pca_components" not in b
+
+
 def test_tokenize_endpoint():
     r = client.get("/api/tokenize", params={"model_id": M, "text": "Paris is nice"})
     assert r.status_code == 200

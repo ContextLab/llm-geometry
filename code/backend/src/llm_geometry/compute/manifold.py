@@ -62,7 +62,7 @@ def manifold(
     model_id: str,
     prefix_text: str = "",
     temperature: float = 1.0,
-    reference_set_size: int | None = DEFAULT_REFERENCE_SET_SIZE,
+    reference_set_size: int | None = None,  # None = a dot for EVERY vocab token
     seed: int = DEFAULT_SEED,
     width: float = 0.8,
     warp_top: int = 24,
@@ -130,13 +130,17 @@ def manifold(
             {"token_str": lm.tokenizer.decode([int(token_ids[i])]), "prob": float(emis[i])}
             for i in top_list
         ],
-        "token_strs": [lm.tokenizer.decode([int(t)]) for t in token_ids],  # aligned with token_points
+        # Per-point strings only when the set is small enough to ship; at full vocab the
+        # hover falls back to the token id (decoding 150k strings would bloat the payload).
+        "token_strs": ([lm.tokenizer.decode([int(t)]) for t in token_ids] if len(token_ids) <= 8000 else []),
     }
+    arrays_token_ids = token_ids.astype(np.int64)
     arrays = {
         "vertices": final_verts.astype(np.float32),
         "faces": faces.astype(np.int64),
         "warp": warp.astype(np.float32),
         "token_points": (dirs * 2.0).astype(np.float32),
         "token_emis": emis.astype(np.float32),
+        "token_ids": arrays_token_ids,
     }
     return {"meta": meta, "arrays": arrays}

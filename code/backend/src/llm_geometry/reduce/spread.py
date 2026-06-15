@@ -50,3 +50,32 @@ def flatten_density(coords: np.ndarray, mu: float = 0.85, iters: int = 120, seed
 
     out = coords + float(mu) * (pts - coords)
     return out.astype(np.float32)
+
+
+def warp_like(points: np.ndarray, src: np.ndarray, dst: np.ndarray, k: int = 8) -> np.ndarray:
+    """Map ``points`` (in ``src``'s coordinate space) into ``dst``'s space using kNN
+    inverse-distance displacement interpolation of the ``src -> dst`` field.
+
+    Lets a few hundred arrow endpoints be placed into the SAME spread layout that was
+    precomputed for the full-vocabulary token cloud (``src`` = raw projection,
+    ``dst`` = density-flattened layout), without re-running the global spread.
+    """
+    points = np.atleast_2d(np.asarray(points, dtype=np.float64))
+    src = np.asarray(src, dtype=np.float64)
+    dst = np.asarray(dst, dtype=np.float64)
+    if points.size == 0:
+        return points.astype(np.float32)
+    from scipy.spatial import cKDTree
+
+    kk = max(1, min(int(k), src.shape[0]))
+    d, idx = cKDTree(src).query(points, k=kk)
+    d = np.atleast_2d(d.astype(np.float64))
+    idx = np.atleast_2d(idx)
+    if d.shape[0] != points.shape[0]:  # k==1 returns 1-D; normalize orientation
+        d = d.T
+        idx = idx.T
+    w = 1.0 / (d + 1e-9)
+    w /= w.sum(axis=1, keepdims=True)
+    disp = dst - src  # per-cloud-point displacement
+    interp = np.einsum("nk,nkd->nd", w, disp[idx])
+    return (points + interp).astype(np.float32)

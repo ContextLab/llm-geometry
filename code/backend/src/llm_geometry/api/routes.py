@@ -195,6 +195,24 @@ def reduction_3d(
     })
 
 
+@router.get("/token_cloud")
+def token_cloud_route(
+    model_id: str,
+    seed: int = DEFAULT_SEED,
+    spread_mu: float = 0.65,
+) -> dict[str, Any]:
+    """Full-vocabulary 2D cloud (a dot per token) — the shared layout the vector field's
+    arrows sit in. Cached once per model; the browser fetches it once and reuses it."""
+    payload = get_or_compute_sync("token_cloud", model_id, {"seed": seed, "spread_mu": spread_mu})
+    meta = dict(payload["meta"])
+    a = payload["arrays"]
+    return _jsonable({
+        **meta,
+        "coords": a["warped"].tolist(),
+        "token_ids": a["token_ids"].tolist(),
+    })
+
+
 @router.get("/vector_field")
 def vector_field_route(
     model_id: str,
@@ -275,6 +293,7 @@ def manifold_route(
         **meta,
         "vertices": a["vertices"].tolist(), "faces": a["faces"].tolist(), "warp": a["warp"].tolist(),
         "token_points": a["token_points"].tolist(), "token_emis": a["token_emis"].tolist(),
+        "token_ids": a["token_ids"].tolist(),
     })
 
 
