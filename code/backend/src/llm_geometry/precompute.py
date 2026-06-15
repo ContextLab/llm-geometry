@@ -30,7 +30,10 @@ from .models.loader import resolve_model
 
 ProgressCb = Callable[[float, str], None]
 
-ARTIFACT_TYPES = ("distribution", "embeddings", "reduction_2d", "reduction_3d")
+ARTIFACT_TYPES = (
+    "distribution", "embeddings", "reduction_2d", "reduction_3d",
+    "vector_field", "sankey", "manifold",
+)
 
 _store = CacheStore()
 _key_locks: dict[str, threading.Lock] = {}
@@ -179,6 +182,73 @@ def _plan(
             if cb:
                 cb(1.0, "done")
             return {"meta": meta, "arrays": {"coords": coords, "token_ids": token_ids}}
+
+        return key, spec, compute
+
+    if artifact_type == "vector_field":
+        temperature = float(params.get("temperature", 1.0))
+        if temperature < 0:
+            raise InvalidParamError(f"temperature must be >= 0, got {temperature}")
+        grid_n = int(params.get("grid_n", DEFAULT_GRID_N))
+        rss = params.get("reference_set_size", DEFAULT_REFERENCE_SET_SIZE)
+        rss = int(rss) if rss is not None else None
+        seed = int(params.get("seed", DEFAULT_SEED))
+        prefix_text = inputs.get("prefix_text", "") or ""
+        norm_params = {"temperature": temperature, "grid_n": grid_n, "reference_set_size": rss, "seed": seed}
+        key, spec = make_cache_key(
+            model_id=mid, revision=revision, artifact_type="vector_field",
+            inputs={"prefix_text": prefix_text}, params=norm_params,
+        )
+
+        def compute(cb: ProgressCb | None) -> dict[str, Any]:
+            from .compute.vector_field import vector_field
+
+            return vector_field(mid, prefix_text=prefix_text, temperature=temperature,
+                                grid_n=grid_n, reference_set_size=rss, seed=seed, progress_cb=cb)
+
+        return key, spec, compute
+
+    if artifact_type == "sankey":
+        temperature = float(params.get("temperature", 1.0))
+        if temperature < 0:
+            raise InvalidParamError(f"temperature must be >= 0, got {temperature}")
+        n_particles = int(params.get("n_particles", 24))
+        n_steps = int(params.get("n_steps", 8))
+        seed = int(params.get("seed", DEFAULT_SEED))
+        prefix_text = inputs.get("prefix_text", "") or ""
+        norm_params = {"temperature": temperature, "n_particles": n_particles, "n_steps": n_steps, "seed": seed}
+        key, spec = make_cache_key(
+            model_id=mid, revision=revision, artifact_type="sankey",
+            inputs={"prefix_text": prefix_text}, params=norm_params,
+        )
+
+        def compute(cb: ProgressCb | None) -> dict[str, Any]:
+            from .compute.sankey import sankey
+
+            return sankey(mid, prefix_text=prefix_text, temperature=temperature,
+                          n_particles=n_particles, n_steps=n_steps, seed=seed, progress_cb=cb)
+
+        return key, spec, compute
+
+    if artifact_type == "manifold":
+        temperature = float(params.get("temperature", 1.0))
+        if temperature < 0:
+            raise InvalidParamError(f"temperature must be >= 0, got {temperature}")
+        rss = params.get("reference_set_size", DEFAULT_REFERENCE_SET_SIZE)
+        rss = int(rss) if rss is not None else None
+        seed = int(params.get("seed", DEFAULT_SEED))
+        prefix_text = inputs.get("prefix_text", "") or ""
+        norm_params = {"temperature": temperature, "reference_set_size": rss, "seed": seed}
+        key, spec = make_cache_key(
+            model_id=mid, revision=revision, artifact_type="manifold",
+            inputs={"prefix_text": prefix_text}, params=norm_params,
+        )
+
+        def compute(cb: ProgressCb | None) -> dict[str, Any]:
+            from .compute.manifold import manifold
+
+            return manifold(mid, prefix_text=prefix_text, temperature=temperature,
+                            reference_set_size=rss, seed=seed, progress_cb=cb)
 
         return key, spec, compute
 

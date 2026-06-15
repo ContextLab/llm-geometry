@@ -190,3 +190,63 @@ def reduction_3d(
         "coords": arrays["coords"].tolist(),
         "token_ids": arrays["token_ids"].tolist(),
     })
+
+
+@router.get("/vector_field")
+def vector_field_route(
+    model_id: str,
+    prefix_text: str = "",
+    temperature: float = 1.0,
+    grid_n: int = DEFAULT_GRID_N,
+    seed: int = DEFAULT_SEED,
+    reference_set_size: int | None = None,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {"temperature": temperature, "grid_n": grid_n, "seed": seed}
+    if reference_set_size is not None:
+        params["reference_set_size"] = reference_set_size
+    payload = get_or_compute_sync("vector_field", model_id, params, {"prefix_text": prefix_text})
+    meta = dict(payload["meta"])
+    a = payload["arrays"]
+    return _jsonable({
+        **meta,
+        "starts": a["starts"].tolist(), "ends": a["ends"].tolist(), "probs": a["probs"].tolist(),
+        "start_tokens": a["start_tokens"].tolist(), "end_tokens": a["end_tokens"].tolist(),
+    })
+
+
+@router.get("/sankey")
+def sankey_route(
+    model_id: str,
+    prefix_text: str = "",
+    temperature: float = 1.0,
+    n_particles: int = 24,
+    n_steps: int = 8,
+    seed: int = DEFAULT_SEED,
+) -> dict[str, Any]:
+    payload = get_or_compute_sync(
+        "sankey", model_id,
+        {"temperature": temperature, "n_particles": n_particles, "n_steps": n_steps, "seed": seed},
+        {"prefix_text": prefix_text},
+    )
+    return _jsonable(dict(payload["meta"]))  # nodes / links / token_strs live in meta
+
+
+@router.get("/manifold")
+def manifold_route(
+    model_id: str,
+    prefix_text: str = "",
+    temperature: float = 1.0,
+    seed: int = DEFAULT_SEED,
+    reference_set_size: int | None = None,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {"temperature": temperature, "seed": seed}
+    if reference_set_size is not None:
+        params["reference_set_size"] = reference_set_size
+    payload = get_or_compute_sync("manifold", model_id, params, {"prefix_text": prefix_text})
+    meta = dict(payload["meta"])
+    a = payload["arrays"]
+    return _jsonable({
+        **meta,
+        "vertices": a["vertices"].tolist(), "faces": a["faces"].tolist(), "warp": a["warp"].tolist(),
+        "token_points": a["token_points"].tolist(), "token_emis": a["token_emis"].tolist(),
+    })
