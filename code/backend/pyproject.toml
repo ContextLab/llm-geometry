@@ -16,6 +16,7 @@ dependencies = [
     "scipy>=1.11",
     "scikit-learn>=1.4",
     "umap-learn>=0.5.5",
+    "open3d>=0.18",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "pydantic>=2.6",

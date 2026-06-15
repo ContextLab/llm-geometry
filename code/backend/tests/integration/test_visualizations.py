@@ -70,9 +70,16 @@ def test_sankey_reproducible_with_seed():
 def test_manifold_warped_sphere():
     p = get_or_compute_sync("manifold", M, {"reference_set_size": 150, "seed": 0}, {"prefix_text": "Hello"})
     a = p["arrays"]
+    m = p["meta"]
     assert a["vertices"].shape[1] == 3 and a["faces"].shape[1] == 3
-    assert a["vertices"].shape[0] == p["meta"]["n_vertices"]
+    assert a["vertices"].shape[0] == m["n_vertices"]
+    assert a["faces"].shape[0] == m["n_faces"]
+    # the surface is warped (Open3D ARAP toward radius-2 token coords)
+    assert float(a["warp"].max()) > 0.0
     radii = np.linalg.norm(a["vertices"], axis=1)
-    assert radii.min() >= 0.99  # the sphere only bulges outward (radius >= 1)
-    assert radii.max() > 1.0    # at least some bulge toward likely tokens
-    assert len(p["meta"]["top_tokens"]) >= 1
+    assert radii.max() > 1.3  # reaches outward toward the radius-2 token coordinates
+    # all tokens are placed on the radius-2 sphere
+    token_radii = np.linalg.norm(a["token_points"], axis=1)
+    assert np.allclose(token_radii, 2.0, atol=1e-3)
+    assert a["token_points"].shape == (150, 3)
+    assert len(m["top_tokens"]) >= 1

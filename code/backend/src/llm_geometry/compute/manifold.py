@@ -1,13 +1,15 @@
-"""Visualization 3 — reachable "thoughts" as a warped manifold.
+"""Visualization 3 — reachable "thoughts" as a warped manifold. (project_description.md §3)
 
-Reduce embeddings to 3D and place tokens as unit directions on a sphere. Compute the
-next-token emission distribution from the context, then warp a unit sphere mesh
-outward toward likely tokens using a normalized RBF (neighbors dragged along), so the
-surface bulges toward reachable next tokens. (project_description.md §3)
+Reduce embeddings to 3D unit directions (tokens sit on a radius-2 sphere). Start from a
+unit sphere mesh and, for each likely next token, move the nearest sphere vertex TOWARD
+that token's radius-2 coordinate (distance ∝ emission probability), dragging neighbors
+along via a normalized RBF, then apply Open3D `deform_as_rigid_as_possible` (ARAP).
+Looping over the top emitting tokens produces the final reachable-thoughts manifold.
 
-Note: this uses RBF displacement, a smooth, order-invariant v1 of the warp. Full
-Open3D ARAP deformation and the order-invariant multi-token combination are flagged in
-project_description.md as open research and are deferred.
+Follows the `normed_rbf` / `warp_mesh` recipe in project_description.md. The ARAP step
+constrains the warped (bump) region and lets the rest deform rigidly. NOTE: the
+order-invariant combination of per-token warps is flagged as open research in the
+description; here warps are applied sequentially over the top tokens.
 """
 
 from __future__ import annotations
@@ -15,9 +17,10 @@ from __future__ import annotations
 from typing import Any, Callable
 
 import numpy as np
+from scipy.spatial.distance import cdist
 
 from ..config import DEFAULT_REFERENCE_SET_SIZE, DEFAULT_SEED
-from ..errors import InvalidParamError
+from ..errors import ComputeError, InvalidParamError
 from ..models.loader import load_model
 from .distributions import next_token_distribution
 from .embeddings import reference_token_ids
@@ -25,23 +28,34 @@ from .embeddings import reference_token_ids
 ProgressCb = Callable[[float, str], None]
 
 
-def _uv_sphere(n_lat: int = 36, n_lon: int = 72) -> tuple[np.ndarray, np.ndarray]:
-    lats = np.linspace(0.0, np.pi, n_lat)
-    lons = np.linspace(0.0, 2.0 * np.pi, n_lon)
-    verts = []
-    for la in lats:
-        for lo in lons:
-            verts.append((np.sin(la) * np.cos(lo), np.cos(la), np.sin(la) * np.sin(lo)))
-    faces = []
-    for i in range(n_lat - 1):
-        for j in range(n_lon - 1):
-            a = i * n_lon + j
-            b = a + 1
-            c = a + n_lon
-            d = c + 1
-            faces.append((a, b, d))
-            faces.append((a, d, c))
-    return np.array(verts, dtype=np.float64), np.array(faces, dtype=np.int64)
+def _normed_rbf(x: np.ndarray, center: np.ndarray, width: float, exponent: int = 2) -> np.ndarray:
+    vals = np.exp(-np.power(cdist(x, np.atleast_2d(center)), exponent) / width)
+    vals -= vals.min()
+    top = vals.max()
+    if top > 0:
+        vals /= top
+    return vals  # [V, 1] in [0, 1]
+
+
+def _warp_mesh(o3d, mesh, target: np.ndarray, p: float, width: float, exponent: int = 2):
+    """Move the closest vertex toward ``target`` by proportion ``p`` (RBF-weighted over
+    neighbors), then ARAP-deform. Mirrors project_description.md's warp_mesh."""
+    verts = np.asarray(mesh.vertices)
+    closest = int(np.argmin(cdist(verts, np.atleast_2d(target))))
+    weights = p * _normed_rbf(verts, verts[closest], width, exponent)  # [V,1]
+    tgt = np.tile(np.asarray(target, dtype=float), (verts.shape[0], 1))
+    w = np.tile(weights, (1, verts.shape[1]))
+    warped = tgt * w + verts * (1.0 - w)
+
+    # Constrain the meaningfully-warped (bump) region; ARAP rigidly deforms the rest.
+    moved = np.where(weights[:, 0] > 0.02)[0]
+    if moved.size == 0:
+        return mesh
+    ids = o3d.utility.IntVector([int(i) for i in moved])
+    positions = o3d.utility.Vector3dVector(warped[moved])
+    deformed = mesh.deform_as_rigid_as_possible(ids, positions, max_iter=3)
+    deformed.compute_vertex_normals()
+    return deformed
 
 
 def manifold(
@@ -50,58 +64,70 @@ def manifold(
     temperature: float = 1.0,
     reference_set_size: int | None = DEFAULT_REFERENCE_SET_SIZE,
     seed: int = DEFAULT_SEED,
-    width: float = 0.2,
+    width: float = 0.3,
+    warp_top: int = 24,
     progress_cb: ProgressCb | None = None,
 ) -> dict[str, Any]:
     if temperature < 0:
         raise InvalidParamError(f"temperature must be >= 0, got {temperature}")
+    try:
+        import open3d as o3d
+    except Exception as exc:  # pragma: no cover - dependency must be installed
+        raise ComputeError(f"open3d is required for the manifold visualization: {exc}") from exc
 
     lm = load_model(model_id)
     token_ids = reference_token_ids(lm, reference_set_size)
     matrix = lm.model.get_input_embeddings().weight.detach().cpu().numpy().astype(np.float64)
     emb = matrix[token_ids]
 
-    # Reuse the tested 3D spherical reducer (handles <3 hidden dims by padding, then
-    # projects onto the unit sphere) -> token unit directions.
     from ..reduce.sphere import reduce_3d_sphere
 
-    dirs = reduce_3d_sphere(emb, method="pca3", seed=seed).astype(np.float64)
+    dirs = reduce_3d_sphere(emb, method="pca3", seed=seed).astype(np.float64)  # unit token dirs
 
     if progress_cb:
-        progress_cb(0.4, "computing emission distribution")
+        progress_cb(0.35, "computing emission distribution")
     probs_full = next_token_distribution(model_id, prefix_text=prefix_text, temperature=temperature)["arrays"]["probs"]
     emis = probs_full[token_ids].astype(np.float64)
     if emis.max() > 0:
         emis = emis / emis.max()
 
     if progress_cb:
-        progress_cb(0.6, "warping sphere (RBF)")
-    verts, faces = _uv_sphere()
-    from scipy.spatial.distance import cdist
+        progress_cb(0.45, "building sphere mesh")
+    mesh = o3d.geometry.TriangleMesh.create_sphere(radius=1.0, resolution=24)
+    mesh.compute_vertex_normals()
+    orig = np.asarray(mesh.vertices).copy()
 
-    top = np.argsort(-emis)[:200]  # warp toward the strongest emitters (tractable)
-    distances = cdist(verts, dirs[top])
-    weights = np.exp(-(distances**2) / max(width, 1e-3))
-    warp = (weights * emis[top]).sum(axis=1)
+    order = np.argsort(-emis)[:max(1, int(warp_top))]
+    for rank, ti in enumerate(order):
+        p = float(emis[ti]) * 0.9
+        if p <= 1e-3:
+            continue
+        target = dirs[ti] * 2.0  # the token's coordinate on the radius-2 sphere
+        mesh = _warp_mesh(o3d, mesh, target, p, width)
+        if progress_cb:
+            progress_cb(0.45 + 0.5 * (rank + 1) / len(order), f"warping toward token {rank + 1}/{len(order)}")
+
+    final_verts = np.asarray(mesh.vertices)
+    faces = np.asarray(mesh.triangles)
+    warp = np.linalg.norm(final_verts - orig, axis=1)  # displacement magnitude per vertex
     if warp.max() > 0:
         warp = warp / warp.max()
-    displaced = verts * (1.0 + warp[:, None])  # bulge outward up to ~2x radius
 
     if progress_cb:
         progress_cb(1.0, "done")
 
-    order = np.argsort(-emis)[:25]
+    top_list = np.argsort(-emis)[:25]
     meta = {
         "model_id": lm.model_id, "revision": lm.revision, "prefix_text": prefix_text or "",
-        "temperature": float(temperature), "n_vertices": int(verts.shape[0]),
-        "n_faces": int(faces.shape[0]),
+        "temperature": float(temperature), "n_vertices": int(final_verts.shape[0]),
+        "n_faces": int(faces.shape[0]), "warp_top": int(len(order)),
         "top_tokens": [
             {"token_str": lm.tokenizer.decode([int(token_ids[i])]), "prob": float(emis[i])}
-            for i in order
+            for i in top_list
         ],
     }
     arrays = {
-        "vertices": displaced.astype(np.float32),
+        "vertices": final_verts.astype(np.float32),
         "faces": faces.astype(np.int64),
         "warp": warp.astype(np.float32),
         "token_points": (dirs * 2.0).astype(np.float32),

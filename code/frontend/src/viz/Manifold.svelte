@@ -113,6 +113,29 @@
     const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.15 });
     mesh = new THREE.Mesh(geom, mat);
     scene.add(mesh);
+
+    // Tokens on the radius-2 sphere — the coordinates the manifold reaches toward.
+    if (d.token_points?.length) {
+      const pgeom = new THREE.BufferGeometry();
+      pgeom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(d.token_points.flat()), 3));
+      const pcolors = new Float32Array(d.token_points.length * 3);
+      for (let i = 0; i < d.token_points.length; i++) {
+        const c = LOW.clone().lerp(HIGH, Math.max(0, Math.min(1, d.token_emis?.[i] ?? 0)));
+        pcolors[i * 3] = c.r;
+        pcolors[i * 3 + 1] = c.g;
+        pcolors[i * 3 + 2] = c.b;
+      }
+      pgeom.setAttribute("color", new THREE.BufferAttribute(pcolors, 3));
+      const pmat = new THREE.PointsMaterial({
+        size: 0.06,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.85,
+        sizeAttenuation: true,
+      });
+      points = new THREE.Points(pgeom, pmat);
+      scene.add(points);
+    }
   }
 
   function teardown() {
