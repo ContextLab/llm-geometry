@@ -22,6 +22,7 @@ import numpy as np
 
 from ..config import DEFAULT_SEED
 from ..models.loader import load_model
+from .printable import printable_tokens
 
 ProgressCb = Callable[[float, str], None]
 
@@ -35,9 +36,11 @@ def token_cloud(
     lm = load_model(model_id)
     if progress_cb:
         progress_cb(0.1, "reading static embedding matrix")
-    matrix = lm.model.get_input_embeddings().weight.detach().float().cpu().numpy().astype(np.float64)
-    vocab = int(matrix.shape[0])
-    token_ids = np.arange(vocab, dtype=np.int64)
+    full = lm.model.get_input_embeddings().weight.detach().float().cpu().numpy().astype(np.float64)
+    # Only PRINTABLE tokens get a dot (no special/byte-fragment noise); ship their strings.
+    token_ids, token_strs = printable_tokens(lm)
+    matrix = full[token_ids]
+    vocab = int(token_ids.shape[0])
 
     if progress_cb:
         progress_cb(0.35, f"PCA → 2D over {vocab} tokens")
@@ -64,6 +67,7 @@ def token_cloud(
     meta = {
         "model_id": lm.model_id, "revision": lm.revision, "vocab_size": vocab,
         "seed": int(seed), "spread_mu": float(spread_mu),
+        "token_strs": token_strs,  # real decoded strings (printable), aligned with token_ids
     }
     arrays = {
         "warped": warped.astype(np.float32),          # shipped to the browser

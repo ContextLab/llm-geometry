@@ -17,11 +17,11 @@ from typing import Any, Callable
 import numpy as np
 from scipy.spatial.distance import cdist
 
-from ..config import DEFAULT_REFERENCE_SET_SIZE, DEFAULT_SEED
+from ..config import DEFAULT_SEED
 from ..errors import ComputeError, InvalidParamError
 from ..models.loader import load_model
 from .distributions import next_token_distribution
-from .embeddings import reference_token_ids
+from .printable import printable_reference_ids, printable_tokens
 
 ProgressCb = Callable[[float, str], None]
 
@@ -46,7 +46,14 @@ def manifold(
         raise ComputeError(f"open3d is required for the manifold visualization: {exc}") from exc
 
     lm = load_model(model_id)
-    token_ids = reference_token_ids(lm, reference_set_size)
+    # Only PRINTABLE tokens become markers (no special/byte-fragment noise); ship strings.
+    all_ids, all_strs = printable_tokens(lm)
+    if reference_set_size is None or int(reference_set_size) >= all_ids.shape[0]:
+        token_ids, token_strs = all_ids, all_strs
+    else:
+        token_ids = printable_reference_ids(lm, reference_set_size)
+        id2s = dict(zip(all_ids.tolist(), all_strs))
+        token_strs = [id2s[int(t)] for t in token_ids]
     matrix = lm.model.get_input_embeddings().weight.detach().float().cpu().numpy().astype(np.float64)
     emb = matrix[token_ids]
 
@@ -115,12 +122,10 @@ def manifold(
         "temperature": float(temperature), "n_vertices": int(final_verts.shape[0]),
         "n_faces": int(faces.shape[0]), "warp_top": int(len(order)),
         "top_tokens": [
-            {"token_str": lm.tokenizer.decode([int(token_ids[i])]), "prob": float(emis[i])}
+            {"token_str": token_strs[int(i)], "prob": float(emis[i])}
             for i in top_list
         ],
-        # Per-point strings only when the set is small enough to ship; at full vocab the
-        # hover falls back to the token id (decoding 150k strings would bloat the payload).
-        "token_strs": ([lm.tokenizer.decode([int(t)]) for t in token_ids] if len(token_ids) <= 8000 else []),
+        "token_strs": token_strs,  # real decoded strings (printable), aligned with token markers
     }
     arrays_token_ids = token_ids.astype(np.int64)
     arrays = {

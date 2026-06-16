@@ -207,7 +207,7 @@ def token_cloud_route(
     meta = dict(payload["meta"])
     a = payload["arrays"]
     return _jsonable({
-        **meta,
+        **meta,  # includes token_strs (printable decoded strings, aligned with token_ids)
         "coords": a["warped"].tolist(),
         "token_ids": a["token_ids"].tolist(),
     })

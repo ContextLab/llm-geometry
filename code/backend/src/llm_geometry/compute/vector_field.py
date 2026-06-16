@@ -24,7 +24,7 @@ from ..config import DEFAULT_GRID_N, DEFAULT_REFERENCE_SET_SIZE, DEFAULT_SEED, E
 from ..errors import InvalidParamError
 from ..models.loader import load_model
 from .context import effective_context_ids, prefix_ids
-from .embeddings import reference_token_ids
+from .printable import printable_reference_ids
 
 ProgressCb = Callable[[float, str], None]
 
@@ -111,7 +111,7 @@ def vector_field(
     n_to = n_from if layer_to is None else max(0, min(int(layer_to), lm.num_layers))
     fan = max(1, int(fanout)) if temperature > 0 else 1
     base = effective_context_ids(lm, prefix_text, response_text, response_step)
-    token_ids = reference_token_ids(lm, reference_set_size)
+    token_ids = printable_reference_ids(lm, reference_set_size)
 
     ref_layers = sorted({n_from, n_to})
     ref_embs, top_tokens, top_probs = _embed_layers_and_topk(
@@ -172,7 +172,7 @@ def vector_field(
     grid_vertices = np.column_stack([gx.ravel(), gy.ravel()])  # fixed regular-grid origins
     _, nn = cKDTree(flat_start).query(grid_vertices, k=1)       # nearest predicted reference
     cell = min((hi[0] - lo[0]) / (grid_n - 1), (hi[1] - lo[1]) / (grid_n - 1))
-    arrow_len = 0.42 * float(cell)  # uniform arrow length
+    arrow_len = 0.30 * float(cell)  # uniform arrow length (a fraction of the grid spacing)
 
     starts, ends, probs, s_tokens, e_tokens = [], [], [], [], []
     for gi in range(grid_vertices.shape[0]):

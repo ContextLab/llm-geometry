@@ -79,8 +79,7 @@
       const hits = raycaster.intersectObject(points);
       if (hits.length && hits[0].index != null) {
         const i = hits[0].index;
-        const label = data.token_strs?.[i] ?? `token #${data.token_ids?.[i] ?? i}`;
-        showTip(ev, `${label}   emission ${((data.token_emis?.[i] ?? 0) * 100).toFixed(1)}%`);
+        showTip(ev, `${data.token_strs?.[i] ?? ""}   emission ${((data.token_emis?.[i] ?? 0) * 100).toFixed(1)}%`);
       } else {
         hideTip();
       }
@@ -100,6 +99,8 @@
       renderer.setSize(cw, h);
       camera.aspect = cw / h;
       camera.updateProjectionMatrix();
+      const mat = points?.material as THREE.ShaderMaterial | undefined;
+      if (mat?.uniforms?.uScale) mat.uniforms.uScale.value = pointScale();
     });
     resizeObs.observe(containerEl);
   }
@@ -135,28 +136,56 @@
     mesh = new THREE.Mesh(geom, mat);
     scene.add(mesh);
 
-    // Tokens on the radius-2 sphere — the coordinates the manifold reaches toward.
+    // Tokens on the radius-2 sphere — the coordinates the manifold reaches toward. Each
+    // marker's emission probability is encoded as a SUBTLE size change and an OBVIOUS
+    // transparency change (per-point shader: likely tokens are larger and opaque, unlikely
+    // ones tiny and nearly invisible).
     if (d.token_points?.length) {
+      const n = d.token_points.length;
       const pgeom = new THREE.BufferGeometry();
       pgeom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(d.token_points.flat()), 3));
-      const pcolors = new Float32Array(d.token_points.length * 3);
-      for (let i = 0; i < d.token_points.length; i++) {
-        const c = LOW.clone().lerp(HIGH, Math.max(0, Math.min(1, d.token_emis?.[i] ?? 0)));
-        pcolors[i * 3] = c.r;
-        pcolors[i * 3 + 1] = c.g;
-        pcolors[i * 3 + 2] = c.b;
+      const pcolors = new Float32Array(n * 3);
+      const aEmis = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        const e = Math.max(0, Math.min(1, d.token_emis?.[i] ?? 0));
+        const c = LOW.clone().lerp(HIGH, e);
+        pcolors[i * 3] = c.r; pcolors[i * 3 + 1] = c.g; pcolors[i * 3 + 2] = c.b;
+        aEmis[i] = e;
       }
-      pgeom.setAttribute("color", new THREE.BufferAttribute(pcolors, 3));
-      const pmat = new THREE.PointsMaterial({
-        size: d.token_points.length > 20000 ? 0.018 : 0.05,
-        vertexColors: true,
+      pgeom.setAttribute("aColor", new THREE.BufferAttribute(pcolors, 3));
+      pgeom.setAttribute("aEmis", new THREE.BufferAttribute(aEmis, 1));
+      const pmat = new THREE.ShaderMaterial({
         transparent: true,
-        opacity: 0.85,
-        sizeAttenuation: true,
+        depthWrite: false,
+        uniforms: { uSize: { value: 0.05 }, uScale: { value: pointScale() } },
+        vertexShader: `
+          attribute vec3 aColor;
+          attribute float aEmis;
+          uniform float uSize; uniform float uScale;
+          varying vec3 vColor; varying float vAlpha;
+          void main() {
+            vColor = aColor;
+            vAlpha = 0.10 + 0.90 * aEmis;              // obvious transparency change
+            vec4 mv = modelViewMatrix * vec4(position, 1.0);
+            gl_PointSize = uSize * (0.55 + 0.9 * aEmis) * (uScale / -mv.z); // subtle size change
+            gl_Position = projectionMatrix * mv;
+          }`,
+        fragmentShader: `
+          varying vec3 vColor; varying float vAlpha;
+          void main() {
+            vec2 uv = gl_PointCoord - 0.5;
+            if (dot(uv, uv) > 0.25) discard;           // round markers
+            gl_FragColor = vec4(vColor, vAlpha);
+          }`,
       });
       points = new THREE.Points(pgeom, pmat);
       scene.add(points);
     }
+  }
+
+  // Perspective point-size attenuation scale (matches three's PointsMaterial convention).
+  function pointScale(): number {
+    return renderer ? renderer.getDrawingBufferSize(new THREE.Vector2()).height * 0.5 : 240;
   }
 
   function teardown() {

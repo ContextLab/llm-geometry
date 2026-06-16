@@ -19,6 +19,7 @@ from ..config import DEFAULT_SEED
 from ..errors import InvalidParamError
 from ..models.loader import load_model
 from .context import effective_context_ids
+from .printable import printable_tokens
 
 ProgressCb = Callable[[float, str], None]
 
@@ -49,6 +50,7 @@ def sankey(
     base = effective_context_ids(lm, prefix_text, response_text, response_step)
     eos = lm.tokenizer.eos_token_id
     t = max(float(temperature), 1e-6)
+    printable_ids = set(int(i) for i in printable_tokens(lm)[0].tolist())  # show only named tokens
 
     seqs = [list(base) for _ in range(n_particles)]
     alive = [True] * n_particles
@@ -78,13 +80,18 @@ def sankey(
                 draws[i] = int(d[j].item())
 
         combined = combined_sum / len(idxs)  # type: ignore[operator]
-        kk = min(distribution_k, int(combined.shape[0]))
-        dv, di = torch.topk(combined, k=kk)
-        per_position.append({
-            "pos": step,
-            "top": [{"token": int(di[q]), "prob": round(float(dv[q]), 5)} for q in range(kk)],
-        })
-        dist_tokens.update(int(di[q]) for q in range(kk))
+        cand = min(distribution_k * 4, int(combined.shape[0]))
+        dv, di = torch.topk(combined, k=cand)
+        top: list[dict] = []
+        for q in range(cand):
+            tok = int(di[q])
+            if tok not in printable_ids:
+                continue
+            top.append({"token": tok, "prob": round(float(dv[q]), 5)})
+            if len(top) >= distribution_k:
+                break
+        per_position.append({"pos": step, "top": top})
+        dist_tokens.update(e["token"] for e in top)
 
         for i in idxs:
             tok = draws[i]
@@ -105,8 +112,14 @@ def sankey(
     kept: set[tuple[int, int]] = set()
     for pos, lst in by_pos.items():
         lst.sort(key=lambda x: -x[1])
-        for tok, _c in lst[: max(1, int(top_nodes))]:
+        cnt = 0
+        for tok, _c in lst:  # keep the top-K PRINTABLE tokens per position
+            if tok not in printable_ids:
+                continue
             kept.add((pos, tok))
+            cnt += 1
+            if cnt >= max(1, int(top_nodes)):
+                break
 
     nodes = [
         {"pos": p, "token": tok, "count": c}

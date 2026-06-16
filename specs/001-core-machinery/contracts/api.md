@@ -116,15 +116,17 @@ Query: `model_id`, `method` (`mds|pca3`, default `mds`), `seed` (default fixed).
 
 ## GET /api/token_cloud
 
-Full-vocabulary 2D cloud — **a dot for every token** (static-embedding PCA → density-
-flattened "spread" layout). Computed once per model (cached) and the shared coordinate
-space the vector-field arrows are placed in. Multi-MB; the browser fetches it once.
+2D cloud — **a dot for every PRINTABLE token** (special/byte-fragment tokens filtered out;
+static-embedding PCA → density-flattened "spread" layout). Computed once per model (cached)
+and the shared coordinate space the vector-field arrows are placed in. Multi-MB; the
+browser fetches it once.
 
 Query: `model_id`, `seed` (default fixed), `spread_mu` (0..1 grid-flattening, default 0.65).
 → `200 { "model_id","revision","vocab_size","seed","spread_mu",
-         "coords": [[x,y]…],            // length = vocab_size (the spread layout)
-         "token_ids": [...] }`          // aligned with coords
-(The internal `raw`/`pca_*` projection arrays used to place arrows are NOT shipped.)
+         "coords": [[x,y]…],            // length = vocab_size (printable tokens)
+         "token_ids": [...],            // aligned with coords
+         "token_strs": [...] }`         // real decoded strings, aligned with coords
+(`vocab_size` is the printable count. The internal `raw`/`pca_*` arrays are NOT shipped.)
 
 ## GET /api/vector_field
 
@@ -145,6 +147,7 @@ Query: `model_id`, `prefix_text`, `temperature` (>0 fans out), `layer_from`, `la
 ## GET /api/sankey
 
 Visualization 2 (FR §2). Particle-swarm next-token flow (hundreds–thousands of particles).
+Only printable tokens are shown; the UI renders the per-position distribution as node opacity.
 
 Query: `model_id`, `prefix_text`, `temperature`, `n_particles`, `n_steps`, `seed`,
 `response_text`, `response_step`.
@@ -154,7 +157,8 @@ Query: `model_id`, `prefix_text`, `temperature`, `n_particles`, `n_steps`, `seed
 ## GET /api/manifold
 
 Visualization 3 (FR §3). Unit sphere warped (RBF + Open3D ARAP) toward likely next tokens;
-**a dot for every token** on the radius-2 sphere.
+**a dot for every PRINTABLE token** on the radius-2 sphere, each marker's size (subtle) and
+opacity (obvious) encoding its emission probability. `token_strs` ships real decoded strings.
 
 Query: `model_id`, `prefix_text`, `temperature`, `seed`, `reference_set_size` (default = full
 vocab), `response_text`, `response_step`.

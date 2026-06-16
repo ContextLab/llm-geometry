@@ -22,9 +22,9 @@
   let stageEl: HTMLDivElement | undefined;
 
   const H = 480;
-  const GRID_N = 16;
+  const GRID_N = 12;
   const REF = 220;
-  const FANOUT = 3;
+  const FANOUT = 2;
   const SEED = 0;
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let runId = 0;
@@ -138,7 +138,7 @@
     if (svg.select("defs").empty()) {
       svg.append("defs").append("marker")
         .attr("id", "vf-arrow").attr("viewBox", "0 0 10 10")
-        .attr("refX", 8).attr("refY", 5).attr("markerWidth", 6).attr("markerHeight", 6)
+        .attr("refX", 7).attr("refY", 5).attr("markerWidth", 4).attr("markerHeight", 4)
         .attr("orient", "auto-start-reverse")
         .append("path").attr("d", "M0,0 L10,5 L0,10 z").attr("fill", "context-stroke");
       svg.append("rect").attr("class", "bg").attr("fill", "transparent");
@@ -156,12 +156,12 @@
     // Background hit area: hovering empty space reveals the nearest cloud token.
     const bg = svg.select<SVGRectElement>("rect.bg").attr("width", w).attr("height", H);
     if (cloud) {
-      const pts = cloud.coords.map((c, i) => ({ px: x(c[0]), py: y(c[1]), id: cloud!.token_ids[i] }));
-      const qt = d3.quadtree<{ px: number; py: number; id: number }>().x((p) => p.px).y((p) => p.py).addAll(pts);
+      const pts = cloud.coords.map((c, i) => ({ px: x(c[0]), py: y(c[1]), s: cloud!.token_strs[i] }));
+      const qt = d3.quadtree<{ px: number; py: number; s: string }>().x((p) => p.px).y((p) => p.py).addAll(pts);
       bg.on("mousemove", (event) => {
         const [mx, my] = d3.pointer(event);
         const f = qt.find(mx, my, 12);
-        if (f) showTip(event, `token #${f.id}`); else hideTip();
+        if (f) showTip(event, f.s); else hideTip();
       }).on("mouseleave", hideTip);
     }
 
@@ -190,7 +190,7 @@
       .attr("x1", (r) => x(r.s[0])).attr("y1", (r) => y(r.s[1]))
       .attr("x2", (r) => x(r.e[0])).attr("y2", (r) => y(r.e[1]))
       .attr("stroke", (r) => pcolor(r.p))
-      .attr("stroke-width", (r) => 1.3 + 1.6 * rel(r.p))
+      .attr("stroke-width", (r) => 0.7 + 1.1 * rel(r.p))
       .attr("opacity", (r) => 0.4 + 0.55 * rel(r.p)); // every arrow visible; confident ones pop
 
     // Fixed grid origins (one dot per origin, dedup by position).
@@ -203,7 +203,7 @@
     svg.select("g.origins").selectAll<SVGCircleElement, any>("circle")
       .data(origins, (o: any) => `${o.s[0]},${o.s[1]}`)
       .join(
-        (enter) => enter.append("circle").attr("r", 1.6).attr("fill", "#8aa0d8").attr("opacity", 0.55)
+        (enter) => enter.append("circle").attr("r", 1.1).attr("fill", "#8aa0d8").attr("opacity", 0.45)
           .attr("cx", (o) => x(o.s[0])).attr("cy", (o) => y(o.s[1])),
         (update) => update,
         (exit) => exit.remove(),

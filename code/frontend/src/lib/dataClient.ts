@@ -95,8 +95,9 @@ export interface TokenCloud {
   vocab_size: number;
   seed: number;
   spread_mu: number;
-  coords: number[][]; // one [x, y] per vocabulary token (the spread layout)
+  coords: number[][]; // one [x, y] per printable token (the spread layout)
   token_ids: number[];
+  token_strs: string[]; // real decoded strings, aligned with coords/token_ids
 }
 
 export interface SankeyNode {

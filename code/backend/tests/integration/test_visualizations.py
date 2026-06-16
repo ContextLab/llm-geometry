@@ -7,14 +7,24 @@ from llm_geometry.precompute import get_or_compute_sync
 M = "sshleifer/tiny-gpt2"
 
 
-def test_token_cloud_full_vocab():
-    # a dot for EVERY vocabulary token (static-embedding PCA, spread), cached per model
+def test_token_cloud_printable_only():
+    # a dot for every PRINTABLE token (special/byte-fragment tokens filtered out), with
+    # real decoded strings shipped; cached per model
+    from llm_geometry.models.loader import load_model
+    full_vocab = load_model(M).vocab_size
     p = get_or_compute_sync("token_cloud", M, {"seed": 0, "spread_mu": 0.85})
     a, m = p["arrays"], p["meta"]
     vocab = m["vocab_size"]
     assert a["warped"].shape == (vocab, 2)
     assert a["token_ids"].shape == (vocab,)
-    assert np.array_equal(a["token_ids"], np.arange(vocab))
+    # token ids are a strictly-increasing PRINTABLE subset of the full vocab (not contiguous)
+    ids = a["token_ids"]
+    assert (np.diff(ids) > 0).all()
+    assert vocab < full_vocab and int(ids.max()) < full_vocab  # some tokens were filtered out
+    # real strings ship, aligned with ids, and every one is printable & non-empty
+    strs = m["token_strs"]
+    assert len(strs) == vocab
+    assert all(s and s.strip() and s.isprintable() and "�" not in s for s in strs[:200])
     assert np.isfinite(a["warped"]).all()
     # internal projection arrays used to place the vector-field arrows in the same space
     assert a["pca_components"].shape[0] == 2

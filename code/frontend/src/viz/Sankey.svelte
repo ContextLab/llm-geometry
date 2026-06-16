@@ -65,7 +65,6 @@
     if (!svgEl || !data) return;
     const w = svgEl.clientWidth || 680;
     const h = 560;
-    const STRIP = 104; // top band for the per-position combined distribution
     const svg = d3.select(svgEl).attr("viewBox", `0 0 ${w} ${h}`);
     svg.selectAll("*").remove();
     const d = data;
@@ -88,8 +87,6 @@
       }))
       .filter((l) => l.source !== undefined && l.target !== undefined) as any[];
 
-    const xByPos = new Map<number, number>();
-
     if (!links.length) {
       svg
         .append("text")
@@ -102,11 +99,20 @@
       const layout = d3sankey<any, any>()
         .nodeWidth(14)
         .nodePadding(9)
-        .extent([[8, STRIP + 12], [w - 8, h - 12]]);
+        .extent([[8, 16], [w - 8, h - 16]]);
       const graph = layout({
         nodes: nodes.map((n) => ({ ...n })),
         links: links.map((l) => ({ ...l })),
       });
+
+      // The combined next-token distribution is shown DIRECTLY via transparency at each
+      // timepoint: a token's opacity = its share of the particles at that position; a flow's
+      // opacity = its particle count. (No separate distribution plot.)
+      const maxAtPos = new Map<number, number>();
+      graph.nodes.forEach((n: any) => maxAtPos.set(n.pos, Math.max(maxAtPos.get(n.pos) ?? 0, n.count)));
+      const nodeAlpha = (n: any) => 0.22 + 0.78 * (n.count / (maxAtPos.get(n.pos) || 1));
+      const maxVal = Math.max(...graph.links.map((l: any) => l.value), 1);
+      const linkAlpha = (l: any) => 0.08 + 0.5 * (l.value / maxVal);
 
       const linkSel = svg
         .append("g")
@@ -117,7 +123,7 @@
         .attr("d", sankeyLinkHorizontal())
         .attr("stroke", (l: any) => color(l.source.pos))
         .attr("stroke-width", (l: any) => Math.max(1, l.width))
-        .attr("stroke-opacity", 0.4);
+        .attr("stroke-opacity", (l: any) => linkAlpha(l));
 
       // The dominant trajectory through a link: walk the max-flow chain backward from its
       // source and forward from its target, collecting the ordered token sequence.
@@ -138,7 +144,7 @@
         return { set, tokens: [...back, ...fwd] };
       };
       const restoreLinks = () =>
-        linkSel.attr("stroke-opacity", 0.4).attr("stroke-width", (l: any) => Math.max(1, l.width));
+        linkSel.attr("stroke-opacity", (l: any) => linkAlpha(l)).attr("stroke-width", (l: any) => Math.max(1, l.width));
       linkSel
         .on("mousemove", (event, l: any) => {
           const { set, tokens } = tracePath(l);
@@ -159,16 +165,17 @@
         .attr("fill", (n: any) => color(n.pos))
         .attr("rx", 2)
         .attr("stroke", "none")
+        .attr("opacity", (n: any) => nodeAlpha(n)) // transparency = probability at this timepoint
         .on("mousemove", (event, n: any) => {
           // highlight the hovered token + the links that touch it
-          rectSel.attr("opacity", (m: any) => (m === n ? 1 : 0.35));
+          rectSel.attr("opacity", (m: any) => (m === n ? 1 : nodeAlpha(m) * 0.4));
           rectSel.filter((m: any) => m === n).attr("stroke", "#eaf0ff").attr("stroke-width", 2);
           const touch = new Set<any>([...(n.sourceLinks ?? []), ...(n.targetLinks ?? [])]);
           linkSel.attr("stroke-opacity", (l: any) => (touch.has(l) ? 0.92 : 0.05));
           showTip(event, `position ${n.pos}: ${n.name}   ${n.count} particles`);
         })
         .on("mouseleave", () => {
-          rectSel.attr("opacity", 1).attr("stroke", "none");
+          rectSel.attr("opacity", (m: any) => nodeAlpha(m)).attr("stroke", "none");
           restoreLinks();
           hideTip();
         });
@@ -184,68 +191,6 @@
         .text((n: any) => n.name)
         .filter((n: any) => n.y1 - n.y0 < 9)
         .remove();
-
-      graph.nodes.forEach((n: any) => {
-        if (!xByPos.has(n.pos)) xByPos.set(n.pos, (n.x0 + n.x1) / 2);
-      });
-    }
-
-    // Per-position combined next-token distribution (violin-style stacked bars) on top.
-    const pp = d.per_position ?? [];
-    if (pp.length) {
-      const positions = pp.map((e) => e.pos);
-      if (xByPos.size === 0) {
-        positions.forEach((p, i) => xByPos.set(p, 24 + (i + 0.5) * ((w - 48) / positions.length)));
-      }
-      const colW =
-        positions.length > 1
-          ? Math.abs(
-              (xByPos.get(positions[positions.length - 1])! - xByPos.get(positions[0])!) /
-                (positions.length - 1),
-            )
-          : w / 2;
-      const barMax = Math.max(24, colW * 0.82);
-      const rowH = 16;
-      const strip = svg.append("g");
-      strip
-        .append("text")
-        .attr("x", 8)
-        .attr("y", 12)
-        .attr("fill", "var(--text-dim)")
-        .attr("font-size", "11px")
-        .text("combined next-token distribution per position");
-      pp.forEach((entry) => {
-        const cx = xByPos.get(entry.pos);
-        if (cx === undefined) return;
-        const top = entry.top.slice(0, 5);
-        const maxp = Math.max(...top.map((t) => t.prob), 1e-6);
-        top.forEach((t, i) => {
-          const bw = (t.prob / maxp) * barMax;
-          const y = 24 + i * rowH;
-          strip
-            .append("rect")
-            .attr("x", cx - bw / 2)
-            .attr("y", y)
-            .attr("width", bw)
-            .attr("height", rowH - 4)
-            .attr("rx", 2)
-            .attr("fill", color(entry.pos))
-            .attr("opacity", 0.85)
-            .on("mousemove", (event) => showTip(event, `position ${entry.pos}: ${label(t.token)}   ${(t.prob * 100).toFixed(1)}%`))
-            .on("mouseleave", hideTip);
-          if (i === 0) {
-            strip
-              .append("text")
-              .attr("x", cx)
-              .attr("y", y - 2)
-              .attr("text-anchor", "middle")
-              .attr("fill", "#cdd6ec")
-              .attr("font-size", "9px")
-              .attr("font-family", "var(--mono)")
-              .text(label(t.token).slice(0, 9));
-          }
-        });
-      });
     }
   }
 </script>
@@ -254,13 +199,13 @@
   <header>
     <div>
       <h2>Token sequences as a Sankey diagram</h2>
-      <p class="sub">A particle swarm samples next tokens across positions. <b>Top strip = the full combined distribution per position; flow width = particle count.</b> Hover a flow to light up its full trajectory + token sequence; hover a token to highlight it.</p>
+      <p class="sub">A particle swarm samples next tokens across positions. <b>A token's opacity = its share of the combined distribution at that timepoint; flow width = particle count.</b> Hover a flow to light up its full trajectory + token sequence; hover a token to highlight it.</p>
     </div>
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}
   {#if error}<div class="error" data-testid="viz-sankey-error">{error}</div>{/if}
   <svg bind:this={svgEl} class="canvas" height="560" data-testid="sankey-svg"></svg>
-  {#if data}<p class="caption">top: combined distribution per position · below: {data.nodes.length} nodes · {data.links.length} transitions · {N_PARTICLES} particles</p>{/if}
+  {#if data}<p class="caption">{data.nodes.length} token nodes · {data.links.length} transitions · {N_PARTICLES} particles · opacity = probability at each position</p>{/if}
 </section>
 
 <style>
