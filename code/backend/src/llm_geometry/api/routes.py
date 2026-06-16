@@ -294,6 +294,7 @@ def manifold_route(
         "vertices": a["vertices"].tolist(), "faces": a["faces"].tolist(), "warp": a["warp"].tolist(),
         "token_points": a["token_points"].tolist(), "token_emis": a["token_emis"].tolist(),
         "token_ids": a["token_ids"].tolist(),
+        "traj_points": a["traj_points"].tolist(),  # response trajectory on the radius-2 sphere
     })
 
 

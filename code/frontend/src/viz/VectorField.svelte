@@ -193,18 +193,18 @@
     const g = svg.select("g.traj");
     g.selectAll("*").remove();
     if (!d.trajectory || !d.trajectory.length) return;
-    const traj = d.trajectory;
     const tp = d.trajectory_probs ?? [];
-    const step = d.response_step; // 0 = full path; while playing, reveal up to `step`
-    const cur = step - 1;
-    const shown = step > 0 ? step : traj.length;
+    // Reveal exactly `response_step` tokens — one new token per frame; the full path only
+    // appears on the last frame (at rest, step = full count → the whole trajectory shows).
+    const shown = Math.min(d.response_step, d.trajectory.length);
+    if (shown <= 0) return;
+    const traj = d.trajectory.slice(0, shown);
+    const cur = shown - 1;
     for (let i = 0; i < traj.length - 1; i++) {
-      const active = step === 0 || i < shown - 1;
       g.append("line")
         .attr("x1", x(traj[i][0])).attr("y1", y(traj[i][1]))
         .attr("x2", x(traj[i + 1][0])).attr("y2", y(traj[i + 1][1]))
-        .attr("stroke", "#5be0b0").attr("stroke-width", active ? 2.6 : 1.2)
-        .attr("opacity", active ? 0.9 : 0.18);
+        .attr("stroke", "#5be0b0").attr("stroke-width", 2.4).attr("opacity", 0.9);
     }
     const cscale = d3.scaleSequential(d3.interpolateViridis).domain([0, 1]);
     g.selectAll("circle.tp")
@@ -212,11 +212,11 @@
       .join("circle")
       .attr("class", "tp")
       .attr("cx", (t: any) => x(t[0])).attr("cy", (t: any) => y(t[1]))
-      .attr("r", (_t: any, i: number) => (i === cur ? 9 : step === 0 || i < shown ? 5 : 3))
+      .attr("r", (_t: any, i: number) => (i === cur ? 9 : 5))
       .attr("fill", (_t: any, i: number) => cscale(tp[i] ?? 0))
       .attr("stroke", (_t: any, i: number) => (i === cur ? "#5be0b0" : "#fff"))
       .attr("stroke-width", (_t: any, i: number) => (i === cur ? 3 : 1))
-      .attr("opacity", (_t: any, i: number) => (step === 0 || i < shown ? 1 : 0.3))
+      .attr("opacity", 1)
       .each(function (this: any, _t: any, i: number) {
         d3.select(this)
           .on("mousemove", (event) =>

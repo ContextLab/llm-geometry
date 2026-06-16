@@ -57,9 +57,21 @@ def manifold(
     matrix = lm.model.get_input_embeddings().weight.detach().float().cpu().numpy().astype(np.float64)
     emb = matrix[token_ids]
 
+    # Response trajectory: reduce the response tokens TOGETHER with the reference tokens so
+    # they sit in the same sphere frame, then split out their radius-2 positions (drawn as a
+    # line on the sphere; the frontend reveals it up to response_step as ▶ Play advances).
+    printable_set = set(int(i) for i in all_ids.tolist())
+    resp_ids = [int(t) for t in (lm.tokenizer(response_text)["input_ids"] if response_text else []) if int(t) in printable_set]
+
     from ..reduce.sphere import reduce_3d_sphere
 
-    dirs = reduce_3d_sphere(emb, method="pca3", seed=seed).astype(np.float64)  # unit token dirs
+    n_ref = int(token_ids.shape[0])
+    if resp_ids:
+        dirs_all = reduce_3d_sphere(np.vstack([emb, matrix[resp_ids]]), method="pca3", seed=seed).astype(np.float64)
+        dirs, traj_dirs = dirs_all[:n_ref], dirs_all[n_ref:]
+    else:
+        dirs = reduce_3d_sphere(emb, method="pca3", seed=seed).astype(np.float64)
+        traj_dirs = np.empty((0, 3), dtype=np.float64)
 
     if progress_cb:
         progress_cb(0.35, "computing emission distribution")
@@ -88,14 +100,14 @@ def manifold(
     order = np.argsort(-emis)[:max(1, int(warp_top))]
     lift = np.zeros(verts.shape[0])
     for ti in order:
-        p = float(np.sqrt(max(0.0, emis[ti]))) * 0.5
+        p = float(np.sqrt(max(0.0, emis[ti]))) * 0.75
         if p <= 1e-3:
             continue
         d = cdist(verts, np.atleast_2d(dirs[ti]))[:, 0]  # distance to the token's direction
         lift += p * np.exp(-(d * d) / width)
-    cap = 0.55  # smooth (tanh) saturation keeps overlapping bumps rounded, never a flat mesa
+    cap = 0.9  # smooth (tanh) saturation keeps overlapping bumps rounded, never a flat mesa
     lift = cap * np.tanh(lift / cap)
-    warped = verts + vdir * lift[:, None]  # rounded radial bumps (radius ≤ ~1.55)
+    warped = verts + vdir * lift[:, None]  # pronounced but rounded radial bumps (radius ≤ ~1.9)
 
     # ARAP: constrain the bumped caps, let the rest deform rigidly (keeps it smooth).
     moved = np.where(lift > 0.02)[0]
@@ -127,13 +139,16 @@ def manifold(
         ],
         "token_strs": token_strs,  # real decoded strings (printable), aligned with token markers
     }
-    arrays_token_ids = token_ids.astype(np.int64)
     arrays = {
         "vertices": final_verts.astype(np.float32),
         "faces": faces.astype(np.int64),
         "warp": warp.astype(np.float32),
         "token_points": (dirs * 2.0).astype(np.float32),
         "token_emis": emis.astype(np.float32),
-        "token_ids": arrays_token_ids,
+        "token_ids": token_ids.astype(np.int64),
+        "traj_points": (traj_dirs * 2.0).astype(np.float32),  # response tokens on the sphere
     }
+    if resp_ids:
+        meta["trajectory_token_strs"] = [lm.tokenizer.decode([t]) for t in resp_ids]
+        meta["trajectory_emis"] = [float(probs_full[t]) for t in resp_ids]
     return {"meta": meta, "arrays": arrays}

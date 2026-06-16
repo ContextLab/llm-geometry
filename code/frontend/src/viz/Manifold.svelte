@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
+  import { get } from "svelte/store";
   import * as THREE from "three";
   import { OrbitControls } from "three/addons/controls/OrbitControls.js";
   import { modelId, prefixText, temperature, responseText, responseStep } from "../lib/stores";
@@ -24,6 +25,7 @@
   let controls: OrbitControls | undefined;
   let mesh: THREE.Mesh | undefined;
   let points: THREE.Points | undefined;
+  let traj: THREE.Group | undefined;
   let raf = 0;
   let resizeObs: ResizeObserver | undefined;
   let debounce: ReturnType<typeof setTimeout> | undefined;
@@ -119,6 +121,11 @@
       (points.material as THREE.Material).dispose();
       points = undefined;
     }
+    if (traj) {
+      scene.remove(traj);
+      traj.traverse((o: any) => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
+      traj = undefined;
+    }
 
     const geom = new THREE.BufferGeometry();
     geom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(d.vertices.flat()), 3));
@@ -181,6 +188,30 @@
       points = new THREE.Points(pgeom, pmat);
       scene.add(points);
     }
+
+    // Response trajectory: a bright line across the radius-2 sphere through the response
+    // tokens, revealed up to the current step (▶ Play grows it as the manifold re-warps).
+    if (d.traj_points?.length) {
+      const tpts = d.traj_points;
+      const shown = Math.min(get(responseStep), tpts.length); // reveal one token per frame
+      const g = new THREE.Group();
+      const pts = tpts.slice(0, shown).map((p) => new THREE.Vector3(p[0], p[1], p[2]).multiplyScalar(1.02));
+      if (pts.length >= 2) {
+        const lgeom = new THREE.BufferGeometry().setFromPoints(pts);
+        g.add(new THREE.Line(lgeom, new THREE.LineBasicMaterial({ color: 0x5be0b0, transparent: true, opacity: 0.95 })));
+      }
+      pts.forEach((p, i) => {
+        const isCur = i === shown - 1;
+        const m = new THREE.Mesh(
+          new THREE.SphereGeometry(isCur ? 0.08 : 0.05, 14, 14),
+          new THREE.MeshBasicMaterial({ color: isCur ? 0xffffff : 0x5be0b0 }),
+        );
+        m.position.copy(p);
+        g.add(m);
+      });
+      traj = g;
+      scene.add(g);
+    }
   }
 
   // Perspective point-size attenuation scale (matches three's PointsMaterial convention).
@@ -196,7 +227,7 @@
       renderer.domElement.remove();
       renderer.dispose();
     }
-    renderer = scene = camera = controls = mesh = points = undefined;
+    renderer = scene = camera = controls = mesh = points = traj = undefined;
   }
 
   $effect(() => {

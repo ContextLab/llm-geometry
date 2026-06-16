@@ -127,6 +127,9 @@ export interface ManifoldData {
   token_strs: string[];
   token_ids: number[];
   top_tokens: { token_str: string; prob: number }[];
+  traj_points: number[][]; // response tokens on the radius-2 sphere (the trajectory line)
+  trajectory_token_strs?: string[];
+  trajectory_emis?: number[];
 }
 
 export class ApiError extends Error {

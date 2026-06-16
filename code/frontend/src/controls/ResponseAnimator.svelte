@@ -31,7 +31,7 @@
       .then((res) => {
         if (cancelled) return;
         responseTokenCount.set(res.tokens.length);
-        responseStep.update((s) => Math.min(s, res.tokens.length));
+        responseStep.set(res.tokens.length); // at rest show the full trajectory; ▶ Play resets to 0
       })
       .catch(() => {});
     return () => {
