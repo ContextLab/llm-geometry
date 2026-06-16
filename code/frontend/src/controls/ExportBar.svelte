@@ -7,7 +7,7 @@
     name: string;
     svg?: () => SVGSVGElement | undefined;
     webglCanvas?: () => HTMLCanvasElement | undefined;
-    anim?: { total: () => number; renderFrame: (i: number) => Promise<void>; restore: () => Promise<void> };
+    anim?: { total: () => number; renderFrame: (i: number) => Promise<void>; restore: () => Promise<void>; fps?: number };
   } = $props();
 
   let busy = $state(false);
@@ -41,14 +41,16 @@
   async function gif() {
     if (!anim) return;
     const total = Math.max(1, anim.total());
-    await exportGIF({ total: total + 1, renderFrame: (i) => anim.renderFrame(Math.min(i, total)), capture, filename: fname("gif"), fps: 2.5 });
+    const fps = anim.fps ?? 2.5;
+    await exportGIF({ total: total + 1, renderFrame: (i) => anim.renderFrame(Math.min(i, total)), capture, filename: fname("gif"), fps });
     await anim.restore();
   }
 
   async function mp4() {
     if (!anim) return;
     const total = Math.max(1, anim.total());
-    await exportMP4({ total: total + 1, renderFrame: (i) => anim.renderFrame(Math.min(i, total)), capture, filename: fname("mp4"), fps: 2.5 });
+    const fps = anim.fps ?? 2.5;
+    await exportMP4({ total: total + 1, renderFrame: (i) => anim.renderFrame(Math.min(i, total)), capture, filename: fname("mp4"), fps });
     await anim.restore();
   }
 </script>

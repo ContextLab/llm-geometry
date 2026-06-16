@@ -2,7 +2,7 @@
   import * as d3 from "d3";
   import { get } from "svelte/store";
   import { modelId, prefixText, temperature, layerFrom, layerTo, responseText, responseStep, responseTokenCount, refreshNonce } from "../lib/stores";
-  import { client, type VectorField } from "../lib/dataClient";
+  import { client, type VectorField, type VectorFieldAnimation } from "../lib/dataClient";
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
   import ExportBar from "../controls/ExportBar.svelte";
@@ -18,6 +18,9 @@
   let progressMsg = $state("");
   let error = $state("");
   let data = $state<VectorField | null>(null);
+  let anim = $state<VectorFieldAnimation | null>(null); // multi-key-frame data when a response is set
+  let animTime = $state(0); // continuous key-frame index (interpolated); tweens between steps
+  let tweenRaf = 0;
   let svgEl: SVGSVGElement | undefined;
   let stageEl: HTMLDivElement | undefined;
 
@@ -39,15 +42,21 @@
     const lf = $layerFrom;
     const lt = $layerTo;
     const resp = $responseText;
-    const step = $responseStep;
     const rn = $refreshNonce;
     const force = rn !== lastRefresh; // the Recompute button bypasses the cache
     lastRefresh = rn;
     if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => void load(m, pfx, temp, lf, lt, resp, step, force), force ? 0 : 320);
+    debounce = setTimeout(() => void load(m, pfx, temp, lf, lt, resp, force), force ? 0 : 320);
     return () => {
       if (debounce) clearTimeout(debounce);
     };
+  });
+
+  // In animation mode, the response step just tweens the (already-fetched) key frames — no
+  // re-fetch — so playback is smooth.
+  $effect(() => {
+    const step = $responseStep;
+    if (anim) tweenTo(Math.min(step, anim.n_frames - 1));
   });
 
   $effect(() => {
@@ -60,18 +69,36 @@
     return () => resizeObs?.disconnect();
   });
 
-  async function load(m: string, pfx: string, temp: number, lf: number, lt: number, resp: string, step: number, force = false) {
+  async function load(m: string, pfx: string, temp: number, lf: number, lt: number, resp: string, force = false) {
     const my = ++runId;
     error = "";
     loading = true;
     progress = 0;
     progressMsg = force ? "recomputing…" : "starting…";
     try {
+      if (resp.trim()) {
+        // Animation mode: all key frames in one consistent frame (smooth, token-continuous).
+        const ap = { temperature: temp, layer_to: lt, reference_set_size: 576, seed: SEED };
+        const ainputs = { prefix_text: pfx, response_text: resp };
+        if (!force) {
+          await client.ensureArtifact("vector_field_animation", m, ap, ainputs, (p, msg) => {
+            if (my === runId) { progress = p; progressMsg = msg; }
+          });
+        }
+        if (my !== runId) return;
+        const a = await client.getVectorFieldAnimation(m, { ...ainputs, ...ap, ...(force ? { force: true } : {}) });
+        if (my !== runId) return;
+        anim = a;
+        data = null;
+        animTime = Math.min(get(responseStep), a.n_frames - 1); // rest = current step (full = last frame)
+        render();
+        return;
+      }
       const params = {
         temperature: temp, layer_from: lf, layer_to: lt, grid_n: GRID_N,
         fanout: FANOUT, reference_set_size: REF, seed: SEED,
       };
-      const inputs = { prefix_text: pfx, response_text: resp, response_step: step };
+      const inputs = { prefix_text: pfx, response_text: "", response_step: 0 };
       if (!force) {
         await client.ensureArtifact("vector_field", m, params, inputs, (p, msg) => {
           if (my === runId) { progress = p; progressMsg = msg; }
@@ -81,6 +108,7 @@
       const vf = await client.getVectorField(m, { ...inputs, ...params, ...(force ? { force: true } : {}) });
       if (my !== runId) return;
       data = vf;
+      anim = null;
       render();
     } catch (e: any) {
       if (my === runId) error = `${e.type ?? "Error"}: ${e.message ?? e}`;
@@ -89,14 +117,34 @@
     }
   }
 
-  // Export: drive the response animation frame-by-frame (for a GIF).
-  async function renderFrame(i: number) {
-    await load(get(modelId), get(prefixText), get(temperature), get(layerFrom), get(layerTo), get(responseText), i);
+  // Smoothly tween the continuous key-frame index toward `target` (live ▶ Play).
+  function tweenTo(target: number) {
+    cancelAnimationFrame(tweenRaf);
+    const from = animTime;
+    const dur = 650; // ms per key-frame transition
+    let t0 = 0;
+    const stepFn = (ts: number) => {
+      if (!t0) t0 = ts;
+      const k = Math.min(1, (ts - t0) / dur);
+      const e = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2; // easeInOutQuad
+      animTime = from + (target - from) * e;
+      render();
+      if (k < 1) tweenRaf = requestAnimationFrame(stepFn);
+    };
+    tweenRaf = requestAnimationFrame(stepFn);
   }
+
+  // Export: interpolate SUB sub-frames per key-frame transition for a smooth, high-frame-rate
+  // video (each response step is a key frame, not a literal movie frame).
+  const SUB = 12;
   const exportAnim = {
-    total: () => get(responseTokenCount),
-    renderFrame,
-    restore: () => renderFrame(get(responseStep)),
+    total: () => (anim ? (anim.n_frames - 1) * SUB : 0),
+    fps: 24,
+    renderFrame: async (i: number) => {
+      if (anim) { cancelAnimationFrame(tweenRaf); animTime = Math.min(i / SUB, anim.n_frames - 1); render(); }
+      await new Promise((r) => requestAnimationFrame(() => r(null)));
+    },
+    restore: async () => { if (anim) { animTime = Math.min(get(responseStep), anim.n_frames - 1); render(); } },
   };
 
   function robust(vals: number[]): [number, number] {
@@ -108,22 +156,32 @@
     return [lo - pad, hi + pad];
   }
 
-  // Scale over the grid + arrows + trajectory (all live in the same cloud frame).
+  // Scale over the grid + arrows + trajectory. In animation mode the extent spans ALL key
+  // frames so the view stays fixed (tokens move within a stable frame).
   function scales(w: number) {
-    const d = data!;
-    const xs = [...d.starts.map((s) => s[0]), ...d.ends.map((e) => e[0]), ...(d.trajectory ?? []).map((t) => t[0])];
-    const ys = [...d.starts.map((s) => s[1]), ...d.ends.map((e) => e[1]), ...(d.trajectory ?? []).map((t) => t[1])];
+    let xs: number[], ys: number[];
+    if (anim) {
+      xs = []; ys = [];
+      for (const f of anim.points) for (const p of f) { xs.push(p[0]); ys.push(p[1]); }
+      for (const f of anim.ends) for (const p of f) { xs.push(p[0]); ys.push(p[1]); }
+      for (const t of anim.trajectory) { xs.push(t[0]); ys.push(t[1]); }
+    } else {
+      const d = data!;
+      xs = [...d.starts.map((s) => s[0]), ...d.ends.map((e) => e[0]), ...(d.trajectory ?? []).map((t) => t[0])];
+      ys = [...d.starts.map((s) => s[1]), ...d.ends.map((e) => e[1]), ...(d.trajectory ?? []).map((t) => t[1])];
+    }
     const x = d3.scaleLinear().domain(robust(xs)).range([28, w - 28]);
     const y = d3.scaleLinear().domain(robust(ys)).range([H - 28, 28]);
     return { x, y };
   }
 
   function render() {
-    if (!svgEl || !data || !stageEl) return;
+    if (!svgEl || !stageEl || (!data && !anim)) return;
     const w = stageEl.clientWidth || 640;
     lastW = w;
     const { x, y } = scales(w);
-    drawField(w, x, y);
+    if (anim) drawAnimation(w, x, y);
+    else drawField(w, x, y);
   }
 
   // Persistent SVG structure so keyed joins can TRANSITION arrow orientations between
@@ -139,6 +197,7 @@
         .append("path").attr("d", "M0,1.5 L9,5 L0,8.5 z").attr("fill", "context-stroke");
       const z = svg.append("g").attr("class", "zoom");
       z.append("g").attr("class", "arrows");
+      z.append("g").attr("class", "points");   // animation token dots (moving)
       z.append("g").attr("class", "traj");
       z.append("g").attr("class", "origins");  // drawn on top so the hover halos catch the cursor
       // Scroll to zoom, drag to pan; the default view fits the whole field.
@@ -153,6 +212,7 @@
   function drawField(w: number, x: d3.ScaleLinear<number, number>, y: d3.ScaleLinear<number, number>) {
     const d = data!;
     const svg = ensure().attr("viewBox", `0 0 ${w} ${H}`);
+    svg.select("g.points").selectAll("*").remove(); // drift mode has no moving token dots
 
     const maxp = Math.max(...d.probs, 1e-6);
     const pcolor = d3.scaleSequential(d3.interpolatePlasma).domain([-0.15 * maxp, maxp]);
@@ -248,9 +308,70 @@
           .on("mouseleave", hideTip);
       });
   }
+
+  // Animation mode: each token is a persistent point that MOVES between key frames (response
+  // steps). Positions are interpolated at the continuous `animTime`, so you can follow each
+  // point and watch the field reorganise as the context unfolds.
+  function drawAnimation(w: number, x: d3.ScaleLinear<number, number>, y: d3.ScaleLinear<number, number>) {
+    const a = anim!;
+    const svg = ensure().attr("viewBox", `0 0 ${w} ${H}`);
+    svg.select("g.origins").selectAll("*").remove();
+    const t = Math.max(0, Math.min(animTime, a.n_frames - 1));
+    const f0 = Math.floor(t), f1 = Math.min(f0 + 1, a.n_frames - 1), fr = t - f0;
+    const mix = (u: number, v: number) => u + (v - u) * fr;
+    const pA = a.points[f0], pB = a.points[f1], eA = a.ends[f0], eB = a.ends[f1], qA = a.probs[f0], qB = a.probs[f1];
+    let maxp = 1e-6;
+    const rows = pA.map((_p, i) => {
+      const p = mix(qA[i], qB[i]);
+      if (p > maxp) maxp = p;
+      return { i, px: mix(pA[i][0], pB[i][0]), py: mix(pA[i][1], pB[i][1]), ex: mix(eA[i][0], eB[i][0]), ey: mix(eA[i][1], eB[i][1]), p };
+    });
+    const pcolor = d3.scaleSequential(d3.interpolatePlasma).domain([-0.15 * maxp, maxp]);
+    const rel = (p: number) => Math.min(1, p / maxp);
+
+    svg.select("g.arrows").selectAll<SVGLineElement, any>("line").data(rows, (r: any) => r.i).join("line")
+      .attr("x1", (r) => x(r.px)).attr("y1", (r) => y(r.py))
+      .attr("x2", (r) => x(r.ex)).attr("y2", (r) => y(r.ey))
+      .attr("marker-end", "url(#vf-arrow)")
+      .attr("stroke", (r) => pcolor(r.p)).attr("stroke-width", (r) => 0.7 + 1.1 * rel(r.p))
+      .attr("opacity", (r) => 0.25 + 0.55 * rel(r.p))
+      .on("mousemove", (e, r: any) => showTip(e, `${a.token_strs[r.i]}  ${(r.p * 100).toFixed(1)}%`))
+      .on("mouseleave", hideTip);
+
+    svg.select("g.points").selectAll<SVGCircleElement, any>("circle").data(rows, (r: any) => r.i).join("circle")
+      .attr("cx", (r) => x(r.px)).attr("cy", (r) => y(r.py))
+      .attr("r", (r) => 1.6 + 1.6 * rel(r.p)).attr("fill", (r) => pcolor(r.p)).attr("opacity", 0.92)
+      .on("mousemove", (e, r: any) => showTip(e, `${a.token_strs[r.i]}  ${(r.p * 100).toFixed(1)}%`))
+      .on("mouseleave", hideTip);
+
+    // Trajectory: dots laid down once each token is reached; the line builds in gradually.
+    const g = svg.select("g.traj");
+    g.selectAll("*").remove();
+    const traj = a.trajectory;
+    const reached = Math.floor(t);
+    const cscale = d3.scaleSequential(d3.interpolateViridis).domain([0, 1]);
+    const dots = traj.slice(0, Math.min(reached, traj.length));
+    const linePts = dots.map((d) => [x(d[0]), y(d[1])]);
+    if (reached >= 1 && reached < traj.length && fr > 0) {
+      const a0 = traj[reached - 1], a1 = traj[reached];
+      linePts.push([x(a0[0] + (a1[0] - a0[0]) * fr), y(a0[1] + (a1[1] - a0[1]) * fr)]);
+    }
+    if (linePts.length >= 2) {
+      g.append("path").attr("d", "M" + linePts.map((p) => p.join(",")).join("L"))
+        .attr("fill", "none").attr("stroke", "#5be0b0").attr("stroke-width", 2.4).attr("opacity", 0.9);
+    }
+    g.selectAll("circle.tp").data(dots).join("circle").attr("class", "tp")
+      .attr("cx", (d: any) => x(d[0])).attr("cy", (d: any) => y(d[1]))
+      .attr("r", (_d: any, i: number) => (i === reached - 1 ? 7 : 5))
+      .attr("fill", (_d: any, i: number) => cscale(a.trajectory_probs[i] ?? 0))
+      .attr("stroke", (_d: any, i: number) => (i === reached - 1 ? "#5be0b0" : "#fff")).attr("stroke-width", 1.5)
+      .each(function (this: any, _d: any, i: number) {
+        d3.select(this).on("mousemove", (event) => showTip(event, `${a.trajectory_token_strs?.[i] ?? ""}  ${((a.trajectory_probs[i] ?? 0) * 100).toFixed(1)}%`)).on("mouseleave", hideTip);
+      });
+  }
 </script>
 
-<section class="viz panel" data-testid="viz-vector" data-ready={data ? 1 : 0}>
+<section class="viz panel" data-testid="viz-vector" data-ready={data || anim ? 1 : 0}>
   <header>
     <div>
       <h2>Transformer layers as a vector field</h2>
@@ -263,11 +384,16 @@
   <div bind:this={stageEl} class="stage" style="height:{H}px">
     <svg bind:this={svgEl} class="arrow-layer" data-testid="vector-svg"></svg>
   </div>
-  {#if data}
+  {#if anim}
+    <p class="caption">
+      {anim.reference_points} moving token points · {anim.n_frames} key frames (response steps) ·
+      layer {anim.layer_to}/{anim.num_layers} · ▶ Play interpolates between frames; each point tracks its token
+    </p>
+  {:else if data}
     <p class="caption">
       {data.reference_points} grid arrows ·
       layer {data.layer_from}{#if data.layer_to !== data.layer_from}→{data.layer_to}{/if}/{data.num_layers} ·
-      fan-out {data.fanout}{#if data.trajectory} · trajectory {data.trajectory.length} tokens (step {data.response_step}){/if}
+      fan-out {data.fanout}
     </p>
   {/if}
 </section>

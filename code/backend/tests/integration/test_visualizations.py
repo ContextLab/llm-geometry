@@ -31,6 +31,24 @@ def test_token_cloud_printable_only():
     assert a["pca_mean"].ndim == 1 and a["raw"].shape == (vocab, 2)
 
 
+def test_vector_field_animation_consistent_frame():
+    # All key frames (response steps) share ONE frame, so a token's position is comparable
+    # across frames and MOVES as the context unfolds (the basis for smooth interpolation).
+    p = get_or_compute_sync(
+        "vector_field_animation", "distilgpt2",
+        {"temperature": 0.0, "layer_to": 6, "reference_set_size": 80, "seed": 0},
+        {"prefix_text": "I want", "response_text": "money and power"},
+    )
+    a, m = p["arrays"], p["meta"]
+    F, R = m["n_frames"], m["reference_points"]
+    assert F == 4 and R == 80  # 3 response tokens -> 4 key frames
+    assert a["points"].shape == (F, R, 2) and a["ends"].shape == (F, R, 2)
+    assert len(m["token_strs"]) == R
+    # the SAME token moves between key frames (context-dependent prediction-layer embedding)
+    move = np.linalg.norm(a["points"][-1] - a["points"][0], axis=1)
+    assert float(move.mean()) > 0.1
+
+
 def test_vector_field_trajectory_is_contextual():
     # The trajectory uses CONTEXTUAL prediction-layer embeddings, so the SAME response tokens
     # move when the prompt changes — that is the phenomenon the visualization exists to show.

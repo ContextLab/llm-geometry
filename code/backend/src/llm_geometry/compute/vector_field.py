@@ -235,3 +235,88 @@ def vector_field(
     if progress_cb:
         progress_cb(1.0, "done")
     return {"meta": meta, "arrays": arrays}
+
+
+def vector_field_animation(
+    model_id: str,
+    prefix_text: str = "",
+    temperature: float = 1.0,
+    layer_to: int | None = None,
+    reference_set_size: int | None = 576,
+    seed: int = DEFAULT_SEED,
+    spread_mu: float = 0.65,
+    response_text: str = "",
+    progress_cb: ProgressCb | None = None,
+) -> dict[str, Any]:
+    """All KEY FRAMES of the response animation in ONE consistent frame.
+
+    A key frame is a response step (context = prefix + response[:s]). Every reference token
+    and every predicted token from every step is projected through a SINGLE PCA (fit on the
+    union), so the same token's position is comparable across key frames and can be smoothly
+    interpolated — you can follow each point as the context unfolds. Each frame ships the
+    reference-token positions, the arrow tips (toward the predicted token), and the per-token
+    emission; the trajectory is projected once and revealed step by step.
+    """
+    lm = load_model(model_id)
+    n_to = lm.num_layers if layer_to is None else max(0, min(int(layer_to), lm.num_layers))
+    ref_ids = printable_reference_ids(lm, reference_set_size)
+    pmask = _printable_mask(lm)
+    prefix = prefix_ids(lm, prefix_text)
+    printable_set = set(int(i) for i in printable_tokens(lm)[0].tolist())
+    resp_ids = [int(t) for t in (lm.tokenizer(response_text)["input_ids"] if response_text else []) if int(t) in printable_set]
+    n_frames = len(resp_ids) + 1
+    R = int(ref_ids.shape[0])
+
+    # Per key frame: reference embeddings @ layer_to + the (printable) top-1 prediction + the
+    # predicted tokens' embeddings @ layer_to (reuse the reference ones where they coincide).
+    per_frame = []
+    for s in range(n_frames):
+        if progress_cb:
+            progress_cb(0.05 + 0.7 * s / n_frames, f"key frame {s + 1}/{n_frames}")
+        ctx = list(prefix) + resp_ids[:s]
+        embs, top_tokens, top_probs = _embed_layers_and_topk(lm, ctx, ref_ids, [n_to], temperature, 1, pmask, None, 0, 0)
+        emb_to = embs[n_to]
+        by_tok = {int(ref_ids[i]): emb_to[i] for i in range(R)}
+        predicted = np.unique(top_tokens)
+        missing = np.array([p for p in predicted if int(p) not in by_tok], dtype=np.int64)
+        if missing.size:
+            miss = _embed_layer_only(lm, ctx, missing, n_to, None, 0, 0)
+            for i, p in enumerate(missing):
+                by_tok[int(p)] = miss[i]
+        pred_emb = np.vstack([by_tok[int(top_tokens[i, 0])] for i in range(R)])  # (R, H) predicted-token emb per ref
+        per_frame.append((emb_to, pred_emb, top_probs[:, 0], top_tokens[:, 0]))
+
+    traj = _trajectory_embeddings(lm, prefix, response_text, n_to) if response_text else None
+
+    if progress_cb:
+        progress_cb(0.8, "projecting all key frames into one frame")
+    from sklearn.decomposition import PCA
+
+    fit = [f[0] for f in per_frame] + [f[1] for f in per_frame]
+    if traj is not None:
+        fit.append(traj[0])
+    pca = PCA(n_components=2, random_state=seed).fit(np.vstack(fit).astype(np.float64))
+    for i in range(2):  # deterministic sign so the frame is stable
+        if pca.components_[i].sum() < 0:
+            pca.components_[i] *= -1.0
+
+    points = np.stack([pca.transform(f[0].astype(np.float64)) for f in per_frame]).astype(np.float32)  # (F, R, 2)
+    ends = np.stack([pca.transform(f[1].astype(np.float64)) for f in per_frame]).astype(np.float32)     # (F, R, 2)
+    probs = np.stack([f[2] for f in per_frame]).astype(np.float32)                                       # (F, R)
+    traj_pos = pca.transform(traj[0]).astype(np.float32) if traj is not None else np.empty((0, 2), dtype=np.float32)
+
+    meta = {
+        "model_id": lm.model_id, "revision": lm.revision, "n_frames": int(n_frames),
+        "layer_to": int(n_to), "num_layers": lm.num_layers, "reference_points": R,
+        "temperature": float(temperature), "prefix_text": prefix_text or "",
+        "token_strs": [lm.tokenizer.decode([int(t)]) for t in ref_ids],
+        "trajectory_token_strs": (traj[2] if traj is not None else []),
+    }
+    arrays = {
+        "points": points, "ends": ends, "probs": probs,
+        "trajectory": traj_pos,
+        "trajectory_probs": (traj[1] if traj is not None else np.empty((0,), dtype=np.float32)),
+    }
+    if progress_cb:
+        progress_cb(1.0, "done")
+    return {"meta": meta, "arrays": arrays}

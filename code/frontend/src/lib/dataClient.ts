@@ -89,6 +89,20 @@ export interface TokenizeResult {
   tokens: { token: number; token_str: string }[];
 }
 
+export interface VectorFieldAnimation {
+  n_frames: number;
+  layer_to: number;
+  num_layers: number;
+  reference_points: number;
+  token_strs: string[]; // one per reference token (persistent across key frames)
+  trajectory_token_strs: string[];
+  points: number[][][]; // [frame][token][x,y] — same token tracked across key frames
+  ends: number[][][]; // [frame][token][x,y] — arrow tip (predicted token) per key frame
+  probs: number[][]; // [frame][token]
+  trajectory: number[][]; // [token][x,y] in the consistent frame
+  trajectory_probs: number[];
+}
+
 export interface TokenCloud {
   model_id: string;
   vocab_size: number;
@@ -225,6 +239,10 @@ export function createClient(opts: ClientOptions = {}) {
     return request("/api/vector_field" + qs({ model_id, ...params }));
   }
 
+  function getVectorFieldAnimation(model_id: string, params: Record<string, unknown> = {}): Promise<VectorFieldAnimation> {
+    return request("/api/vector_field_animation" + qs({ model_id, ...params }));
+  }
+
   function getSankey(model_id: string, params: Record<string, unknown> = {}): Promise<SankeyData> {
     return request("/api/sankey" + qs({ model_id, ...params }));
   }
@@ -326,6 +344,7 @@ export function createClient(opts: ClientOptions = {}) {
     getDistribution,
     getReduction2d,
     getVectorField,
+    getVectorFieldAnimation,
     getSankey,
     getManifold,
     getTokenCloud,

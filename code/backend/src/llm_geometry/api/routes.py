@@ -253,6 +253,35 @@ def vector_field_route(
     return _jsonable(resp)
 
 
+@router.get("/vector_field_animation")
+def vector_field_animation_route(
+    model_id: str,
+    prefix_text: str = "",
+    temperature: float = 1.0,
+    layer_to: int = 0,
+    reference_set_size: int | None = 576,
+    seed: int = DEFAULT_SEED,
+    response_text: str = "",
+    force: bool = False,
+) -> dict[str, Any]:
+    """All key frames of the response animation in one consistent frame (for smooth,
+    interpolated playback / export — see compute.vector_field.vector_field_animation)."""
+    params: dict[str, Any] = {"temperature": temperature, "layer_to": layer_to, "seed": seed}
+    if reference_set_size is not None:
+        params["reference_set_size"] = reference_set_size
+    payload = get_or_compute_sync(
+        "vector_field_animation", model_id, params,
+        {"prefix_text": prefix_text, "response_text": response_text}, force=force,
+    )
+    meta = dict(payload["meta"])
+    a = payload["arrays"]
+    return _jsonable({
+        **meta,
+        "points": a["points"].tolist(), "ends": a["ends"].tolist(), "probs": a["probs"].tolist(),
+        "trajectory": a["trajectory"].tolist(), "trajectory_probs": a["trajectory_probs"].tolist(),
+    })
+
+
 @router.get("/sankey")
 def sankey_route(
     model_id: str,

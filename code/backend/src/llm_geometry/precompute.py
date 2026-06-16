@@ -32,7 +32,7 @@ ProgressCb = Callable[[float, str], None]
 
 ARTIFACT_TYPES = (
     "distribution", "embeddings", "reduction_2d", "reduction_3d",
-    "token_cloud", "vector_field", "sankey", "manifold",
+    "token_cloud", "vector_field", "vector_field_animation", "sankey", "manifold",
 )
 
 _store = CacheStore()
@@ -234,6 +234,33 @@ def _plan(
                                 layer_from=layer_from, layer_to=layer_to, grid_n=grid_n,
                                 reference_set_size=rss, seed=seed, fanout=fanout, spread_mu=spread_mu,
                                 response_text=response_text, response_step=response_step, progress_cb=cb)
+
+        return key, spec, compute
+
+    if artifact_type == "vector_field_animation":
+        temperature = float(params.get("temperature", 1.0))
+        if temperature < 0:
+            raise InvalidParamError(f"temperature must be >= 0, got {temperature}")
+        layer_to = int(params.get("layer_to", 0))
+        spread_mu = float(params.get("spread_mu", 0.65))
+        rss = params.get("reference_set_size", 576)
+        rss = int(rss) if rss is not None else None
+        seed = int(params.get("seed", DEFAULT_SEED))
+        prefix_text = inputs.get("prefix_text", "") or ""
+        response_text = inputs.get("response_text", "") or ""
+        norm_params = {"temperature": temperature, "layer_to": layer_to, "spread_mu": spread_mu,
+                       "reference_set_size": rss, "seed": seed}
+        key, spec = make_cache_key(
+            model_id=mid, revision=revision, artifact_type="vector_field_animation",
+            inputs={"prefix_text": prefix_text, "response_text": response_text}, params=norm_params,
+        )
+
+        def compute(cb: ProgressCb | None) -> dict[str, Any]:
+            from .compute.vector_field import vector_field_animation
+
+            return vector_field_animation(mid, prefix_text=prefix_text, temperature=temperature,
+                                          layer_to=layer_to, reference_set_size=rss, seed=seed,
+                                          spread_mu=spread_mu, response_text=response_text, progress_cb=cb)
 
         return key, spec, compute
 
