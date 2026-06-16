@@ -3,10 +3,11 @@
   import { get } from "svelte/store";
   import * as THREE from "three";
   import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-  import { modelId, prefixText, temperature, responseText, responseStep } from "../lib/stores";
+  import { modelId, prefixText, temperature, responseText, responseStep, responseTokenCount } from "../lib/stores";
   import { client, type ManifoldData } from "../lib/dataClient";
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
+  import ExportBar from "../controls/ExportBar.svelte";
 
   // Visualization 3 — reachable "thoughts" as a sphere warped (RBF) toward likely next
   // tokens (project_description.md §3).
@@ -49,7 +50,7 @@
     camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100);
     camera.position.set(0, 0, 4.5);
     try {
-      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
     } catch (e) {
       error = "WebGL is unavailable in this browser/environment.";
       return;
@@ -107,7 +108,7 @@
     resizeObs.observe(containerEl);
   }
 
-  function buildMesh(d: ManifoldData) {
+  function buildMesh(d: ManifoldData, revealStep: number = get(responseStep)) {
     if (!scene) return;
     if (mesh) {
       scene.remove(mesh);
@@ -189,29 +190,53 @@
       scene.add(points);
     }
 
-    // Response trajectory: a bright line across the radius-2 sphere through the response
-    // tokens, revealed up to the current step (▶ Play grows it as the manifold re-warps).
+    // Response trajectory: a bright GEODESIC line across the radius-2 sphere through the
+    // response tokens (great-circle arcs that stay on the surface, not chords through the
+    // interior), revealed up to the current step (▶ Play grows it as the manifold re-warps).
     if (d.traj_points?.length) {
       const tpts = d.traj_points;
-      const shown = Math.min(get(responseStep), tpts.length); // reveal one token per frame
+      const shown = Math.min(revealStep, tpts.length); // reveal one token per frame
       const g = new THREE.Group();
-      const pts = tpts.slice(0, shown).map((p) => new THREE.Vector3(p[0], p[1], p[2]).multiplyScalar(1.02));
-      if (pts.length >= 2) {
-        const lgeom = new THREE.BufferGeometry().setFromPoints(pts);
+      const raw = tpts.slice(0, shown).map((p) => new THREE.Vector3(p[0], p[1], p[2]));
+      const linePts: THREE.Vector3[] = [];
+      for (let i = 0; i < raw.length - 1; i++) {
+        const seg = geodesic(raw[i], raw[i + 1], 28).map((v) => v.multiplyScalar(1.01)); // sit just above the surface
+        linePts.push(...(i > 0 ? seg.slice(1) : seg));
+      }
+      if (linePts.length >= 2) {
+        const lgeom = new THREE.BufferGeometry().setFromPoints(linePts);
         g.add(new THREE.Line(lgeom, new THREE.LineBasicMaterial({ color: 0x5be0b0, transparent: true, opacity: 0.95 })));
       }
-      pts.forEach((p, i) => {
+      raw.forEach((p, i) => {
         const isCur = i === shown - 1;
         const m = new THREE.Mesh(
           new THREE.SphereGeometry(isCur ? 0.08 : 0.05, 14, 14),
           new THREE.MeshBasicMaterial({ color: isCur ? 0xffffff : 0x5be0b0 }),
         );
-        m.position.copy(p);
+        m.position.copy(p.clone().multiplyScalar(1.01));
         g.add(m);
       });
       traj = g;
       scene.add(g);
     }
+  }
+
+  // Great-circle arc between two points on a sphere (slerp at their shared radius).
+  function geodesic(a: THREE.Vector3, b: THREE.Vector3, segments: number): THREE.Vector3[] {
+    const r = a.length();
+    const va = a.clone().normalize();
+    const vb = b.clone().normalize();
+    const omega = Math.acos(Math.max(-1, Math.min(1, va.dot(vb))));
+    if (omega < 1e-5) return [a.clone(), b.clone()];
+    const sin = Math.sin(omega);
+    const out: THREE.Vector3[] = [];
+    for (let s = 0; s <= segments; s++) {
+      const t = s / segments;
+      const k1 = Math.sin((1 - t) * omega) / sin;
+      const k2 = Math.sin(t * omega) / sin;
+      out.push(va.clone().multiplyScalar(k1).add(vb.clone().multiplyScalar(k2)).multiplyScalar(r));
+    }
+    return out;
   }
 
   // Perspective point-size attenuation scale (matches three's PointsMaterial convention).
@@ -261,21 +286,34 @@
       if (my !== runId) return;
       data = await client.getManifold(m, { prefix_text: pfx, response_text: resp, response_step: step, ...params });
       if (my !== runId) return;
-      buildMesh(data);
+      buildMesh(data, step);
     } catch (e: any) {
       if (my === runId) error = `${e.type ?? "Error"}: ${e.message ?? e}`;
     } finally {
       if (my === runId) loading = false;
     }
   }
+
+  // Export: drive the response animation frame-by-frame (for a GIF) + a frame settle so the
+  // WebGL buffer is captured after it draws.
+  async function renderFrame(i: number) {
+    await load(get(modelId), get(prefixText), get(temperature), get(responseText), i);
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  }
+  const exportAnim = {
+    total: () => get(responseTokenCount),
+    renderFrame,
+    restore: () => renderFrame(get(responseStep)),
+  };
 </script>
 
 <section class="viz panel" data-testid="viz-manifold" data-ready={data ? 1 : 0}>
   <header>
     <div>
       <h2>Reachable "thoughts" as a manifold</h2>
-      <p class="sub">A unit sphere warped (RBF + ARAP) toward likely next tokens. <b>Bulges = high emission probability; dots = tokens on the radius-2 sphere.</b> Drag to rotate, scroll to zoom, hover a dot for its token.</p>
+      <p class="sub">A unit sphere warped (RBF + ARAP) toward likely next tokens. <b>Bulges = high emission probability; dots = tokens on the radius-2 sphere.</b> Drag to rotate, scroll to zoom, hover a dot for its token. The response traces a geodesic across the sphere.</p>
     </div>
+    <ExportBar name="manifold" webglCanvas={() => renderer?.domElement} anim={exportAnim} />
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}
   {#if error}<div class="error" data-testid="viz-manifold-error">{error}</div>{/if}
@@ -289,6 +327,8 @@
 
 <style>
   .viz { padding: 1.2rem 1.4rem; display: flex; flex-direction: column; gap: 0.8rem; }
+  header { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+  header > div { min-width: 0; }
   header h2 { margin: 0; font-size: 1.1rem; }
   .sub { margin: 0.2rem 0 0; color: var(--text-dim); font-size: 0.82rem; }
   .loading { padding: 0.3rem 0; }

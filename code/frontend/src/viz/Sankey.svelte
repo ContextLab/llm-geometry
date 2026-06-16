@@ -1,10 +1,12 @@
 <script lang="ts">
   import * as d3 from "d3";
   import { sankey as d3sankey, sankeyLinkHorizontal } from "d3-sankey";
+  import { onDestroy } from "svelte";
   import { modelId, prefixText, temperature, nParticles, nSteps } from "../lib/stores";
   import { client, type SankeyData } from "../lib/dataClient";
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
+  import ExportBar from "../controls/ExportBar.svelte";
 
   // Visualization 2 — particle-swarm next-token sampling across positions, as a Sankey
   // diagram (project_description.md §2).
@@ -18,6 +20,10 @@
   const SEED = 0;
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let runId = 0;
+  let revealStep = $state(999); // sequence columns revealed (999 = all); ▶ Play sweeps it
+  let maxPosNow = $state(0);
+  let playing = $state(false);
+  let playTimer: ReturnType<typeof setInterval> | undefined;
 
   // The Sankey samples a fresh swarm from the PROMPT and uses only the final-layer token
   // probabilities — so the response trajectory and layer selection do not apply to it.
@@ -59,6 +65,27 @@
       if (my === runId) loading = false;
     }
   }
+
+  // ▶ Play: reveal sequence columns one position per frame (client-side; no recompute).
+  function stopPlay() {
+    playing = false;
+    if (playTimer) { clearInterval(playTimer); playTimer = undefined; }
+  }
+  function togglePlay() {
+    if (playing) { stopPlay(); revealStep = 999; draw(); return; }
+    playing = true; revealStep = 0; draw();
+    playTimer = setInterval(() => {
+      revealStep += 1; draw();
+      if (revealStep >= maxPosNow) stopPlay();
+    }, 700);
+  }
+  onDestroy(stopPlay);
+
+  const exportAnim = {
+    total: () => maxPosNow,
+    renderFrame: async (i: number) => { revealStep = i; draw(); await new Promise((r) => requestAnimationFrame(() => r(null))); },
+    restore: async () => { revealStep = 999; draw(); },
+  };
 
   function draw() {
     if (!svgEl || !data) return;
@@ -108,6 +135,10 @@
       // sequence reaches column k and flows terminate where their particles stop — d3-sankey's
       // default depth layout doesn't encode time. (y comes from the layout.)
       const maxPos = Math.max(...graph.nodes.map((n: any) => n.pos), 1);
+      maxPosNow = maxPos;
+      const rev = revealStep; // reveal columns up to `rev` (▶ Play / GIF sweep)
+      const shownNodes = graph.nodes.filter((n: any) => n.pos <= rev);
+      const shownLinks = graph.links.filter((l: any) => l.target.pos <= rev);
       const tx = d3.scaleLinear().domain([0, maxPos]).range([24, w - 70]);
       graph.nodes.forEach((n: any) => { n.x0 = tx(n.pos); n.x1 = n.x0 + 13; });
 
@@ -133,7 +164,7 @@
         .append("g")
         .attr("fill", "none")
         .selectAll("path")
-        .data(graph.links)
+        .data(shownLinks)
         .join("path")
         .attr("d", sankeyLinkHorizontal())
         .attr("stroke", (l: any) => color(l.source.pos))
@@ -170,7 +201,7 @@
         })
         .on("mouseleave", () => { restoreLinks(); hideTip(); });
 
-      const node = svg.append("g").selectAll("g").data(graph.nodes).join("g");
+      const node = svg.append("g").selectAll("g").data(shownNodes).join("g");
       const rectSel = node
         .append("rect")
         .attr("x", (n: any) => n.x0)
@@ -214,7 +245,11 @@
   <header>
     <div>
       <h2>Token sequences as a Sankey diagram</h2>
-      <p class="sub">A particle swarm samples next tokens across positions. <b>A token's opacity = its share of the combined distribution at that timepoint; flow width = particle count.</b> Hover a flow to light up its full trajectory + token sequence; hover a token to highlight it.</p>
+      <p class="sub">A particle swarm samples next tokens across positions. <b>A token's opacity = its share of the combined distribution at that timepoint; flow width = particle count.</b> Every flow starts at the prompt and ends where its particles stop. Hover a flow for its trajectory; hover a token to highlight it.</p>
+    </div>
+    <div class="tools">
+      {#if data}<button class="play" onclick={togglePlay} data-testid="sankey-play">{playing ? "⏸ Pause" : "▶ Play"}</button>{/if}
+      <ExportBar name="sankey" svg={() => svgEl} anim={exportAnim} />
     </div>
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}
@@ -225,6 +260,10 @@
 
 <style>
   .viz { padding: 1.2rem 1.4rem; display: flex; flex-direction: column; gap: 0.8rem; }
+  header { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+  header > div:first-child { min-width: 0; }
+  .tools { display: flex; flex-direction: column; align-items: flex-end; gap: 0.4rem; flex-shrink: 0; }
+  .play { background: var(--accent-grad); color: #0b0e14; border: none; border-radius: 8px; padding: 0.3rem 0.7rem; font-size: 0.8rem; font-weight: 600; cursor: pointer; white-space: nowrap; }
   header h2 { margin: 0; font-size: 1.1rem; }
   .sub { margin: 0.2rem 0 0; color: var(--text-dim); font-size: 0.82rem; }
   .loading { padding: 0.3rem 0; }

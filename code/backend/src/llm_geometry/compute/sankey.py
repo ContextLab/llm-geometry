@@ -121,6 +121,23 @@ def sankey(
             if cnt >= max(1, int(top_nodes)):
                 break
 
+    # Keep only nodes REACHABLE from position 0 via kept links, so every flow starts at the
+    # prompt and ends where its particles stop — none appears to begin mid-stream (the top-K
+    # capping can otherwise orphan a later token whose predecessor was dropped).
+    adj: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
+    for (pos, a, b), _c in link_count.items():
+        if (pos, a) in kept and (pos + 1, b) in kept:
+            adj[(pos, a)].append((pos + 1, b))
+    reachable = {(p, t) for (p, t) in kept if p == 0}
+    stack = list(reachable)
+    while stack:
+        node = stack.pop()
+        for nxt in adj.get(node, []):
+            if nxt not in reachable:
+                reachable.add(nxt)
+                stack.append(nxt)
+    kept = reachable
+
     nodes = [
         {"pos": p, "token": tok, "count": c}
         for (p, tok), c in sorted(node_count.items())

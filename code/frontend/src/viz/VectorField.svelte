@@ -1,9 +1,11 @@
 <script lang="ts">
   import * as d3 from "d3";
-  import { modelId, prefixText, temperature, layerFrom, layerTo, responseText, responseStep } from "../lib/stores";
+  import { get } from "svelte/store";
+  import { modelId, prefixText, temperature, layerFrom, layerTo, responseText, responseStep, responseTokenCount } from "../lib/stores";
   import { client, type VectorField } from "../lib/dataClient";
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
+  import ExportBar from "../controls/ExportBar.svelte";
 
   // Visualization 1 (project_description.md §1) — a macOS "Drift"-style flow field. A regular
   // grid of fixed origins; each origin's arrow points (uniform length) from its nearest
@@ -80,6 +82,16 @@
       if (my === runId) loading = false;
     }
   }
+
+  // Export: drive the response animation frame-by-frame (for a GIF).
+  async function renderFrame(i: number) {
+    await load(get(modelId), get(prefixText), get(temperature), get(layerFrom), get(layerTo), get(responseText), i);
+  }
+  const exportAnim = {
+    total: () => get(responseTokenCount),
+    renderFrame,
+    restore: () => renderFrame(get(responseStep)),
+  };
 
   function robust(vals: number[]): [number, number] {
     const s = [...vals].sort((a, b) => a - b);
@@ -232,6 +244,7 @@
       <h2>Transformer layers as a vector field</h2>
       <p class="sub">Positions are <b>contextual</b> prediction-layer embeddings — a token's representation given the prompt, just before it becomes next-token probabilities. Each grid arrow runs from a reference token (layer <i>n</i>) toward the token it predicts next (layer <i>m</i>); a response trajectory and the whole field shift as the prompt changes. <b>Colour/opacity = probability.</b> Hover any arrow or grid vertex; add a response + ▶ Play to trace it.</p>
     </div>
+    <ExportBar name="vector-field" svg={() => svgEl} anim={exportAnim} />
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}
   {#if error}<div class="error" data-testid="viz-vector-error">{error}</div>{/if}
@@ -249,6 +262,8 @@
 
 <style>
   .viz { padding: 1.2rem 1.4rem; display: flex; flex-direction: column; gap: 0.8rem; }
+  header { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+  header > div { min-width: 0; }
   header h2 { margin: 0; font-size: 1.1rem; }
   .sub { margin: 0.2rem 0 0; color: var(--text-dim); font-size: 0.82rem; }
   .loading { padding: 0.3rem 0; }
