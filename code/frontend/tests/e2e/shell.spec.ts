@@ -70,6 +70,20 @@ test("manifold renders a 3D canvas", async ({ page }) => {
   await page.screenshot({ path: "tests/e2e/__screenshots__/viz-manifold.png", fullPage: true });
 });
 
+test("manifold morphs through key frames when a response is set", async ({ page }) => {
+  await page.goto("/");
+  await selectTinyModel(page);
+  await page.getByTestId("response-input").fill("the cat sat");
+  await page.getByTestId("tab-manifold").click();
+  await ready(page, "viz-manifold");
+  // animation mode: a 3D canvas + a caption announcing the morphing key frames
+  await expect(page.locator('[data-testid="manifold-canvas"] canvas')).toBeVisible();
+  await expect(page.getByTestId("viz-manifold")).toContainText(/key frames/, { timeout: 60_000 });
+  // animation exports (GIF/MP4) become available once there are frames to play
+  await expect(page.locator('[data-testid="export-bar"] button', { hasText: "GIF" }).first()).toBeVisible();
+  await page.screenshot({ path: "tests/e2e/__screenshots__/viz-manifold-anim.png", fullPage: true });
+});
+
 test("the readout-layer slider re-renders the vector field", async ({ page }) => {
   await page.goto("/");
   await selectTinyModel(page);

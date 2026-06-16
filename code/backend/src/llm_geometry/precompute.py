@@ -32,7 +32,7 @@ ProgressCb = Callable[[float, str], None]
 
 ARTIFACT_TYPES = (
     "distribution", "embeddings", "reduction_2d", "reduction_3d",
-    "token_cloud", "vector_field", "vector_field_animation", "sankey", "manifold",
+    "token_cloud", "vector_field", "vector_field_animation", "sankey", "manifold", "manifold_animation",
 )
 
 _store = CacheStore()
@@ -313,6 +313,30 @@ def _plan(
             return manifold(mid, prefix_text=prefix_text, temperature=temperature,
                             reference_set_size=rss, seed=seed,
                             response_text=response_text, response_step=response_step, progress_cb=cb)
+
+        return key, spec, compute
+
+    if artifact_type == "manifold_animation":
+        temperature = float(params.get("temperature", 1.0))
+        if temperature < 0:
+            raise InvalidParamError(f"temperature must be >= 0, got {temperature}")
+        rss = params.get("reference_set_size", None)
+        rss = int(rss) if rss is not None else None
+        seed = int(params.get("seed", DEFAULT_SEED))
+        prefix_text = inputs.get("prefix_text", "") or ""
+        response_text = inputs.get("response_text", "") or ""
+        norm_params = {"temperature": temperature, "reference_set_size": rss, "seed": seed}
+        key, spec = make_cache_key(
+            model_id=mid, revision=revision, artifact_type="manifold_animation",
+            inputs={"prefix_text": prefix_text, "response_text": response_text}, params=norm_params,
+        )
+
+        def compute(cb: ProgressCb | None) -> dict[str, Any]:
+            from .compute.manifold import manifold_animation
+
+            return manifold_animation(mid, prefix_text=prefix_text, temperature=temperature,
+                                      reference_set_size=rss, seed=seed,
+                                      response_text=response_text, progress_cb=cb)
 
         return key, spec, compute
 

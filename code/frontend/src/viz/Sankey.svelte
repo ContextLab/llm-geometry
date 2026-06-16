@@ -21,10 +21,10 @@
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let runId = 0;
   let lastRefresh = 0;
-  let revealStep = $state(999); // sequence columns revealed (999 = all); ▶ Play sweeps it
+  let reveal = $state(9999); // CONTINUOUS column index revealed (9999 = all); ▶ Play sweeps it
   let maxPosNow = $state(0);
   let playing = $state(false);
-  let playTimer: ReturnType<typeof setInterval> | undefined;
+  let playRaf = 0;
 
   // The Sankey samples a fresh swarm from the PROMPT and uses only the final-layer token
   // probabilities — so the response trajectory and layer selection do not apply to it.
@@ -72,25 +72,35 @@
     }
   }
 
-  // ▶ Play: reveal sequence columns one position per frame (client-side; no recompute).
+  // ▶ Play: sweep the reveal CONTINUOUSLY (rAF) so flows grow in and columns fade up smoothly,
+  // matching how the diagram renders in the page (no abrupt column pops, no recompute).
   function stopPlay() {
     playing = false;
-    if (playTimer) { clearInterval(playTimer); playTimer = undefined; }
+    if (playRaf) { cancelAnimationFrame(playRaf); playRaf = 0; }
   }
   function togglePlay() {
-    if (playing) { stopPlay(); revealStep = 999; draw(); return; }
-    playing = true; revealStep = 0; draw();
-    playTimer = setInterval(() => {
-      revealStep += 1; draw();
-      if (revealStep >= maxPosNow) stopPlay();
-    }, 700);
+    if (playing) { stopPlay(); reveal = 9999; draw(); return; }
+    playing = true; reveal = 0; draw();
+    const perCol = 650; // ms to grow one column of flows
+    let start = -1;
+    const step = (ts: number) => {
+      if (start < 0) start = ts;
+      reveal = Math.min(maxPosNow, (ts - start) / perCol);
+      draw();
+      if (reveal >= maxPosNow) { stopPlay(); return; }
+      playRaf = requestAnimationFrame(step);
+    };
+    playRaf = requestAnimationFrame(step);
   }
   onDestroy(stopPlay);
 
+  // Export: SUB interpolated sub-frames per column so the GIF/MP4 morph is watchable.
+  const SUB = 12;
   const exportAnim = {
-    total: () => maxPosNow,
-    renderFrame: async (i: number) => { revealStep = i; draw(); await new Promise((r) => requestAnimationFrame(() => r(null))); },
-    restore: async () => { revealStep = 999; draw(); },
+    total: () => maxPosNow * SUB,
+    fps: 24,
+    renderFrame: async (i: number) => { reveal = Math.min(maxPosNow, i / SUB); draw(); await new Promise((r) => requestAnimationFrame(() => r(null))); },
+    restore: async () => { reveal = 9999; draw(); },
   };
 
   function draw() {
@@ -142,9 +152,14 @@
       // default depth layout doesn't encode time. (y comes from the layout.)
       const maxPos = Math.max(...graph.nodes.map((n: any) => n.pos), 1);
       maxPosNow = maxPos;
-      const rev = revealStep; // reveal columns up to `rev` (▶ Play / GIF sweep)
-      const shownNodes = graph.nodes.filter((n: any) => n.pos <= rev);
-      const shownLinks = graph.links.filter((l: any) => l.target.pos <= rev);
+      // CONTINUOUS reveal: columns up to `full` are solid; the next column (full+1) is "growing
+      // in" with fraction `fr` — its nodes fade up and its incoming flows draw progressively.
+      const rev = Math.min(reveal, maxPos);
+      const full = Math.floor(rev);
+      const fr = rev - full;
+      const revFactor = (pos: number) => (pos <= full ? 1 : pos === full + 1 ? fr : 0);
+      const shownNodes = graph.nodes.filter((n: any) => revFactor(n.pos) > 0);
+      const shownLinks = graph.links.filter((l: any) => revFactor(l.target.pos) > 0);
       const tx = d3.scaleLinear().domain([0, maxPos]).range([24, w - 70]);
       graph.nodes.forEach((n: any) => { n.x0 = tx(n.pos); n.x1 = n.x0 + 13; });
 
@@ -175,7 +190,10 @@
         .attr("d", sankeyLinkHorizontal())
         .attr("stroke", (l: any) => color(l.source.pos))
         .attr("stroke-width", (l: any) => Math.max(1, l.width))
-        .attr("stroke-opacity", (l: any) => linkAlpha(l));
+        // Growing column's flows draw in progressively (pathLength=1 + dash), and fade up with fr.
+        .attr("pathLength", 1)
+        .attr("stroke-dasharray", (l: any) => (l.target.pos === full + 1 ? `${fr} 1` : null))
+        .attr("stroke-opacity", (l: any) => linkAlpha(l) * (l.target.pos === full + 1 ? fr : 1));
 
       // The dominant trajectory through a link: walk the max-flow chain backward from its
       // source and forward from its target, collecting the ordered token sequence.
@@ -195,8 +213,9 @@
         }
         return { set, tokens: [...back, ...fwd] };
       };
+      const growF = (l: any) => (l.target.pos === full + 1 ? fr : 1);
       const restoreLinks = () =>
-        linkSel.attr("stroke-opacity", (l: any) => linkAlpha(l)).attr("stroke-width", (l: any) => Math.max(1, l.width));
+        linkSel.attr("stroke-opacity", (l: any) => linkAlpha(l) * growF(l)).attr("stroke-width", (l: any) => Math.max(1, l.width));
       linkSel
         .on("mousemove", (event, l: any) => {
           const { set, tokens } = tracePath(l);
@@ -217,17 +236,17 @@
         .attr("fill", (n: any) => color(n.pos))
         .attr("rx", 2)
         .attr("stroke", "none")
-        .attr("opacity", (n: any) => nodeAlpha(n)) // transparency = probability at this timepoint
+        .attr("opacity", (n: any) => nodeAlpha(n) * revFactor(n.pos)) // probability × fade-in of the growing column
         .on("mousemove", (event, n: any) => {
           // highlight the hovered token + the links that touch it
-          rectSel.attr("opacity", (m: any) => (m === n ? 1 : nodeAlpha(m) * 0.4));
+          rectSel.attr("opacity", (m: any) => (m === n ? 1 : nodeAlpha(m) * revFactor(m.pos) * 0.4));
           rectSel.filter((m: any) => m === n).attr("stroke", "#eaf0ff").attr("stroke-width", 2);
           const touch = new Set<any>([...(n.sourceLinks ?? []), ...(n.targetLinks ?? [])]);
           linkSel.attr("stroke-opacity", (l: any) => (touch.has(l) ? 0.92 : 0.05));
           showTip(event, `position ${n.pos}: ${n.name}   ${n.count} particles`);
         })
         .on("mouseleave", () => {
-          rectSel.attr("opacity", (m: any) => nodeAlpha(m)).attr("stroke", "none");
+          rectSel.attr("opacity", (m: any) => nodeAlpha(m) * revFactor(m.pos)).attr("stroke", "none");
           restoreLinks();
           hideTip();
         });
@@ -240,6 +259,7 @@
         .attr("fill", "#cdd6ec")
         .attr("font-size", "10px")
         .attr("font-family", "var(--mono)")
+        .attr("opacity", (n: any) => revFactor(n.pos)) // labels fade in with the growing column
         .text((n: any) => n.name)
         .filter((n: any) => n.y1 - n.y0 < 9)
         .remove();

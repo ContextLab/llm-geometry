@@ -142,3 +142,27 @@ def test_manifold_warped_sphere():
     assert len(m["top_tokens"]) >= 1
     # token strings align with token_points (used by the manifold raycast hover)
     assert len(m["token_strs"]) == a["token_points"].shape[0]
+
+
+def test_manifold_animation_morphs_per_frame():
+    # All key frames share ONE static sphere (token positions + trajectory line), but the warped
+    # mesh + per-token emission re-derive at each response step, so the surface MORPHS frame to
+    # frame and the trajectory has one dot per response token (basis for the smooth client morph).
+    p = get_or_compute_sync(
+        "manifold_animation", "distilgpt2",
+        {"temperature": 1.0, "reference_set_size": 200, "seed": 0},
+        {"prefix_text": "I want", "response_text": "money and power"},
+    )
+    a, m = p["arrays"], p["meta"]
+    F, V, R = m["n_frames"], m["n_vertices"], a["token_points"].shape[0]
+    assert F == 4 and R == 200  # 3 response tokens -> 4 key frames
+    assert a["vertices"].shape == (F, V, 3) and a["warp"].shape == (F, V)
+    assert a["token_emis"].shape == (F, R)
+    assert a["faces"].shape[1] == 3  # one static face list, shared by every frame
+    # the sphere geometry is shared but the surface actually re-warps between frames
+    move = np.linalg.norm(a["vertices"][-1] - a["vertices"][0], axis=1)
+    assert float(move.mean()) > 0.02
+    # one trajectory dot per response token, all on the radius-2 sphere
+    assert a["traj_points"].shape == (F - 1, 3)
+    assert np.allclose(np.linalg.norm(a["traj_points"], axis=1), 2.0, atol=1e-3)
+    assert len(m["trajectory_token_strs"]) == F - 1

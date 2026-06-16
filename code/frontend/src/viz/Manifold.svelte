@@ -4,7 +4,7 @@
   import * as THREE from "three";
   import { OrbitControls } from "three/addons/controls/OrbitControls.js";
   import { modelId, prefixText, temperature, responseText, responseStep, responseTokenCount, refreshNonce } from "../lib/stores";
-  import { client, type ManifoldData } from "../lib/dataClient";
+  import { client, type ManifoldData, type ManifoldAnimation } from "../lib/dataClient";
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
   import ExportBar from "../controls/ExportBar.svelte";
@@ -16,6 +16,10 @@
   let progressMsg = $state("");
   let error = $state("");
   let data = $state<ManifoldData | null>(null);
+  let manim = $state<ManifoldAnimation | null>(null); // precomputed key frames (response present)
+  let animTime = 0; // continuous key-frame index; tweened toward responseStep
+  let tweenRaf = 0;
+  let emisNow: Float32Array | null = null; // current interpolated per-token emission (for hover)
   let containerEl: HTMLDivElement | undefined;
 
   const SEED = 0;
@@ -75,7 +79,9 @@
     raycaster.params.Points = { threshold: 0.1 };
     const ndc = new THREE.Vector2();
     renderer.domElement.addEventListener("pointermove", (ev: PointerEvent) => {
-      if (!points || !camera || !renderer || !data) return;
+      if (!points || !camera || !renderer) return;
+      const strs = data?.token_strs ?? manim?.token_strs;
+      if (!strs) return;
       const rect = renderer.domElement.getBoundingClientRect();
       ndc.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
       ndc.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
@@ -83,7 +89,8 @@
       const hits = raycaster.intersectObject(points);
       if (hits.length && hits[0].index != null) {
         const i = hits[0].index;
-        showTip(ev, `${data.token_strs?.[i] ?? ""}   emission ${((data.token_emis?.[i] ?? 0) * 100).toFixed(1)}%`);
+        const emis = data ? (data.token_emis?.[i] ?? 0) : (emisNow?.[i] ?? 0);
+        showTip(ev, `${strs[i] ?? ""}   emission ${(emis * 100).toFixed(1)}%`);
       } else {
         hideTip();
       }
@@ -222,6 +229,159 @@
     }
   }
 
+  // --- Smooth animation (response present): precomputed key frames, morphed continuously. ---
+  // Build the mesh + token markers ONCE; setAnimFrame() then lerps vertex positions, warp
+  // colors, and per-token emission in place every frame so the surface morphs gradually and
+  // the trajectory builds in one dot at a time (no per-frame re-fetch / re-allocation).
+  function buildManifoldAnim(a: ManifoldAnimation) {
+    if (!scene) return;
+    // clear any prior objects (static or anim)
+    for (const o of [mesh, points] as (THREE.Mesh | THREE.Points | undefined)[]) {
+      if (o) { scene.remove(o); o.geometry.dispose(); (o.material as THREE.Material).dispose(); }
+    }
+    mesh = points = undefined;
+    if (traj) { scene.remove(traj); traj.traverse((o: any) => { o.geometry?.dispose?.(); o.material?.dispose?.(); }); traj = undefined; }
+
+    const nv = a.n_vertices;
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(nv * 3), 3));
+    geom.setAttribute("color", new THREE.BufferAttribute(new Float32Array(nv * 3), 3));
+    geom.setIndex(new THREE.BufferAttribute(new Uint32Array(a.faces.flat()), 1));
+    mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.15 }));
+    scene.add(mesh);
+
+    // Token markers (static radius-2 positions). Color is derived from aEmis IN the shader so a
+    // frame update only has to touch the single aEmis attribute (cheap even at full vocab).
+    const n = a.token_points.length;
+    emisNow = new Float32Array(n);
+    const pgeom = new THREE.BufferGeometry();
+    pgeom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(a.token_points.flat()), 3));
+    pgeom.setAttribute("aEmis", new THREE.BufferAttribute(emisNow, 1));
+    const pmat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      uniforms: {
+        uSize: { value: 0.05 }, uScale: { value: pointScale() },
+        uLow: { value: new THREE.Color(LOW) }, uHigh: { value: new THREE.Color(HIGH) },
+      },
+      vertexShader: `
+        attribute float aEmis;
+        uniform float uSize; uniform float uScale; uniform vec3 uLow; uniform vec3 uHigh;
+        varying vec3 vColor; varying float vAlpha;
+        void main() {
+          vColor = mix(uLow, uHigh, aEmis);
+          vAlpha = 0.10 + 0.90 * aEmis;
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          gl_PointSize = uSize * (0.55 + 0.9 * aEmis) * (uScale / -mv.z);
+          gl_Position = projectionMatrix * mv;
+        }`,
+      fragmentShader: `
+        varying vec3 vColor; varying float vAlpha;
+        void main() {
+          vec2 uv = gl_PointCoord - 0.5;
+          if (dot(uv, uv) > 0.25) discard;
+          gl_FragColor = vec4(vColor, vAlpha);
+        }`,
+    });
+    points = new THREE.Points(pgeom, pmat);
+    scene.add(points);
+
+    setAnimFrame(animTime);
+  }
+
+  // Lerp the surface + markers between key frames f0/f1 at continuous index t, and lay the
+  // trajectory down dot-by-dot (each token reached once t passes its key frame).
+  function setAnimFrame(t: number) {
+    const a = manim;
+    if (!a || !mesh || !points) return;
+    const last = a.n_frames - 1;
+    t = Math.max(0, Math.min(last, t));
+    const f0 = Math.floor(t);
+    const f1 = Math.min(f0 + 1, last);
+    const fr = t - f0;
+    const V0 = a.vertices[f0], V1 = a.vertices[f1];
+    const W0 = a.warp[f0], W1 = a.warp[f1];
+    const pos = (mesh.geometry.attributes.position as THREE.BufferAttribute).array as Float32Array;
+    const col = (mesh.geometry.attributes.color as THREE.BufferAttribute).array as Float32Array;
+    const c = new THREE.Color();
+    for (let i = 0; i < a.n_vertices; i++) {
+      const p0 = V0[i], p1 = V1[i];
+      pos[i * 3] = p0[0] + (p1[0] - p0[0]) * fr;
+      pos[i * 3 + 1] = p0[1] + (p1[1] - p0[1]) * fr;
+      pos[i * 3 + 2] = p0[2] + (p1[2] - p0[2]) * fr;
+      const w = (W0[i] + (W1[i] - W0[i]) * fr);
+      c.copy(LOW).lerp(HIGH, Math.max(0, Math.min(1, w)));
+      col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+    }
+    (mesh.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+    (mesh.geometry.attributes.color as THREE.BufferAttribute).needsUpdate = true;
+    mesh.geometry.computeVertexNormals();
+
+    const E0 = a.token_emis[f0], E1 = a.token_emis[f1];
+    const ae = emisNow!;
+    for (let i = 0; i < ae.length; i++) ae[i] = E0[i] + (E1[i] - E0[i]) * fr;
+    (points.geometry.attributes.aEmis as THREE.BufferAttribute).needsUpdate = true;
+
+    rebuildAnimTrajectory(t);
+  }
+
+  // Geodesic trajectory that grows continuously: `whole` completed dots plus a partial arc to
+  // the next dot (so a dot is "laid down" exactly when t reaches its key frame).
+  function rebuildAnimTrajectory(t: number) {
+    if (!scene || !manim) return;
+    if (traj) { scene.remove(traj); traj.traverse((o: any) => { o.geometry?.dispose?.(); o.material?.dispose?.(); }); traj = undefined; }
+    const tpts = manim.traj_points;
+    if (!tpts.length) return;
+    const whole = Math.min(Math.floor(t), tpts.length); // dots fully laid down
+    const fr = Math.min(t, tpts.length) - whole;        // growth toward the next dot
+    const pts = tpts.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
+    const g = new THREE.Group();
+    const line: THREE.Vector3[] = [];
+    // completed great-circle segments between laid-down dots
+    for (let i = 0; i < whole - 1; i++) {
+      const seg = geodesic(pts[i], pts[i + 1], 28).map((v) => v.multiplyScalar(1.01));
+      line.push(...(i > 0 ? seg.slice(1) : seg));
+    }
+    // partial arc growing toward the next (not-yet-reached) dot
+    if (whole >= 1 && whole < tpts.length && fr > 0) {
+      const seg = geodesic(pts[whole - 1], pts[whole], 28).map((v) => v.multiplyScalar(1.01));
+      const partial = seg.slice(0, Math.max(2, Math.ceil(seg.length * fr)));
+      line.push(...(whole - 1 > 0 ? partial.slice(1) : partial));
+    }
+    if (line.length >= 2) {
+      const lgeom = new THREE.BufferGeometry().setFromPoints(line);
+      g.add(new THREE.Line(lgeom, new THREE.LineBasicMaterial({ color: 0x5be0b0, transparent: true, opacity: 0.95 })));
+    }
+    for (let i = 0; i < whole; i++) {
+      const isCur = i === whole - 1;
+      const m = new THREE.Mesh(
+        new THREE.SphereGeometry(isCur ? 0.08 : 0.05, 14, 14),
+        new THREE.MeshBasicMaterial({ color: isCur ? 0xffffff : 0x5be0b0 }),
+      );
+      m.position.copy(pts[i].clone().multiplyScalar(1.01));
+      g.add(m);
+    }
+    traj = g;
+    scene.add(g);
+  }
+
+  // Ease the continuous frame index toward a target key frame (smooth scrub / ▶ Play).
+  function tweenTo(target: number) {
+    cancelAnimationFrame(tweenRaf);
+    const from = animTime;
+    const dur = 650;
+    let start = -1;
+    const easeInOutQuad = (x: number) => (x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2);
+    const step = (ts: number) => {
+      if (start < 0) start = ts;
+      const k = Math.min(1, (ts - start) / dur);
+      animTime = from + (target - from) * easeInOutQuad(k);
+      setAnimFrame(animTime);
+      if (k < 1) tweenRaf = requestAnimationFrame(step);
+    };
+    tweenRaf = requestAnimationFrame(step);
+  }
+
   // Great-circle arc between two points on a sphere (slerp at their shared radius).
   function geodesic(a: THREE.Vector3, b: THREE.Vector3, segments: number): THREE.Vector3[] {
     const r = a.length();
@@ -247,6 +407,7 @@
 
   function teardown() {
     cancelAnimationFrame(raf);
+    cancelAnimationFrame(tweenRaf);
     resizeObs?.disconnect();
     controls?.dispose();
     if (renderer) {
@@ -256,23 +417,30 @@
     renderer = scene = camera = controls = mesh = points = traj = undefined;
   }
 
+  // Reload whenever the model / context / temperature / response text changes (NOT on step —
+  // a response step just scrubs the already-loaded animation; see the tween effect below).
   $effect(() => {
     const m = $modelId;
     const pfx = $prefixText;
     const temp = $temperature;
     const resp = $responseText;
-    const step = $responseStep;
     const rn = $refreshNonce;
     const force = rn !== lastRefresh;
     lastRefresh = rn;
     if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => void load(m, pfx, temp, resp, step, force), force ? 0 : 350);
+    debounce = setTimeout(() => void load(m, pfx, temp, resp, force), force ? 0 : 350);
     return () => {
       if (debounce) clearTimeout(debounce);
     };
   });
 
-  async function load(m: string, pfx: string, temp: number, resp: string, step: number, force = false) {
+  // A response step change tweens the loaded key-frame animation smoothly to that frame.
+  $effect(() => {
+    const step = $responseStep;
+    if (manim) tweenTo(Math.min(step, manim.n_frames - 1));
+  });
+
+  async function load(m: string, pfx: string, temp: number, resp: string, force = false) {
     const my = ++runId;
     error = "";
     loading = true;
@@ -280,19 +448,30 @@
     progressMsg = force ? "recomputing…" : "starting…";
     try {
       const params = { temperature: temp, seed: SEED }; // full vocab (a dot per token)
-      const inputs = { prefix_text: pfx, response_text: resp, response_step: step };
+      const hasResp = resp.trim().length > 0;
+      const artifact = hasResp ? "manifold_animation" : "manifold";
+      const inputs: Record<string, unknown> = { prefix_text: pfx };
+      if (hasResp) inputs.response_text = resp;
       if (!force) {
-        await client.ensureArtifact("manifold", m, params, inputs, (p, msg) => {
-          if (my === runId) {
-            progress = p;
-            progressMsg = msg;
-          }
+        await client.ensureArtifact(artifact, m, params, inputs, (p, msg) => {
+          if (my === runId) { progress = p; progressMsg = msg; }
         });
       }
       if (my !== runId) return;
-      data = await client.getManifold(m, { prefix_text: pfx, response_text: resp, response_step: step, ...params, ...(force ? { force: true } : {}) });
-      if (my !== runId) return;
-      buildMesh(data, step);
+      const forceArg = force ? { force: true } : {};
+      if (hasResp) {
+        // Precomputed key frames → smooth morph + gradual trajectory build-in.
+        manim = await client.getManifoldAnimation(m, { prefix_text: pfx, response_text: resp, ...params, ...forceArg });
+        if (my !== runId) return;
+        data = null;
+        animTime = Math.min(get(responseStep), manim.n_frames - 1);
+        buildManifoldAnim(manim);
+      } else {
+        manim = null;
+        data = await client.getManifold(m, { prefix_text: pfx, ...params, ...forceArg });
+        if (my !== runId) return;
+        buildMesh(data, 0);
+      }
     } catch (e: any) {
       if (my === runId) error = `${e.type ?? "Error"}: ${e.message ?? e}`;
     } finally {
@@ -300,20 +479,25 @@
     }
   }
 
-  // Export: drive the response animation frame-by-frame (for a GIF) + a frame settle so the
-  // WebGL buffer is captured after it draws.
+  // Export: interpolate SUB sub-frames per key-frame transition for a watchable morph; settle a
+  // couple of rAFs so the WebGL buffer is captured after it actually draws.
+  const SUB = 12;
   async function renderFrame(i: number) {
-    await load(get(modelId), get(prefixText), get(temperature), get(responseText), i);
+    if (manim) {
+      animTime = Math.min(i / SUB, manim.n_frames - 1);
+      setAnimFrame(animTime);
+    }
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
   }
   const exportAnim = {
-    total: () => get(responseTokenCount),
+    total: () => (manim ? (manim.n_frames - 1) * SUB : 0),
+    fps: 24,
     renderFrame,
-    restore: () => renderFrame(get(responseStep)),
+    restore: () => renderFrame(Math.min(get(responseStep), manim ? manim.n_frames - 1 : 0) * SUB),
   };
 </script>
 
-<section class="viz panel" data-testid="viz-manifold" data-ready={data ? 1 : 0}>
+<section class="viz panel" data-testid="viz-manifold" data-ready={data || manim ? 1 : 0}>
   <header>
     <div>
       <h2>Reachable "thoughts" as a manifold</h2>
@@ -327,6 +511,10 @@
   {#if data}
     <p class="caption">
       {data.vertices.length} mesh vertices · bulging toward: {data.top_tokens.slice(0, 5).map((t) => t.token_str.trim() || "∅").join(", ")}
+    </p>
+  {:else if manim}
+    <p class="caption">
+      {manim.n_vertices} mesh vertices · {manim.n_frames} key frames morphing as the response unfolds: {manim.trajectory_token_strs.map((t) => t.trim() || "∅").join(" → ")}
     </p>
   {/if}
 </section>

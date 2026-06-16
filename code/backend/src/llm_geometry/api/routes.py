@@ -333,6 +333,35 @@ def manifold_route(
     })
 
 
+@router.get("/manifold_animation")
+def manifold_animation_route(
+    model_id: str,
+    prefix_text: str = "",
+    temperature: float = 1.0,
+    seed: int = DEFAULT_SEED,
+    reference_set_size: int | None = None,
+    response_text: str = "",
+    force: bool = False,
+) -> dict[str, Any]:
+    """All key frames of the manifold response animation (static geometry once + per-frame
+    warped vertices / emission), for a smooth gradual morph + a trajectory that builds in."""
+    params: dict[str, Any] = {"temperature": temperature, "seed": seed}
+    if reference_set_size is not None:
+        params["reference_set_size"] = reference_set_size
+    payload = get_or_compute_sync(
+        "manifold_animation", model_id, params,
+        {"prefix_text": prefix_text, "response_text": response_text}, force=force,
+    )
+    meta = dict(payload["meta"])
+    a = payload["arrays"]
+    return _jsonable({
+        **meta,
+        "faces": a["faces"].tolist(), "token_points": a["token_points"].tolist(),
+        "traj_points": a["traj_points"].tolist(),
+        "vertices": a["vertices"].tolist(), "warp": a["warp"].tolist(), "token_emis": a["token_emis"].tolist(),
+    })
+
+
 @router.get("/tokenize")
 def tokenize_route(model_id: str, text: str = "") -> dict[str, Any]:
     """Token ids + strings for a text — lets the UI animate over response tokens."""

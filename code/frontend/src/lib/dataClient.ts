@@ -89,6 +89,19 @@ export interface TokenizeResult {
   tokens: { token: number; token_str: string }[];
 }
 
+export interface ManifoldAnimation {
+  n_frames: number;
+  n_vertices: number;
+  token_strs: string[];
+  trajectory_token_strs: string[];
+  faces: number[][]; // static
+  token_points: number[][]; // static (radius-2 token positions)
+  traj_points: number[][]; // static (response tokens on the sphere)
+  vertices: number[][][]; // [frame][vertex][x,y,z] — the morphing mesh
+  warp: number[][]; // [frame][vertex]
+  token_emis: number[][]; // [frame][token]
+}
+
 export interface VectorFieldAnimation {
   n_frames: number;
   layer_to: number;
@@ -251,6 +264,10 @@ export function createClient(opts: ClientOptions = {}) {
     return request("/api/manifold" + qs({ model_id, ...params }));
   }
 
+  function getManifoldAnimation(model_id: string, params: Record<string, unknown> = {}): Promise<ManifoldAnimation> {
+    return request("/api/manifold_animation" + qs({ model_id, ...params }));
+  }
+
   // The full-vocab cloud only depends on (model, seed, spread_mu) and is multi-MB, so it's
   // fetched once and memoized; the vector field re-fetches only its (small) arrows.
   const cloudCache = new Map<string, Promise<TokenCloud>>();
@@ -347,6 +364,7 @@ export function createClient(opts: ClientOptions = {}) {
     getVectorFieldAnimation,
     getSankey,
     getManifold,
+    getManifoldAnimation,
     getTokenCloud,
     tokenize,
     pollJob,
