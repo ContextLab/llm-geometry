@@ -127,3 +127,60 @@ export async function exportGIF(opts: {
   const bytes = new Uint8Array(gif.bytesView()); // fresh ArrayBuffer-backed copy for Blob typing
   downloadBlob(new Blob([bytes], { type: "image/gif" }), opts.filename);
 }
+
+export function mp4Supported(): boolean {
+  return typeof (globalThis as any).VideoEncoder !== "undefined" && typeof (globalThis as any).VideoFrame !== "undefined";
+}
+
+// Build an H.264 mp4 the same way as the GIF, encoding each captured frame with WebCodecs.
+export async function exportMP4(opts: {
+  total: number;
+  renderFrame: (i: number) => Promise<void>;
+  capture: () => Promise<HTMLCanvasElement>;
+  filename: string;
+  fps?: number;
+}) {
+  const { Muxer, ArrayBufferTarget } = await import("mp4-muxer");
+  const fps = opts.fps ?? 2.5;
+  const frameDur = Math.round(1_000_000 / fps);
+
+  await opts.renderFrame(0);
+  const first = await opts.capture();
+  const W = first.width - (first.width % 2); // H.264 (4:2:0) needs even dimensions
+  const H = first.height - (first.height % 2);
+
+  const muxer = new Muxer({
+    target: new ArrayBufferTarget(),
+    video: { codec: "avc", width: W, height: H },
+    fastStart: "in-memory",
+  });
+  const VE = (globalThis as any).VideoEncoder;
+  const VF = (globalThis as any).VideoFrame;
+  const encoder = new VE({
+    output: (chunk: any, meta: any) => muxer.addVideoChunk(chunk, meta),
+    error: (e: any) => { throw e; },
+  });
+  encoder.configure({ codec: "avc1.420028", width: W, height: H, bitrate: 6_000_000, framerate: fps });
+
+  const even = document.createElement("canvas");
+  even.width = W;
+  even.height = H;
+  const ectx = even.getContext("2d")!;
+  ectx.fillStyle = BG;
+  const push = (src: HTMLCanvasElement, i: number) => {
+    ectx.fillRect(0, 0, W, H);
+    ectx.drawImage(src, 0, 0, W, H);
+    const frame = new VF(even, { timestamp: i * frameDur, duration: frameDur });
+    encoder.encode(frame, { keyFrame: i % 30 === 0 });
+    frame.close();
+  };
+  push(first, 0);
+  for (let i = 1; i < opts.total; i++) {
+    await opts.renderFrame(i);
+    push(await opts.capture(), i);
+  }
+  await encoder.flush();
+  muxer.finalize();
+  const buffer = (muxer.target as any).buffer as ArrayBuffer;
+  downloadBlob(new Blob([buffer], { type: "video/mp4" }), opts.filename);
+}

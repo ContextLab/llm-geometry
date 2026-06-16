@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { exportSVG, exportSVGtoPDF, exportCanvasPNG, canvasPNG, exportGIF, svgToCanvas, webglToCanvas } from "../lib/exportFigure";
+  import { exportSVG, exportSVGtoPDF, exportCanvasPNG, canvasPNG, exportGIF, exportMP4, mp4Supported, svgToCanvas, webglToCanvas } from "../lib/exportFigure";
 
   // Export toolbar shown on each figure. SVG views get vector SVG + PDF; the WebGL manifold
   // gets a high-res PNG; any view with an `anim` driver gets an animated GIF.
@@ -17,34 +17,38 @@
   async function run(label: string, fn: () => Promise<void> | void) {
     if (busy) return;
     busy = true;
-    msg = label === "GIF" ? "rendering GIF…" : "";
+    const animated = label === "GIF" || label === "MP4";
+    msg = animated ? `rendering ${label}…` : "";
     try {
       await fn();
     } catch (e: any) {
       msg = `export failed: ${e?.message ?? e}`;
-      setTimeout(() => (msg = ""), 4000);
+      setTimeout(() => (msg = ""), 5000);
     } finally {
       busy = false;
-      if (msg === "rendering GIF…") msg = "";
+      if (msg.startsWith("rendering")) msg = "";
     }
   }
+
+  const capture = async () => {
+    const s = svg?.();
+    if (s) return svgToCanvas(s, 1.4);
+    const c = webglCanvas?.();
+    if (c) return webglToCanvas(c);
+    throw new Error("no figure to capture");
+  };
 
   async function gif() {
     if (!anim) return;
     const total = Math.max(1, anim.total());
-    await exportGIF({
-      total: total + 1, // include the final full frame
-      renderFrame: (i) => anim.renderFrame(Math.min(i, total)),
-      capture: async () => {
-        const s = svg?.();
-        if (s) return svgToCanvas(s, 1.4);
-        const c = webglCanvas?.();
-        if (c) return webglToCanvas(c);
-        throw new Error("no figure to capture");
-      },
-      filename: fname("gif"),
-      fps: 2.5,
-    });
+    await exportGIF({ total: total + 1, renderFrame: (i) => anim.renderFrame(Math.min(i, total)), capture, filename: fname("gif"), fps: 2.5 });
+    await anim.restore();
+  }
+
+  async function mp4() {
+    if (!anim) return;
+    const total = Math.max(1, anim.total());
+    await exportMP4({ total: total + 1, renderFrame: (i) => anim.renderFrame(Math.min(i, total)), capture, filename: fname("mp4"), fps: 2.5 });
     await anim.restore();
   }
 </script>
@@ -61,6 +65,9 @@
   {/if}
   {#if anim}
     <button disabled={busy} onclick={() => run("GIF", gif)} title="Animated GIF" data-testid="export-gif">GIF</button>
+    {#if mp4Supported()}
+      <button disabled={busy} onclick={() => run("MP4", mp4)} title="H.264 MP4 video" data-testid="export-mp4">MP4</button>
+    {/if}
   {/if}
   {#if msg}<span class="msg">{msg}</span>{/if}
 </div>

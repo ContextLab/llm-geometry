@@ -43,7 +43,7 @@
       {#if $view === "vector"}<LayerSlider />{/if}
       {#if $view !== "sankey"}<ResponseAnimator />{/if}
       {#if $view === "sankey"}<SwarmControls />{/if}
-      <p class="hint">Cached results return instantly; the first computation streams progress. ▶ Play animates token-by-token. Each figure can be exported as a vector PDF/SVG or an animated GIF.</p>
+      <p class="hint">Cached results return instantly; the first computation streams progress. ▶ Play animates token-by-token. Each figure can be exported as a vector PDF/SVG, a high-res PNG, or an animated GIF/MP4.</p>
     </aside>
 
     <div class="main">
