@@ -131,10 +131,13 @@ Query: `model_id`, `seed` (default fixed), `spread_mu` (0..1 grid-flattening, de
 ## GET /api/vector_field
 
 Visualization 1 (FR §1). A "Drift"-style flow field: a regular `grid_n`×`grid_n` grid of
-FIXED origins over the `/api/token_cloud` layout (same `seed`/`spread_mu`). Each `start` is
-a grid origin and `end = start + unit·L` (uniform length); the unit direction is the local
-prediction flow — nearest reference token at layer `layer_from` → its predicted next token
-at layer `layer_to` — so orientations rotate as the prompt reshapes the output.
+FIXED origins over the `/api/token_cloud` layout (same `seed`/`spread_mu`; that prompt-
+independent layout is used only as a position lookup, not drawn). Each `start` is a grid
+origin and `end = start + unit·L` (uniform length); the unit direction points from the
+origin's nearest reference token toward the PRINTABLE token the model predicts next — read
+out at `layer_to` (real logits at the final layer, else a logit-lens of that layer). Because
+positions are prompt-independent, origins are stable and arrows simply rotate as the prompt
+changes. The response `trajectory` is each response token at its cloud position.
 
 Query: `model_id`, `prefix_text`, `temperature` (>0 fans out), `layer_from`, `layer_to`,
 `grid_n`, `fanout`, `seed`, `reference_set_size`, `response_text`, `response_step`.

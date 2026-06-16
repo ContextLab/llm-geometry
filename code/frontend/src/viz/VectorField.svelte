@@ -1,29 +1,27 @@
 <script lang="ts">
   import * as d3 from "d3";
   import { modelId, prefixText, temperature, layerFrom, layerTo, responseText, responseStep } from "../lib/stores";
-  import { client, type VectorField, type TokenCloud } from "../lib/dataClient";
+  import { client, type VectorField } from "../lib/dataClient";
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
 
-  // Visualization 1 (project_description.md §1) — a macOS "Drift"-style flow field. A dot
-  // for every vocabulary token (the spread embedding cloud, on a canvas) under a REGULAR
-  // grid of fixed-origin, uniform-length arrows. Each arrow's orientation is the local
-  // prediction flow (nearest token at layer n → its predicted next token at layer m); the
-  // orientations rotate smoothly as the prompt reshapes the output. Hover any arrow, grid
-  // origin, or background dot; ▶ Play traces the response as a growing trajectory.
+  // Visualization 1 (project_description.md §1) — a macOS "Drift"-style flow field. A regular
+  // grid of fixed origins; each origin's arrow points (uniform length) from its nearest
+  // reference token toward the token the model predicts comes next (read out at layer m).
+  // Only the grid dots, arrows, and the response trajectory are drawn — orientations rotate
+  // smoothly as the prompt changes (the origins are prompt-independent). Hover any arrow or
+  // origin; add a response + ▶ Play to trace it.
   let loading = $state(false);
   let progress = $state(0);
   let progressMsg = $state("");
   let error = $state("");
   let data = $state<VectorField | null>(null);
-  let cloud = $state<TokenCloud | null>(null);
   let svgEl: SVGSVGElement | undefined;
-  let canvasEl: HTMLCanvasElement | undefined;
   let stageEl: HTMLDivElement | undefined;
 
-  const H = 480;
-  const GRID_N = 12;
-  const REF = 220;
+  const H = 520;
+  const GRID_N = 24; // ~4× the previous resolution
+  const REF = 400;
   const FANOUT = 2;
   const SEED = 0;
   let debounce: ReturnType<typeof setTimeout> | undefined;
@@ -73,12 +71,8 @@
       });
       if (my !== runId) return;
       const vf = await client.getVectorField(m, { prefix_text: pfx, response_text: resp, response_step: step, ...params });
-      // Fetch the cloud with the EXACT seed/spread_mu the field used so dots & arrows share
-      // one layout. The full-vocab cloud is model-only and multi-MB → memoized client-side.
-      const cl = await client.getTokenCloud(m, vf.seed, vf.spread_mu).catch(() => null);
       if (my !== runId) return;
       data = vf;
-      cloud = cl;
       render();
     } catch (e: any) {
       if (my === runId) error = `${e.type ?? "Error"}: ${e.message ?? e}`;
@@ -89,19 +83,20 @@
 
   function robust(vals: number[]): [number, number] {
     const s = [...vals].sort((a, b) => a - b);
-    let lo = d3.quantileSorted(s, 0.01) ?? s[0];
-    let hi = d3.quantileSorted(s, 0.99) ?? s[s.length - 1];
+    let lo = d3.quantileSorted(s, 0.005) ?? s[0];
+    let hi = d3.quantileSorted(s, 0.995) ?? s[s.length - 1];
     if (hi <= lo) { lo -= 1; hi += 1; }
-    return [lo, hi];
+    const pad = (hi - lo) * 0.04;
+    return [lo - pad, hi + pad];
   }
 
-  // One coordinate→pixel mapping shared by the cloud (canvas) and arrows (svg).
+  // Scale over the grid + arrows + trajectory (all live in the same cloud frame).
   function scales(w: number) {
     const d = data!;
-    const xs = cloud ? cloud.coords.map((c) => c[0]) : [...d.starts.map((s) => s[0]), ...d.ends.map((e) => e[0])];
-    const ys = cloud ? cloud.coords.map((c) => c[1]) : [...d.starts.map((s) => s[1]), ...d.ends.map((e) => e[1])];
-    const x = d3.scaleLinear().domain(robust(xs)).range([30, w - 30]).clamp(true);
-    const y = d3.scaleLinear().domain(robust(ys)).range([H - 30, 30]).clamp(true);
+    const xs = [...d.starts.map((s) => s[0]), ...d.ends.map((e) => e[0]), ...(d.trajectory ?? []).map((t) => t[0])];
+    const ys = [...d.starts.map((s) => s[1]), ...d.ends.map((e) => e[1]), ...(d.trajectory ?? []).map((t) => t[1])];
+    const x = d3.scaleLinear().domain(robust(xs)).range([28, w - 28]);
+    const y = d3.scaleLinear().domain(robust(ys)).range([H - 28, 28]);
     return { x, y };
   }
 
@@ -110,25 +105,7 @@
     const w = stageEl.clientWidth || 640;
     lastW = w;
     const { x, y } = scales(w);
-    drawCloud(w, x, y);
     drawField(w, x, y);
-  }
-
-  // Background: a dim dot for every vocabulary token, on a canvas (an SVG node per token
-  // would be ~150k elements). Low alpha so dense regions read as brighter structure.
-  function drawCloud(w: number, x: d3.ScaleLinear<number, number>, y: d3.ScaleLinear<number, number>) {
-    if (!canvasEl) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvasEl.width = Math.round(w * dpr);
-    canvasEl.height = Math.round(H * dpr);
-    const ctx = canvasEl.getContext("2d");
-    if (!ctx) return;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, H);
-    if (!cloud) return;
-    ctx.fillStyle = "rgba(125,175,255,0.22)";
-    const c = cloud.coords;
-    for (let i = 0; i < c.length; i++) ctx.fillRect(x(c[i][0]) - 0.7, y(c[i][1]) - 0.7, 1.4, 1.4);
   }
 
   // Persistent SVG structure so keyed joins can TRANSITION arrow orientations between
@@ -138,12 +115,11 @@
     if (svg.select("defs").empty()) {
       svg.append("defs").append("marker")
         .attr("id", "vf-arrow").attr("viewBox", "0 0 10 10")
-        .attr("refX", 7).attr("refY", 5).attr("markerWidth", 4).attr("markerHeight", 4)
+        .attr("refX", 7).attr("refY", 5).attr("markerWidth", 5).attr("markerHeight", 5)
         .attr("orient", "auto-start-reverse")
         .append("path").attr("d", "M0,0 L10,5 L0,10 z").attr("fill", "context-stroke");
-      svg.append("rect").attr("class", "bg").attr("fill", "transparent");
-      svg.append("g").attr("class", "arrows");
       svg.append("g").attr("class", "origins");
+      svg.append("g").attr("class", "arrows");
       svg.append("g").attr("class", "traj");
     }
     return svg;
@@ -153,26 +129,32 @@
     const d = data!;
     const svg = ensure().attr("viewBox", `0 0 ${w} ${H}`);
 
-    // Background hit area: hovering empty space reveals the nearest cloud token.
-    const bg = svg.select<SVGRectElement>("rect.bg").attr("width", w).attr("height", H);
-    if (cloud) {
-      const pts = cloud.coords.map((c, i) => ({ px: x(c[0]), py: y(c[1]), s: cloud!.token_strs[i] }));
-      const qt = d3.quadtree<{ px: number; py: number; s: string }>().x((p) => p.px).y((p) => p.py).addAll(pts);
-      bg.on("mousemove", (event) => {
-        const [mx, my] = d3.pointer(event);
-        const f = qt.find(mx, my, 12);
-        if (f) showTip(event, f.s); else hideTip();
-      }).on("mouseleave", hideTip);
-    }
-
     const maxp = Math.max(...d.probs, 1e-6);
-    // Warm palette so arrows pop against the cool-blue token cloud.
     const pcolor = d3.scaleSequential(d3.interpolatePlasma).domain([-0.15 * maxp, maxp]);
     const rel = (p: number) => Math.min(1, p / maxp);
     const rows = d.starts.map((s, i) => ({ s, e: d.ends[i], p: d.probs[i], i }));
 
+    // Grid origins (one dot per fixed grid coordinate; dedup since fan-out shares origins).
+    const seen = new Set<string>();
+    const origins: { s: number[]; i: number }[] = [];
+    d.starts.forEach((s, i) => {
+      const k = `${s[0]},${s[1]}`;
+      if (!seen.has(k)) { seen.add(k); origins.push({ s, i }); }
+    });
+    svg.select("g.origins").selectAll<SVGCircleElement, any>("circle")
+      .data(origins, (o: any) => `${o.s[0]},${o.s[1]}`)
+      .join(
+        (enter) => enter.append("circle").attr("r", 1.5).attr("fill", "#6c7bb0").attr("opacity", 0.6)
+          .attr("cx", (o) => x(o.s[0])).attr("cy", (o) => y(o.s[1])),
+        (update) => update,
+        (exit) => exit.remove(),
+      )
+      .on("mousemove", (event, o: any) => showTip(event, `grid origin · nearest token: ${d.start_token_strs[o.i]}`))
+      .on("mouseleave", hideTip)
+      .transition().duration(500).attr("cx", (o) => x(o.s[0])).attr("cy", (o) => y(o.s[1]));
+
     const onMove = (event: any, r: any) =>
-      showTip(event, `${d.start_token_strs[r.i]} → ${d.end_token_strs[r.i]}\nlayer ${d.layer_from}→${d.layer_to} · ${(r.p * 100).toFixed(1)}%`);
+      showTip(event, `${d.start_token_strs[r.i]} → ${d.end_token_strs[r.i]}\nlayer ${d.layer_to} prediction · ${(r.p * 100).toFixed(1)}%`);
 
     const arrows = svg.select("g.arrows").selectAll<SVGLineElement, any>("line")
       .data(rows, (r: any) => r.i)
@@ -190,28 +172,8 @@
       .attr("x1", (r) => x(r.s[0])).attr("y1", (r) => y(r.s[1]))
       .attr("x2", (r) => x(r.e[0])).attr("y2", (r) => y(r.e[1]))
       .attr("stroke", (r) => pcolor(r.p))
-      .attr("stroke-width", (r) => 0.7 + 1.1 * rel(r.p))
-      .attr("opacity", (r) => 0.4 + 0.55 * rel(r.p)); // every arrow visible; confident ones pop
-
-    // Fixed grid origins (one dot per origin, dedup by position).
-    const seen = new Set<string>();
-    const origins: { s: number[]; i: number }[] = [];
-    d.starts.forEach((s, i) => {
-      const k = `${s[0]},${s[1]}`;
-      if (!seen.has(k)) { seen.add(k); origins.push({ s, i }); }
-    });
-    svg.select("g.origins").selectAll<SVGCircleElement, any>("circle")
-      .data(origins, (o: any) => `${o.s[0]},${o.s[1]}`)
-      .join(
-        (enter) => enter.append("circle").attr("r", 1.1).attr("fill", "#8aa0d8").attr("opacity", 0.45)
-          .attr("cx", (o) => x(o.s[0])).attr("cy", (o) => y(o.s[1])),
-        (update) => update,
-        (exit) => exit.remove(),
-      )
-      .on("mousemove", (event, o: any) => showTip(event, `grid origin · nearest token: ${d.start_token_strs[o.i]}`))
-      .on("mouseleave", hideTip)
-      .transition().duration(600)
-      .attr("cx", (o) => x(o.s[0])).attr("cy", (o) => y(o.s[1]));
+      .attr("stroke-width", (r) => 1.0 + 1.4 * rel(r.p))
+      .attr("opacity", (r) => 0.45 + 0.5 * rel(r.p));
 
     drawTrajectory(svg, x, y);
   }
@@ -258,18 +220,17 @@
   <header>
     <div>
       <h2>Transformer layers as a vector field</h2>
-      <p class="sub">A dot for every vocabulary token under a fixed grid of flow arrows. Each arrow points the way the model is "pulled" locally — from a token (layer <i>n</i>) toward its predicted next token (layer <i>m</i>); orientations rotate as the prompt changes. <b>Colour/opacity = probability.</b> Hover any arrow, origin, or dot; add a response + ▶ Play to trace it.</p>
+      <p class="sub">A regular grid of flow arrows: each points from a token toward the token the model predicts comes next (read out at the chosen layer). Orientations rotate as the prompt changes. <b>Colour/opacity = probability.</b> Hover any arrow or origin; add a response + ▶ Play to trace it.</p>
     </div>
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}
   {#if error}<div class="error" data-testid="viz-vector-error">{error}</div>{/if}
   <div bind:this={stageEl} class="stage" style="height:{H}px">
-    <canvas bind:this={canvasEl} class="cloud-layer" data-testid="vector-cloud"></canvas>
     <svg bind:this={svgEl} class="arrow-layer" data-testid="vector-svg"></svg>
   </div>
   {#if data}
     <p class="caption">
-      {#if cloud}{cloud.vocab_size.toLocaleString()} token dots · {/if}{data.reference_points} grid arrows ·
+      {data.reference_points} grid arrows ·
       layer {data.layer_from}{#if data.layer_to !== data.layer_from}→{data.layer_to}{/if}/{data.num_layers} ·
       fan-out {data.fanout}{#if data.trajectory} · trajectory {data.trajectory.length} tokens (step {data.response_step}){/if}
     </p>
@@ -283,7 +244,6 @@
   .loading { padding: 0.3rem 0; }
   .error { background: rgba(255,122,144,0.12); color: var(--bad); border: 1px solid rgba(255,122,144,0.3); border-radius: 10px; padding: 0.6rem 0.8rem; font-family: var(--mono); font-size: 0.85rem; }
   .stage { position: relative; width: 100%; background: rgba(0,0,0,0.22); border-radius: 12px; overflow: hidden; }
-  .cloud-layer { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   .arrow-layer { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
   .caption { margin: 0; color: var(--text-dim); font-size: 0.76rem; }
 </style>

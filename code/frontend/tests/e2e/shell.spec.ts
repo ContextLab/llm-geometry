@@ -39,13 +39,14 @@ test("vector field renders real arrows", async ({ page }) => {
   await selectTinyModel(page);
   await page.getByTestId("tab-vector").click();
   await ready(page, "viz-vector");
-  // The drift flow field is a regular grid of many uniform arrows + the full-vocab cloud.
+  // The drift flow field is a regular grid of many uniform arrows + grid-origin dots.
   // (Assert the field rendered rather than one arrow's bbox: a horizontal arrow has a
   // ~zero-height bounding box and would read as "hidden" — same flat-geometry caveat as
   // the Sankey links.)
   await expect.poll(async () => page.locator('[data-testid="vector-svg"] g.arrows line').count(),
     { timeout: 60_000 }).toBeGreaterThan(50);
-  await expect(page.getByTestId("vector-cloud")).toBeVisible();
+  await expect.poll(async () => page.locator('[data-testid="vector-svg"] g.origins circle').count())
+    .toBeGreaterThan(20);
   await page.screenshot({ path: "tests/e2e/__screenshots__/viz-vector.png", fullPage: true });
 });
 
