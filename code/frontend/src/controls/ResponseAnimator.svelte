@@ -6,6 +6,16 @@
 
   let timer: ReturnType<typeof setInterval> | undefined;
 
+  // Preset response trajectories (pair these with a prompt to watch the context shift them).
+  const presets = [
+    "Paris, the capital of France.",
+    "cold, of course.",
+    "blue, and full of wonder.",
+    "the answer is obviously four.",
+    "money is the root of all evil.",
+    "once told me that nothing lasts forever.",
+  ];
+
   // Keep the response token count in sync (drives the step slider + animation length).
   $effect(() => {
     const m = $modelId;
@@ -65,6 +75,13 @@
 
 <label class="control">
   <span class="label">Response trajectory <span class="opt">(optional · ▶ animates the views)</span></span>
+  <select
+    onchange={(e) => { if (e.currentTarget.value) responseText.set(e.currentTarget.value); e.currentTarget.selectedIndex = 0; }}
+    data-testid="response-presets"
+  >
+    <option value="">Example responses…</option>
+    {#each presets as p (p)}<option value={p}>{p.slice(0, 34)}</option>{/each}
+  </select>
   <textarea rows="2" bind:value={$responseText} placeholder="e.g. Paris, the capital of France." data-testid="response-input"></textarea>
   {#if $responseTokenCount > 0}
     <div class="row">

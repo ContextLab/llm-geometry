@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import * as THREE from "three";
   import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-  import { modelId, prefixText, temperature, responseText, responseStep, layerFrom, layerTo } from "../lib/stores";
+  import { modelId, prefixText, temperature, responseText, responseStep } from "../lib/stores";
   import { client, type ManifoldData } from "../lib/dataClient";
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
@@ -205,7 +205,6 @@
     const temp = $temperature;
     const resp = $responseText;
     const step = $responseStep;
-    void $layerFrom; void $layerTo; // refresh on ANY control change (layers don't alter the warp)
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(() => void load(m, pfx, temp, resp, step), 350);
     return () => {

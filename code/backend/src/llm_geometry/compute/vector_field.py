@@ -136,11 +136,13 @@ def vector_field(
     ref_ids = printable_reference_ids(lm, reference_set_size)
     pmask = _printable_mask(lm)
 
-    ref_layers = sorted({n_from, n_to})
+    # Position EVERYTHING in one layer's space (the readout layer `n_to`). Mixing layers
+    # (start@n, end@m) makes early- and late-layer hidden states separate into different
+    # regions, throwing the trajectory off the grid — so reference tokens, predicted tokens,
+    # and the trajectory are all embedded at `n_to`.
     ref_embs, top_tokens, top_probs = _embed_layers_and_topk(
-        lm, base, ref_ids, ref_layers, temperature, fan, pmask, progress_cb, 0.05, 0.5
+        lm, base, ref_ids, [n_to], temperature, fan, pmask, progress_cb, 0.05, 0.5
     )
-    emb_from = ref_embs[n_from]
     emb_to = ref_embs[n_to]
 
     # Contextual layer-`to` embeddings of the predicted tokens (their representation when they
@@ -165,16 +167,17 @@ def vector_field(
 
     from ..reduce.spread import flatten_density
 
-    # ONE frame fit on the CONTEXTUAL embeddings we actually plot — so the trajectory lands
-    # in-frame and spreads, never crammed into a corner.
-    fit_on = np.vstack([emb_from.astype(np.float64), pred_embs, traj_embs])
+    # ONE frame fit on the CONTEXTUAL layer-`to` embeddings we actually plot (reference
+    # tokens, their predicted tokens, the trajectory) — so the trajectory lands in-frame and
+    # spreads, never crammed into a corner or off the grid.
+    fit_on = np.vstack([emb_to.astype(np.float64), pred_embs, traj_embs])
     pca = PCA(n_components=2, random_state=seed).fit(fit_on)
     for i in range(2):  # deterministic sign so the frame is stable run-to-run
         if pca.components_[i].sum() < 0:
             pca.components_[i] *= -1.0
 
-    n_ref, n_pred = emb_from.shape[0], pred_embs.shape[0]
-    raw = np.vstack([pca.transform(emb_from.astype(np.float64)), pca.transform(pred_embs),
+    n_ref, n_pred = emb_to.shape[0], pred_embs.shape[0]
+    raw = np.vstack([pca.transform(emb_to.astype(np.float64)), pca.transform(pred_embs),
                      pca.transform(traj_embs) if traj is not None else np.empty((0, 2))])
     flat = flatten_density(raw, mu=spread_mu, seed=seed)
     flat_start = flat[:n_ref]

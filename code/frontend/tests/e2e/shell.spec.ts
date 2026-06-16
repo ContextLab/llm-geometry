@@ -70,13 +70,13 @@ test("manifold renders a 3D canvas", async ({ page }) => {
   await page.screenshot({ path: "tests/e2e/__screenshots__/viz-manifold.png", fullPage: true });
 });
 
-test("layer range overlays multiple layers in the vector field", async ({ page }) => {
+test("the readout-layer slider re-renders the vector field", async ({ page }) => {
   await page.goto("/");
   await selectTinyModel(page);
   await page.getByTestId("tab-vector").click();
   await ready(page, "viz-vector");
-  await setRange(page, "layer-to", "2"); // tiny-gpt2 has 2 layers -> range 0..2
-  await expect(page.getByTestId("layer-value")).toContainText("–");
+  await setRange(page, "layer-to", "1"); // tiny-gpt2 has 2 layers -> read out at layer 1
+  await expect(page.getByTestId("layer-value")).toHaveText("1");
   await expect
     .poll(async () => page.getByTestId("viz-vector").getAttribute("data-ready"), { timeout: 200_000 })
     .toBe("1");

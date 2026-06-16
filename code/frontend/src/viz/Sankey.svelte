@@ -1,7 +1,7 @@
 <script lang="ts">
   import * as d3 from "d3";
   import { sankey as d3sankey, sankeyLinkHorizontal } from "d3-sankey";
-  import { modelId, prefixText, temperature, responseText, responseStep, layerFrom, layerTo } from "../lib/stores";
+  import { modelId, prefixText, temperature, nParticles, nSteps } from "../lib/stores";
   import { client, type SankeyData } from "../lib/dataClient";
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
@@ -15,35 +15,34 @@
   let data = $state<SankeyData | null>(null);
   let svgEl: SVGSVGElement | undefined;
 
-  const N_PARTICLES = 600;
-  const N_STEPS = 8;
   const SEED = 0;
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let runId = 0;
 
+  // The Sankey samples a fresh swarm from the PROMPT and uses only the final-layer token
+  // probabilities — so the response trajectory and layer selection do not apply to it.
   $effect(() => {
     const m = $modelId;
     const pfx = $prefixText;
     const temp = $temperature;
-    const resp = $responseText;
-    const step = $responseStep;
-    void $layerFrom; void $layerTo; // refresh on ANY control change (layers don't alter the swarm)
+    const np = $nParticles;
+    const ns = $nSteps;
     if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => void load(m, pfx, temp, resp, step), 350);
+    debounce = setTimeout(() => void load(m, pfx, temp, np, ns), 350);
     return () => {
       if (debounce) clearTimeout(debounce);
     };
   });
 
-  async function load(m: string, pfx: string, temp: number, resp: string, step: number) {
+  async function load(m: string, pfx: string, temp: number, np: number, ns: number) {
     const my = ++runId;
     error = "";
     loading = true;
     progress = 0;
     progressMsg = "starting…";
     try {
-      const params = { temperature: temp, n_particles: N_PARTICLES, n_steps: N_STEPS, seed: SEED };
-      const inputs = { prefix_text: pfx, response_text: resp, response_step: step };
+      const params = { temperature: temp, n_particles: np, n_steps: ns, seed: SEED };
+      const inputs = { prefix_text: pfx };
       await client.ensureArtifact("sankey", m, params, inputs, (p, msg) => {
         if (my === runId) {
           progress = p;
@@ -51,7 +50,7 @@
         }
       });
       if (my !== runId) return;
-      data = await client.getSankey(m, { prefix_text: pfx, response_text: resp, response_step: step, ...params });
+      data = await client.getSankey(m, { prefix_text: pfx, ...params });
       if (my !== runId) return;
       draw();
     } catch (e: any) {
@@ -97,13 +96,29 @@
         .text("Not enough transitions to draw flows — try a longer prompt or higher temperature.");
     } else {
       const layout = d3sankey<any, any>()
-        .nodeWidth(14)
+        .nodeWidth(13)
         .nodePadding(9)
-        .extent([[8, 16], [w - 8, h - 16]]);
+        .extent([[8, 16], [w - 8, h - 34]]);
       const graph = layout({
         nodes: nodes.map((n) => ({ ...n })),
         links: links.map((l) => ({ ...l })),
       });
+
+      // TIME AXIS: place every node at x ∝ its sequence position (step), so a length-k
+      // sequence reaches column k and flows terminate where their particles stop — d3-sankey's
+      // default depth layout doesn't encode time. (y comes from the layout.)
+      const maxPos = Math.max(...graph.nodes.map((n: any) => n.pos), 1);
+      const tx = d3.scaleLinear().domain([0, maxPos]).range([24, w - 70]);
+      graph.nodes.forEach((n: any) => { n.x0 = tx(n.pos); n.x1 = n.x0 + 13; });
+
+      const axis = svg.append("g");
+      for (let p = 0; p <= maxPos; p++) {
+        axis.append("line").attr("x1", tx(p)).attr("x2", tx(p)).attr("y1", 14).attr("y2", h - 30)
+          .attr("stroke", "var(--border)").attr("stroke-opacity", 0.35);
+        axis.append("text").attr("x", tx(p)).attr("y", h - 14).attr("text-anchor", "middle")
+          .attr("fill", "var(--text-dim)").attr("font-size", "10px").attr("font-family", "var(--mono)")
+          .text(p === 0 ? "prompt" : `+${p}`);
+      }
 
       // The combined next-token distribution is shown DIRECTLY via transparency at each
       // timepoint: a token's opacity = its share of the particles at that position; a flow's
@@ -205,7 +220,7 @@
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}
   {#if error}<div class="error" data-testid="viz-sankey-error">{error}</div>{/if}
   <svg bind:this={svgEl} class="canvas" height="560" data-testid="sankey-svg"></svg>
-  {#if data}<p class="caption">{data.nodes.length} token nodes · {data.links.length} transitions · {N_PARTICLES} particles · opacity = probability at each position</p>{/if}
+  {#if data}<p class="caption">{data.nodes.length} token nodes · {data.links.length} transitions · {$nParticles} particles · up to {$nSteps} steps · opacity = probability at each position</p>{/if}
 </section>
 
 <style>

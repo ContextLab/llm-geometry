@@ -17,6 +17,10 @@ export const responseStep = writable<number>(0);
 export const responseTokenCount = writable<number>(0);
 export const isPlaying = writable<boolean>(false);
 
+// Particle-swarm controls (Sankey): how many particles, and the max sequence length.
+export const nParticles = writable<number>(600);
+export const nSteps = writable<number>(10);
+
 // Which view is active in the main panel.
 export type View = "vector" | "sankey" | "manifold";
 export const view = writable<View>("vector");

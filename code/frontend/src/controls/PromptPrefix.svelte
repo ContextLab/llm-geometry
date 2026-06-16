@@ -1,15 +1,19 @@
 <script lang="ts">
   import { prefixText } from "../lib/stores";
 
-  // Preset prompts (§1/§2: "select from a dropdown menu").
+  // Preset prompts (§1/§2: "select from a dropdown menu"). Chosen to give confident,
+  // varied next-token predictions that make the geometry legible.
   const presets = [
     "The capital of France is",
-    "Once upon a time,",
-    "The meaning of life is",
-    "Q: What is 2 + 2?\nA:",
+    "The opposite of hot is",
     "Roses are red, violets are",
-    "def fibonacci(n):",
-    "Translate to French: good morning ->",
+    "Once upon a time, there was a",
+    "2 + 2 =",
+    "The three primary colours are",
+    "She opened the door and saw",
+    "def factorial(n):",
+    "Translate to French: \"good morning\" →",
+    "In conclusion, the most important thing is",
   ];
 </script>
 

@@ -30,9 +30,9 @@
         message = `${ref.display_name} · ${ref.capabilities.num_layers ?? "?"} layers`;
         const nl = ref.capabilities.num_layers ?? 0;
         numLayers.set(nl);
-        // Default to the FULL model: layer 0 (input) → last layer (output), so the view
-        // shows how input tokens become output tokens across the whole network.
-        layerFrom.set(0);
+        // Default the readout layer to the FINAL layer (where next-token probabilities are
+        // computed). Single layer → keep from/to in sync.
+        layerFrom.set(nl);
         layerTo.set(nl);
       })
       .catch((e) => {
