@@ -74,7 +74,6 @@ export interface VectorField {
   response_step: number;
   seed: number;
   spread_mu: number;
-  vocab_size: number;
   starts: number[][];
   ends: number[][];
   probs: number[];

@@ -1,19 +1,23 @@
 """Visualization 1 — transformer layers as a vector field (quiver). (project_description.md §1)
 
-A macOS "Drift"-style flow field. Every token sits at its FIXED position in the cached
-``token_cloud`` layout (a static-embedding PCA, density-flattened so the points spread out).
-A regular grid of fixed origins is laid over that layout; each origin's arrow points, at a
-UNIFORM length, from the nearest reference token toward the token the model predicts comes
-next — read out at layer ``layer_to`` (the final-layer logits, or a logit-lens readout of an
-earlier layer). Because positions are the prompt-independent cloud layout, the origins are
-stable and the arrows simply ROTATE as the prompt reshapes the prediction.
+The positions are CONTEXTUAL prediction-layer embeddings — the hidden state a token has at
+layer ``m`` *given the current context* (the representation just before the LM head turns it
+into next-token probabilities), NOT the context-independent input embedding. That is the
+whole phenomenon: change the prompt and a token's representation (and where the response
+trajectory lands) moves.
 
-Only the grid + arrows + the response trajectory are drawn (not the whole cloud); the cloud
-is used purely as the shared coordinate frame. All targets are PRINTABLE tokens.
+A single PCA is fit on those contextual embeddings (reference tokens at layer ``from``, the
+tokens they predict at layer ``to``, and the response trajectory at layer ``to``) and the
+points are spread (mapper-style density flattening) so they fill the plane instead of
+clumping — fitting the frame ON the contextual embeddings is what avoids the corner-cramming
+you get if you project them through an unrelated (static-embedding) frame. A regular grid is
+laid over the result; each grid arrow points from its nearest reference token (layer ``from``)
+toward the token it predicts next (layer ``to``).
 
-- TEMPERATURE fan-out: temperature > 0 draws the top-`fanout` predicted arrows per origin.
-- RESPONSE trajectory: each response token at its cloud position; effective grid context =
-  prefix + response[:response_step].
+- LAYER RANGE: arrow start = reference token @ layer ``from``; end = predicted token @ layer ``to``.
+- TEMPERATURE fan-out: temperature > 0 draws the top-`fanout` predicted arrows per grid cell.
+- RESPONSE trajectory: response tokens' layer-``to`` hidden states (context-dependent), spread
+  into the same frame; effective grid context = prefix + response[:response_step].
 """
 
 from __future__ import annotations
@@ -40,59 +44,68 @@ def _printable_mask(lm) -> torch.Tensor:
     return mask
 
 
-def _predict_topk(lm, base_ids, ref_ids, n_to, temperature, fan, progress_cb, lo, hi):
-    """Top-`fan` PRINTABLE next tokens for each reference token, read out at layer ``n_to``
-    (the real logits when n_to is the final layer; a logit-lens projection of the layer's
-    hidden state otherwise, so the layer slider changes the prediction)."""
-    n = len(ref_ids)
-    final = n_to >= lm.num_layers
-    t = max(float(temperature), 1e-6)
-    mask = _printable_mask(lm)
-    neg = torch.finfo(torch.float32).min
-    w_out = None if final else lm.model.get_output_embeddings().weight.detach().float()
+def _embed_layers_and_topk(lm, base_ids, tokens, layers, temperature, fan, pmask, progress_cb, lo, hi):
+    """Per-token contextual hidden states at each requested layer + the top-`fan` PRINTABLE
+    next tokens (the model's real prediction, conditioned on the context)."""
+    n = len(tokens)
+    embs = {L: np.empty((n, lm.hidden_size), dtype=np.float32) for L in layers}
     top_tokens = np.empty((n, fan), dtype=np.int64)
     top_probs = np.empty((n, fan), dtype=np.float32)
+    t = max(float(temperature), 1e-6)
+    neg = torch.finfo(torch.float32).min
     bs = max(1, int(EMBED_BATCH_SIZE))
     for s in range(0, n, bs):
-        chunk = [int(x) for x in ref_ids[s : s + bs]]
+        chunk = [int(x) for x in tokens[s : s + bs]]
         ids = torch.tensor([list(base_ids) + [tok] for tok in chunk], dtype=torch.long, device=lm.device)
         with torch.no_grad():
-            out = lm.model(input_ids=ids, output_hidden_states=not final)
-            if final:
-                logits = out.logits[:, -1, :].float()
-            else:
-                logits = out.hidden_states[n_to][:, -1, :].float() @ w_out.t()  # logit lens
-            logits = (logits / t).masked_fill(~mask.unsqueeze(0), neg)
-            probs = torch.softmax(logits, dim=-1)
-            tp, ti = torch.topk(probs, k=fan, dim=-1)
+            out = lm.model(input_ids=ids, output_hidden_states=True)
+        for L in layers:
+            embs[L][s : s + len(chunk)] = out.hidden_states[L][:, -1, :].float().cpu().numpy()
+        logits = (out.logits[:, -1, :].float() / t).masked_fill(~pmask.unsqueeze(0), neg)
+        probs = torch.softmax(logits, dim=-1)
+        tp, ti = torch.topk(probs, k=fan, dim=-1)
         top_tokens[s : s + len(chunk)] = ti.cpu().numpy()
         top_probs[s : s + len(chunk)] = tp.cpu().numpy()
         if progress_cb:
-            progress_cb(lo + (hi - lo) * min(1.0, (s + len(chunk)) / n), f"predicting at layer {n_to}: {s + len(chunk)}/{n}")
-    return top_tokens, top_probs
+            progress_cb(lo + (hi - lo) * min(1.0, (s + len(chunk)) / n), f"reference points {s + len(chunk)}/{n}")
+    return embs, top_tokens, top_probs
 
 
-def _trajectory(lm, base_ids, response_text, row_of, cloud_pos):
-    """Each PRINTABLE response token at its cloud position, with its emission probability."""
+def _embed_layer_only(lm, base_ids, tokens, layer, progress_cb, lo, hi):
+    """Contextual hidden state at ``layer`` for each token (fed after the context)."""
+    n = len(tokens)
+    embs = np.empty((n, lm.hidden_size), dtype=np.float32)
+    bs = max(1, int(EMBED_BATCH_SIZE))
+    for s in range(0, n, bs):
+        chunk = [int(x) for x in tokens[s : s + bs]]
+        ids = torch.tensor([list(base_ids) + [tok] for tok in chunk], dtype=torch.long, device=lm.device)
+        with torch.no_grad():
+            out = lm.model(input_ids=ids, output_hidden_states=True)
+        embs[s : s + len(chunk)] = out.hidden_states[layer][:, -1, :].float().cpu().numpy()
+        if progress_cb:
+            progress_cb(lo + (hi - lo) * min(1.0, (s + len(chunk)) / n), f"predicted tokens {s + len(chunk)}/{n}")
+    return embs
+
+
+def _trajectory_embeddings(lm, base_ids, response_text, layer):
+    """Each response token's CONTEXTUAL hidden state at ``layer`` (conditioned on the prefix),
+    so a different prompt moves the trajectory."""
     resp = list(lm.tokenizer(response_text)["input_ids"])
     if not resp:
         return None
     ids = torch.tensor([list(base_ids) + resp], dtype=torch.long, device=lm.device)
     with torch.no_grad():
-        logits = lm.model(input_ids=ids).logits[0]
+        out = lm.model(input_ids=ids, output_hidden_states=True)
+    hidden = out.hidden_states[layer][0]
+    logits = out.logits[0]
     base_len = len(base_ids)
-    pos, probs, strs = [], [], []
+    embs, probs, strs = [], [], []
     for j, tok in enumerate(resp):
-        row = row_of.get(int(tok))
-        if row is None:  # skip unprintable tokens (not in the cloud)
-            continue
-        p = base_len + j
-        pos.append(cloud_pos[row])
-        probs.append(float(torch.softmax(logits[p - 1].float(), dim=-1)[int(tok)].item()))
+        pos = base_len + j
+        embs.append(hidden[pos].float().cpu().numpy())
+        probs.append(float(torch.softmax(logits[pos - 1].float(), dim=-1)[tok].item()))
         strs.append(lm.tokenizer.decode([int(tok)]))
-    if not pos:
-        return None
-    return np.asarray(pos, dtype=np.float32), np.asarray(probs, dtype=np.float32), strs
+    return np.asarray(embs, dtype=np.float64), np.asarray(probs, dtype=np.float32), strs
 
 
 def vector_field(
@@ -121,32 +134,64 @@ def vector_field(
     fan = max(1, int(fanout)) if temperature > 0 else 1
     base = effective_context_ids(lm, prefix_text, response_text, response_step)
     ref_ids = printable_reference_ids(lm, reference_set_size)
+    pmask = _printable_mask(lm)
 
-    # Fixed coordinate frame: the cached static-embedding cloud (a position for every
-    # printable token). Computed once per model; here used only as a position lookup.
-    from ..precompute import get_or_compute_sync
+    ref_layers = sorted({n_from, n_to})
+    ref_embs, top_tokens, top_probs = _embed_layers_and_topk(
+        lm, base, ref_ids, ref_layers, temperature, fan, pmask, progress_cb, 0.05, 0.5
+    )
+    emb_from = ref_embs[n_from]
+    emb_to = ref_embs[n_to]
 
-    cloud = get_or_compute_sync("token_cloud", model_id, {"seed": seed, "spread_mu": spread_mu})
-    cloud_ids = cloud["arrays"]["token_ids"]
-    cloud_pos = cloud["arrays"]["warped"].astype(np.float64)  # (Vp, 2) spread positions
-    row_of = {int(t): r for r, t in enumerate(cloud_ids.tolist())}
+    # Contextual layer-`to` embeddings of the predicted tokens (their representation when they
+    # follow the same context); reuse the reference tokens where they coincide.
+    to_by_token = {int(ref_ids[i]): emb_to[i] for i in range(len(ref_ids))}
+    predicted = np.unique(top_tokens)
+    missing = np.array([p for p in predicted if int(p) not in to_by_token], dtype=np.int64)
+    if missing.size:
+        miss = _embed_layer_only(lm, base, missing, n_to, progress_cb, 0.5, 0.74)
+        for i, p in enumerate(missing):
+            to_by_token[int(p)] = miss[i]
+    pred_list = [int(p) for p in predicted]
+    pred_row = {p: i for i, p in enumerate(pred_list)}
+    pred_embs = np.vstack([to_by_token[p] for p in pred_list])
 
-    top_tokens, top_probs = _predict_topk(lm, base, ref_ids, n_to, temperature, fan, progress_cb, 0.1, 0.8)
-    ref_pos = cloud_pos[[row_of[int(t)] for t in ref_ids]]  # reference token positions (cloud)
+    traj = _trajectory_embeddings(lm, prefix_ids(lm, prefix_text), response_text, n_to) if response_text else None
+    traj_embs = traj[0] if traj is not None else np.empty((0, lm.hidden_size), dtype=np.float64)
 
     if progress_cb:
-        progress_cb(0.85, "laying out the flow-field grid")
+        progress_cb(0.8, "reducing the contextual embeddings (PCA) + spreading")
+    from sklearn.decomposition import PCA
+
+    from ..reduce.spread import flatten_density
+
+    # ONE frame fit on the CONTEXTUAL embeddings we actually plot — so the trajectory lands
+    # in-frame and spreads, never crammed into a corner.
+    fit_on = np.vstack([emb_from.astype(np.float64), pred_embs, traj_embs])
+    pca = PCA(n_components=2, random_state=seed).fit(fit_on)
+    for i in range(2):  # deterministic sign so the frame is stable run-to-run
+        if pca.components_[i].sum() < 0:
+            pca.components_[i] *= -1.0
+
+    n_ref, n_pred = emb_from.shape[0], pred_embs.shape[0]
+    raw = np.vstack([pca.transform(emb_from.astype(np.float64)), pca.transform(pred_embs),
+                     pca.transform(traj_embs) if traj is not None else np.empty((0, 2))])
+    flat = flatten_density(raw, mu=spread_mu, seed=seed)
+    flat_start = flat[:n_ref]
+    flat_pred = flat[n_ref : n_ref + n_pred]
+    flat_traj = flat[n_ref + n_pred :]
+
+    if progress_cb:
+        progress_cb(0.9, "laying out the flow-field grid")
     from scipy.spatial import cKDTree
 
-    # Regular grid of FIXED origins over the (prompt-independent) cloud extent → stable
-    # origins, so arrows rotate smoothly between prompts.
-    lo = np.percentile(cloud_pos, 1, axis=0)
-    hi = np.percentile(cloud_pos, 99, axis=0)
+    lo = np.percentile(flat_start, 1, axis=0)
+    hi = np.percentile(flat_start, 99, axis=0)
     gx, gy = np.meshgrid(np.linspace(lo[0], hi[0], grid_n), np.linspace(lo[1], hi[1], grid_n))
-    grid_vertices = np.column_stack([gx.ravel(), gy.ravel()])
-    _, nn = cKDTree(ref_pos).query(grid_vertices, k=1)  # nearest reference token per origin
+    grid_vertices = np.column_stack([gx.ravel(), gy.ravel()])  # regular grid of fixed origins
+    _, nn = cKDTree(flat_start).query(grid_vertices, k=1)
     cell = min((hi[0] - lo[0]) / (grid_n - 1), (hi[1] - lo[1]) / (grid_n - 1))
-    arrow_len = 0.6 * float(cell)  # uniform length (a little under one grid cell)
+    arrow_len = 0.85 * float(cell)  # long bodies (most of a grid cell)
 
     starts, ends, probs, s_tokens, e_tokens = [], [], [], [], []
     for gi in range(grid_vertices.shape[0]):
@@ -154,7 +199,7 @@ def vector_field(
         v = grid_vertices[gi]
         for f in range(fan):
             p_tok = int(top_tokens[r, f])
-            d = cloud_pos[row_of[p_tok]] - ref_pos[r]  # toward the predicted token's position
+            d = flat_pred[pred_row[p_tok]] - flat_start[r]  # layer-from token → layer-to prediction
             norm = float(np.hypot(d[0], d[1]))
             u = d / norm if norm > 1e-9 else np.zeros(2)
             starts.append(v)
@@ -163,15 +208,12 @@ def vector_field(
             s_tokens.append(int(ref_ids[r]))
             e_tokens.append(p_tok)
 
-    traj = _trajectory(lm, prefix_ids(lm, prefix_text), response_text, row_of, cloud_pos) if response_text else None
-
     meta = {
         "model_id": lm.model_id, "revision": lm.revision, "grid_n": grid_n,
         "layer_from": n_from, "layer_to": n_to, "num_layers": lm.num_layers,
         "temperature": float(temperature), "fanout": fan, "prefix_text": prefix_text or "",
         "count": len(starts), "reference_points": int(grid_vertices.shape[0]),
-        "response_step": int(response_step), "spread_mu": float(spread_mu),
-        "seed": int(seed), "vocab_size": int(cloud["meta"]["vocab_size"]),
+        "response_step": int(response_step), "spread_mu": float(spread_mu), "seed": int(seed),
         "start_token_strs": [lm.tokenizer.decode([t]) for t in s_tokens],
         "end_token_strs": [lm.tokenizer.decode([t]) for t in e_tokens],
     }
@@ -183,7 +225,7 @@ def vector_field(
         "end_tokens": np.asarray(e_tokens, dtype=np.int64),
     }
     if traj is not None:
-        arrays["trajectory"] = traj[0]
+        arrays["trajectory"] = flat_traj.astype(np.float32)
         arrays["trajectory_probs"] = traj[1]
         meta["trajectory_token_strs"] = traj[2]
 

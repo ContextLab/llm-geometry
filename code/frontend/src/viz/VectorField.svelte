@@ -113,14 +113,15 @@
   function ensure() {
     const svg = d3.select(svgEl!);
     if (svg.select("defs").empty()) {
+      // Small, fixed-size arrowhead (userSpaceOnUse so it doesn't scale with stroke width).
       svg.append("defs").append("marker")
         .attr("id", "vf-arrow").attr("viewBox", "0 0 10 10")
-        .attr("refX", 7).attr("refY", 5).attr("markerWidth", 5).attr("markerHeight", 5)
-        .attr("orient", "auto-start-reverse")
-        .append("path").attr("d", "M0,0 L10,5 L0,10 z").attr("fill", "context-stroke");
-      svg.append("g").attr("class", "origins");
+        .attr("refX", 8).attr("refY", 5).attr("markerWidth", 4.5).attr("markerHeight", 4.5)
+        .attr("markerUnits", "userSpaceOnUse").attr("orient", "auto-start-reverse")
+        .append("path").attr("d", "M0,1.5 L9,5 L0,8.5 z").attr("fill", "context-stroke");
       svg.append("g").attr("class", "arrows");
       svg.append("g").attr("class", "traj");
+      svg.append("g").attr("class", "origins");  // drawn on top so the hover halos catch the cursor
     }
     return svg;
   }
@@ -134,27 +135,36 @@
     const rel = (p: number) => Math.min(1, p / maxp);
     const rows = d.starts.map((s, i) => ({ s, e: d.ends[i], p: d.probs[i], i }));
 
-    // Grid origins (one dot per fixed grid coordinate; dedup since fan-out shares origins).
+    // Grid origins (one per fixed grid coordinate; dedup since fan-out shares origins).
+    // Each is a visible dot plus a larger transparent halo that makes it easy to hover.
     const seen = new Set<string>();
     const origins: { s: number[]; i: number }[] = [];
     d.starts.forEach((s, i) => {
       const k = `${s[0]},${s[1]}`;
       if (!seen.has(k)) { seen.add(k); origins.push({ s, i }); }
     });
-    svg.select("g.origins").selectAll<SVGCircleElement, any>("circle")
+    const og = svg.select("g.origins").selectAll<SVGGElement, any>("g.o")
       .data(origins, (o: any) => `${o.s[0]},${o.s[1]}`)
       .join(
-        (enter) => enter.append("circle").attr("r", 1.5).attr("fill", "#6c7bb0").attr("opacity", 0.6)
-          .attr("cx", (o) => x(o.s[0])).attr("cy", (o) => y(o.s[1])),
+        (enter) => {
+          const g = enter.append("g").attr("class", "o")
+            .attr("transform", (o) => `translate(${x(o.s[0])},${y(o.s[1])})`);
+          g.append("circle").attr("class", "hit").attr("r", 6).attr("fill", "transparent");
+          g.append("circle").attr("class", "dot").attr("r", 1.8).attr("fill", "#9fb1e6")
+            .attr("opacity", 0.75).attr("pointer-events", "none");
+          return g;
+        },
         (update) => update,
         (exit) => exit.remove(),
-      )
-      .on("mousemove", (event, o: any) => showTip(event, `grid origin · nearest token: ${d.start_token_strs[o.i]}`))
-      .on("mouseleave", hideTip)
-      .transition().duration(500).attr("cx", (o) => x(o.s[0])).attr("cy", (o) => y(o.s[1]));
+      );
+    og.select<SVGCircleElement>("circle.hit")
+      .on("mousemove", (event, o: any) => showTip(event, `grid vertex · nearest token: "${d.start_token_strs[o.i]}" → predicts "${d.end_token_strs[o.i]}"`))
+      .on("mouseleave", hideTip);
+    og.transition().duration(500).attr("transform", (o) => `translate(${x(o.s[0])},${y(o.s[1])})`);
 
+    const lyr = d.layer_from === d.layer_to ? `layer ${d.layer_to}` : `layer ${d.layer_from}→${d.layer_to}`;
     const onMove = (event: any, r: any) =>
-      showTip(event, `${d.start_token_strs[r.i]} → ${d.end_token_strs[r.i]}\nlayer ${d.layer_to} prediction · ${(r.p * 100).toFixed(1)}%`);
+      showTip(event, `${d.start_token_strs[r.i]} → ${d.end_token_strs[r.i]}\n${lyr} · ${(r.p * 100).toFixed(1)}%`);
 
     const arrows = svg.select("g.arrows").selectAll<SVGLineElement, any>("line")
       .data(rows, (r: any) => r.i)
@@ -220,7 +230,7 @@
   <header>
     <div>
       <h2>Transformer layers as a vector field</h2>
-      <p class="sub">A regular grid of flow arrows: each points from a token toward the token the model predicts comes next (read out at the chosen layer). Orientations rotate as the prompt changes. <b>Colour/opacity = probability.</b> Hover any arrow or origin; add a response + ▶ Play to trace it.</p>
+      <p class="sub">Positions are <b>contextual</b> prediction-layer embeddings — a token's representation given the prompt, just before it becomes next-token probabilities. Each grid arrow runs from a reference token (layer <i>n</i>) toward the token it predicts next (layer <i>m</i>); a response trajectory and the whole field shift as the prompt changes. <b>Colour/opacity = probability.</b> Hover any arrow or grid vertex; add a response + ▶ Play to trace it.</p>
     </div>
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}

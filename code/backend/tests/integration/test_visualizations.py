@@ -31,18 +31,19 @@ def test_token_cloud_printable_only():
     assert a["pca_mean"].ndim == 1 and a["raw"].shape == (vocab, 2)
 
 
-def test_vector_field_uses_cloud_space():
-    # vector-field arrows must live inside the full-vocab cloud's spread extent
-    cloud = get_or_compute_sync("token_cloud", M, {"seed": 0, "spread_mu": 0.85})["arrays"]["warped"]
-    p = get_or_compute_sync(
-        "vector_field", M,
-        {"grid_n": 8, "reference_set_size": 150, "temperature": 0.0, "layer_from": 0, "layer_to": 1, "seed": 0},
-        {"prefix_text": "Hello"},
-    )
-    a, m = p["arrays"], p["meta"]
-    assert m["vocab_size"] == cloud.shape[0]
-    pad = 0.25 * (cloud.max(0) - cloud.min(0) + 1e-9)
-    assert (a["starts"] >= cloud.min(0) - pad).all() and (a["starts"] <= cloud.max(0) + pad).all()
+def test_vector_field_trajectory_is_contextual():
+    # The trajectory uses CONTEXTUAL prediction-layer embeddings, so the SAME response tokens
+    # move when the prompt changes — that is the phenomenon the visualization exists to show.
+    # Uses a real pretrained model (distilgpt2): tiny-gpt2's random weights barely use context.
+    def traj(prefix):
+        return get_or_compute_sync(
+            "vector_field", "distilgpt2",
+            {"grid_n": 8, "reference_set_size": 150, "temperature": 0.0, "layer_from": 0, "layer_to": 6, "seed": 0},
+            {"prefix_text": prefix, "response_text": "money and power"},
+        )["arrays"]["trajectory"]
+    t1, t2 = traj("I love"), traj("I hate")
+    assert t1.shape == t2.shape and t1.shape[1] == 2
+    assert float(np.linalg.norm(t1 - t2, axis=1).mean()) > 0.1  # prompt clearly moves the trajectory
 
 
 def test_vector_field_arrows():
