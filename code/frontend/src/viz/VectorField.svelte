@@ -131,9 +131,15 @@
         .attr("refX", 8).attr("refY", 5).attr("markerWidth", 4.5).attr("markerHeight", 4.5)
         .attr("markerUnits", "userSpaceOnUse").attr("orient", "auto-start-reverse")
         .append("path").attr("d", "M0,1.5 L9,5 L0,8.5 z").attr("fill", "context-stroke");
-      svg.append("g").attr("class", "arrows");
-      svg.append("g").attr("class", "traj");
-      svg.append("g").attr("class", "origins");  // drawn on top so the hover halos catch the cursor
+      const z = svg.append("g").attr("class", "zoom");
+      z.append("g").attr("class", "arrows");
+      z.append("g").attr("class", "traj");
+      z.append("g").attr("class", "origins");  // drawn on top so the hover halos catch the cursor
+      // Scroll to zoom, drag to pan; the default view fits the whole field.
+      const zoom = d3.zoom<SVGSVGElement, unknown>()
+        .scaleExtent([0.6, 14])
+        .on("zoom", (e) => z.attr("transform", e.transform.toString()));
+      svg.call(zoom).on("dblclick.zoom", null);
     }
     return svg;
   }
@@ -242,7 +248,7 @@
   <header>
     <div>
       <h2>Transformer layers as a vector field</h2>
-      <p class="sub">Positions are <b>contextual</b> prediction-layer embeddings — a token's representation given the prompt, just before it becomes next-token probabilities. Each grid arrow runs from a reference token (layer <i>n</i>) toward the token it predicts next (layer <i>m</i>); a response trajectory and the whole field shift as the prompt changes. <b>Colour/opacity = probability.</b> Hover any arrow or grid vertex; add a response + ▶ Play to trace it.</p>
+      <p class="sub">Positions are <b>contextual</b> prediction-layer embeddings — a token's representation given the prompt, just before it becomes next-token probabilities. Each grid arrow runs from a reference token (layer <i>n</i>) toward the token it predicts next (layer <i>m</i>); a response trajectory and the whole field shift as the prompt changes. <b>Colour/opacity = probability.</b> Hover any arrow or grid vertex; scroll to zoom, drag to pan; add a response + ▶ Play to trace it.</p>
     </div>
     <ExportBar name="vector-field" svg={() => svgEl} anim={exportAnim} />
   </header>

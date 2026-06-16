@@ -111,6 +111,29 @@ test("prompt presets dropdown updates the prefix", async ({ page }) => {
   expect(txt.length).toBeGreaterThan(0);
 });
 
+test("controls are view-specific (layers→vector, swarm→sankey)", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("tab-vector").click();
+  await expect(page.getByTestId("layer-to")).toBeVisible(); // readout layer on the vector field
+  await expect(page.getByTestId("particles-input")).toHaveCount(0); // no swarm controls
+  await page.getByTestId("tab-sankey").click();
+  await expect(page.getByTestId("particles-input")).toBeVisible(); // swarm controls on the sankey
+  await expect(page.getByTestId("seqlen-input")).toBeVisible();
+  await expect(page.getByTestId("layer-to")).toHaveCount(0); // no layer control
+  await expect(page.getByTestId("response-input")).toHaveCount(0); // response doesn't apply
+});
+
+test("export bar saves a vector SVG of the figure", async ({ page }) => {
+  await page.goto("/");
+  await selectTinyModel(page);
+  await page.getByTestId("tab-vector").click();
+  await ready(page, "viz-vector");
+  const downloadPromise = page.waitForEvent("download");
+  await page.locator('[data-testid="export-bar"] button', { hasText: "SVG" }).first().click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toMatch(/\.svg$/);
+});
+
 test("an unsupported model shows a clear error and no fabricated data", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("model-custom").fill("definitely-not-a-real-model-xyz-123");
