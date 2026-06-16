@@ -25,6 +25,9 @@ export const nSteps = writable<number>(10);
 export type View = "vector" | "sankey" | "manifold";
 export const view = writable<View>("vector");
 
+// Bumped by the "Recompute" button to force the active view to re-fetch (bypassing the cache).
+export const refreshNonce = writable<number>(0);
+
 export function clampTemperature(value: number): number {
   if (Number.isNaN(value) || value < 0) return 0;
   return Math.min(value, 2);

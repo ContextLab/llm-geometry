@@ -226,6 +226,7 @@ def vector_field_route(
     reference_set_size: int | None = None,
     response_text: str = "",
     response_step: int = 0,
+    force: bool = False,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {
         "temperature": temperature, "layer_from": layer_from,
@@ -237,6 +238,7 @@ def vector_field_route(
     payload = get_or_compute_sync(
         "vector_field", model_id, params,
         {"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step},
+        force=force,
     )
     meta = dict(payload["meta"])
     a = payload["arrays"]
@@ -261,11 +263,13 @@ def sankey_route(
     seed: int = DEFAULT_SEED,
     response_text: str = "",
     response_step: int = 0,
+    force: bool = False,
 ) -> dict[str, Any]:
     payload = get_or_compute_sync(
         "sankey", model_id,
         {"temperature": temperature, "n_particles": n_particles, "n_steps": n_steps, "seed": seed},
         {"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step},
+        force=force,
     )
     return _jsonable(dict(payload["meta"]))  # nodes / links / token_strs live in meta
 
@@ -279,6 +283,7 @@ def manifold_route(
     reference_set_size: int | None = None,
     response_text: str = "",
     response_step: int = 0,
+    force: bool = False,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {"temperature": temperature, "seed": seed}
     if reference_set_size is not None:
@@ -286,6 +291,7 @@ def manifold_route(
     payload = get_or_compute_sync(
         "manifold", model_id, params,
         {"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step},
+        force=force,
     )
     meta = dict(payload["meta"])
     a = payload["arrays"]

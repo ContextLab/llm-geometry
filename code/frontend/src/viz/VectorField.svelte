@@ -1,7 +1,7 @@
 <script lang="ts">
   import * as d3 from "d3";
   import { get } from "svelte/store";
-  import { modelId, prefixText, temperature, layerFrom, layerTo, responseText, responseStep, responseTokenCount } from "../lib/stores";
+  import { modelId, prefixText, temperature, layerFrom, layerTo, responseText, responseStep, responseTokenCount, refreshNonce } from "../lib/stores";
   import { client, type VectorField } from "../lib/dataClient";
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
@@ -30,6 +30,7 @@
   let runId = 0;
   let resizeObs: ResizeObserver | undefined;
   let lastW = 0;
+  let lastRefresh = 0;
 
   $effect(() => {
     const m = $modelId;
@@ -39,8 +40,11 @@
     const lt = $layerTo;
     const resp = $responseText;
     const step = $responseStep;
+    const rn = $refreshNonce;
+    const force = rn !== lastRefresh; // the Recompute button bypasses the cache
+    lastRefresh = rn;
     if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => void load(m, pfx, temp, lf, lt, resp, step), 320);
+    debounce = setTimeout(() => void load(m, pfx, temp, lf, lt, resp, step, force), force ? 0 : 320);
     return () => {
       if (debounce) clearTimeout(debounce);
     };
@@ -56,23 +60,25 @@
     return () => resizeObs?.disconnect();
   });
 
-  async function load(m: string, pfx: string, temp: number, lf: number, lt: number, resp: string, step: number) {
+  async function load(m: string, pfx: string, temp: number, lf: number, lt: number, resp: string, step: number, force = false) {
     const my = ++runId;
     error = "";
     loading = true;
     progress = 0;
-    progressMsg = "starting…";
+    progressMsg = force ? "recomputing…" : "starting…";
     try {
       const params = {
         temperature: temp, layer_from: lf, layer_to: lt, grid_n: GRID_N,
         fanout: FANOUT, reference_set_size: REF, seed: SEED,
       };
       const inputs = { prefix_text: pfx, response_text: resp, response_step: step };
-      await client.ensureArtifact("vector_field", m, params, inputs, (p, msg) => {
-        if (my === runId) { progress = p; progressMsg = msg; }
-      });
+      if (!force) {
+        await client.ensureArtifact("vector_field", m, params, inputs, (p, msg) => {
+          if (my === runId) { progress = p; progressMsg = msg; }
+        });
+      }
       if (my !== runId) return;
-      const vf = await client.getVectorField(m, { prefix_text: pfx, response_text: resp, response_step: step, ...params });
+      const vf = await client.getVectorField(m, { ...inputs, ...params, ...(force ? { force: true } : {}) });
       if (my !== runId) return;
       data = vf;
       render();

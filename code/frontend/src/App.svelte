@@ -9,7 +9,7 @@
   import Sankey from "./viz/Sankey.svelte";
   import Manifold from "./viz/Manifold.svelte";
   import Tooltip from "./lib/Tooltip.svelte";
-  import { view, type View } from "./lib/stores";
+  import { view, refreshNonce, type View } from "./lib/stores";
 
   const tabs: { id: View; label: string }[] = [
     { id: "vector", label: "Vector field" },
@@ -31,7 +31,10 @@
 
   <main class="layout">
     <aside class="controls panel" data-testid="controls">
-      <h2>Controls</h2>
+      <div class="controls-head">
+        <h2>Controls</h2>
+        <button class="recompute" data-testid="recompute" title="Force re-compute the current view" onclick={() => refreshNonce.update((n) => n + 1)}>↻ Recompute</button>
+      </div>
       <ModelSelector />
       <PromptPrefix />
       <Temperature />
@@ -80,7 +83,13 @@
   .layout { display: grid; grid-template-columns: 320px 1fr; gap: 1.2rem; align-items: start; }
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
   .controls { padding: 1.2rem 1.3rem; display: flex; flex-direction: column; gap: 1.05rem; }
-  .controls h2 { margin: 0 0 0.1rem; font-size: 1rem; letter-spacing: 0.01em; }
+  .controls-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+  .controls h2 { margin: 0; font-size: 1rem; letter-spacing: 0.01em; }
+  .recompute {
+    background: var(--bg-elev-2); color: var(--text-dim); border: 1px solid var(--border);
+    border-radius: 8px; padding: 0.3rem 0.6rem; font-size: 0.74rem; font-family: var(--mono); font-weight: 500; cursor: pointer;
+  }
+  .recompute:hover { color: var(--text); border-color: var(--accent); filter: none; }
   .divider { height: 1px; background: var(--border); margin: 0.1rem -0.2rem; }
   .group-label { font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
   .hint { margin: 0; color: var(--text-dim); font-size: 0.78rem; line-height: 1.45; }

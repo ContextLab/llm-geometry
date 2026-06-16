@@ -134,6 +134,19 @@ test("export bar saves a vector SVG of the figure", async ({ page }) => {
   expect(download.suggestedFilename()).toMatch(/\.svg$/);
 });
 
+test("the Recompute button force-refreshes the active view", async ({ page }) => {
+  await page.goto("/");
+  await selectTinyModel(page);
+  await page.getByTestId("tab-vector").click();
+  await ready(page, "viz-vector");
+  let forced = false;
+  page.on("request", (r) => {
+    if (r.url().includes("/api/vector_field") && r.url().includes("force=true")) forced = true;
+  });
+  await page.getByTestId("recompute").click();
+  await expect.poll(() => forced, { timeout: 60_000 }).toBe(true); // bypasses the cache
+});
+
 test("an unsupported model shows a clear error and no fabricated data", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("model-custom").fill("definitely-not-a-real-model-xyz-123");

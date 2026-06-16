@@ -2,7 +2,7 @@
   import * as d3 from "d3";
   import { sankey as d3sankey, sankeyLinkHorizontal } from "d3-sankey";
   import { onDestroy } from "svelte";
-  import { modelId, prefixText, temperature, nParticles, nSteps } from "../lib/stores";
+  import { modelId, prefixText, temperature, nParticles, nSteps, refreshNonce } from "../lib/stores";
   import { client, type SankeyData } from "../lib/dataClient";
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
@@ -20,6 +20,7 @@
   const SEED = 0;
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let runId = 0;
+  let lastRefresh = 0;
   let revealStep = $state(999); // sequence columns revealed (999 = all); ▶ Play sweeps it
   let maxPosNow = $state(0);
   let playing = $state(false);
@@ -33,30 +34,35 @@
     const temp = $temperature;
     const np = $nParticles;
     const ns = $nSteps;
+    const rn = $refreshNonce;
+    const force = rn !== lastRefresh;
+    lastRefresh = rn;
     if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => void load(m, pfx, temp, np, ns), 350);
+    debounce = setTimeout(() => void load(m, pfx, temp, np, ns, force), force ? 0 : 350);
     return () => {
       if (debounce) clearTimeout(debounce);
     };
   });
 
-  async function load(m: string, pfx: string, temp: number, np: number, ns: number) {
+  async function load(m: string, pfx: string, temp: number, np: number, ns: number, force = false) {
     const my = ++runId;
     error = "";
     loading = true;
     progress = 0;
-    progressMsg = "starting…";
+    progressMsg = force ? "recomputing…" : "starting…";
     try {
       const params = { temperature: temp, n_particles: np, n_steps: ns, seed: SEED };
       const inputs = { prefix_text: pfx };
-      await client.ensureArtifact("sankey", m, params, inputs, (p, msg) => {
-        if (my === runId) {
-          progress = p;
-          progressMsg = msg;
-        }
-      });
+      if (!force) {
+        await client.ensureArtifact("sankey", m, params, inputs, (p, msg) => {
+          if (my === runId) {
+            progress = p;
+            progressMsg = msg;
+          }
+        });
+      }
       if (my !== runId) return;
-      data = await client.getSankey(m, { prefix_text: pfx, ...params });
+      data = await client.getSankey(m, { prefix_text: pfx, ...params, ...(force ? { force: true } : {}) });
       if (my !== runId) return;
       draw();
     } catch (e: any) {

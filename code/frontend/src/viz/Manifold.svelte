@@ -3,7 +3,7 @@
   import { get } from "svelte/store";
   import * as THREE from "three";
   import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-  import { modelId, prefixText, temperature, responseText, responseStep, responseTokenCount } from "../lib/stores";
+  import { modelId, prefixText, temperature, responseText, responseStep, responseTokenCount, refreshNonce } from "../lib/stores";
   import { client, type ManifoldData } from "../lib/dataClient";
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
@@ -31,6 +31,7 @@
   let resizeObs: ResizeObserver | undefined;
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let runId = 0;
+  let lastRefresh = 0;
 
   const LOW = new THREE.Color("#2a3a6e");
   const HIGH = new THREE.Color("#b794f6");
@@ -261,30 +262,35 @@
     const temp = $temperature;
     const resp = $responseText;
     const step = $responseStep;
+    const rn = $refreshNonce;
+    const force = rn !== lastRefresh;
+    lastRefresh = rn;
     if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => void load(m, pfx, temp, resp, step), 350);
+    debounce = setTimeout(() => void load(m, pfx, temp, resp, step, force), force ? 0 : 350);
     return () => {
       if (debounce) clearTimeout(debounce);
     };
   });
 
-  async function load(m: string, pfx: string, temp: number, resp: string, step: number) {
+  async function load(m: string, pfx: string, temp: number, resp: string, step: number, force = false) {
     const my = ++runId;
     error = "";
     loading = true;
     progress = 0;
-    progressMsg = "starting…";
+    progressMsg = force ? "recomputing…" : "starting…";
     try {
       const params = { temperature: temp, seed: SEED }; // full vocab (a dot per token)
       const inputs = { prefix_text: pfx, response_text: resp, response_step: step };
-      await client.ensureArtifact("manifold", m, params, inputs, (p, msg) => {
-        if (my === runId) {
-          progress = p;
-          progressMsg = msg;
-        }
-      });
+      if (!force) {
+        await client.ensureArtifact("manifold", m, params, inputs, (p, msg) => {
+          if (my === runId) {
+            progress = p;
+            progressMsg = msg;
+          }
+        });
+      }
       if (my !== runId) return;
-      data = await client.getManifold(m, { prefix_text: pfx, response_text: resp, response_step: step, ...params });
+      data = await client.getManifold(m, { prefix_text: pfx, response_text: resp, response_step: step, ...params, ...(force ? { force: true } : {}) });
       if (my !== runId) return;
       buildMesh(data, step);
     } catch (e: any) {
