@@ -47,6 +47,27 @@ def _highlight_path(lm, base, response_text, t, n_steps):
     return out
 
 
+def sankey_highlight(
+    model_id: str,
+    prefix_text: str = "",
+    response_text: str = "",
+    temperature: float = 1.0,
+    n_steps: int = 8,
+    seed: int = DEFAULT_SEED,
+) -> dict[str, Any]:
+    """Just the user's response path over the prompt (teacher-forced) — a CHEAP overlay (one
+    forward pass) decoupled from the heavy swarm, so editing the response is instant."""
+    lm = load_model(model_id)
+    base = prefix_ids(lm, prefix_text)
+    t = max(float(temperature), 1e-6)
+    highlight = _highlight_path(lm, base, response_text, t, n_steps)
+    token_strs = {str(h["token"]): lm.tokenizer.decode([h["token"]]) for h in highlight}
+    for h in highlight:
+        h["token_str"] = token_strs[str(h["token"])]
+    return {"meta": {"model_id": lm.model_id, "revision": lm.revision, "highlight": highlight,
+                     "token_strs": token_strs}, "arrays": {}}
+
+
 def sankey(
     model_id: str,
     prefix_text: str = "",
@@ -54,7 +75,6 @@ def sankey(
     n_particles: int = 800,
     n_steps: int = 8,
     seed: int = DEFAULT_SEED,
-    response_text: str = "",
     top_nodes: int = 18,
     progress_cb: ProgressCb | None = None,
 ) -> dict[str, Any]:
@@ -126,87 +146,48 @@ def sankey(
         if progress_cb:
             progress_cb((step + 1) / n_steps, f"swarm step {step + 1}/{n_steps} · {len(idxs)} particles")
 
-    # The user's specific response, teacher-forced, to overlay as a highlighted path.
-    highlight = _highlight_path(lm, base, response_text, t, n_steps)
-    hl_nodes = {(h["pos"], h["token"]) for h in highlight}
-    hl_links = {(highlight[k - 1]["pos"], highlight[k - 1]["token"], highlight[k]["token"]) for k in range(1, len(highlight))}
-    hl_prob = {(h["pos"], h["token"]): h["prob"] for h in highlight}
-
-    # Cap each position to its top-K most-populated tokens (density at scale).
-    by_pos: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    # GLOBAL token rows: the SAME ordered set of tokens at EVERY position, so the y-axis order is
+    # identical across columns and a token can be read horizontally across time. Pick the most-
+    # populated PRINTABLE tokens overall. (The swarm is prompt-conditioned and RESPONSE-INDEPENDENT;
+    # the user's response is a separate cheap overlay — see sankey_highlight — so editing it is
+    # instant and doesn't recompute this.)
+    total: dict[int, int] = defaultdict(int)
+    positions: set[int] = set()
     for (pos, tok), c in node_count.items():
-        by_pos[pos].append((tok, c))
-    kept: set[tuple[int, int]] = set()
-    for pos, lst in by_pos.items():
-        lst.sort(key=lambda x: -x[1])
-        cnt = 0
-        for tok, _c in lst:  # keep the top-K PRINTABLE tokens per position
-            if tok not in printable_ids:
-                continue
-            kept.add((pos, tok))
-            cnt += 1
-            if cnt >= max(1, int(top_nodes)):
-                break
+        positions.add(pos)
+        if tok in printable_ids:
+            total[tok] += c
+    ranked = sorted(total.items(), key=lambda kv: (-kv[1], kv[0]))
+    order_tokens = [tok for tok, _ in ranked[: max(1, int(top_nodes))]]
+    in_set = set(order_tokens)
+    max_pos = max(positions) if positions else 0
 
-    # Force-keep the highlighted response path so the user's exact response always shows, even
-    # where it's an unlikely continuation the swarm never drew. Use a count of just 1 so the node
-    # gets a valid layout slot WITHOUT inflating its apparent probability — it's marked instead by
-    # a gold outline + overlay dot on the frontend, and the tooltip carries the true (often tiny)
-    # teacher-forced probability.
-    for (pos, tok) in hl_nodes:
-        kept.add((pos, tok))
-        node_count[(pos, tok)] = max(node_count.get((pos, tok), 0), 1)
-    for (pos, a, b) in hl_links:
-        link_count[(pos, a, b)] = max(link_count.get((pos, a, b), 0), 1)
-
-    # Keep only nodes REACHABLE from position 0 via kept links, so every flow starts at the
-    # prompt and ends where its particles stop — none appears to begin mid-stream (the top-K
-    # capping can otherwise orphan a later token whose predecessor was dropped). Highlight nodes
-    # are roots too, so the response path is never severed.
-    adj: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
-    for (pos, a, b), _c in link_count.items():
-        if (pos, a) in kept and (pos + 1, b) in kept:
-            adj[(pos, a)].append((pos + 1, b))
-    reachable = {(p, t) for (p, t) in kept if p == 0} | hl_nodes
-    stack = list(reachable)
-    while stack:
-        node = stack.pop()
-        for nxt in adj.get(node, []):
-            if nxt not in reachable:
-                reachable.add(nxt)
-                stack.append(nxt)
-    kept = reachable
-
-    nc = dict(node_count)
     nodes = [
         {
             "pos": p, "token": tok, "count": c,
-            "prob": round(hl_prob[(p, tok)] if (p, tok) in hl_prob else c / max(1, alive_at.get(p, n_particles)), 6),
-            "highlight": (p, tok) in hl_nodes,
+            "prob": round(c / max(1, alive_at.get(p, n_particles)), 6),
         }
-        for (p, tok), c in sorted(nc.items())
-        if (p, tok) in kept
+        for (p, tok), c in sorted(node_count.items())
+        if tok in in_set
     ]
     links = [
         {
             "pos": p, "source_token": a, "target_token": b, "value": c,
-            "cond": round(c / max(1, nc.get((p, a), 1)), 6),  # empirical P(target | source)
-            "highlight": (p, a, b) in hl_links,
+            "cond": round(c / max(1, node_count.get((p, a), 1)), 6),  # empirical P(target | source)
         }
         for (p, a, b), c in sorted(link_count.items())
-        if (p, a) in kept and (p + 1, b) in kept
+        if a in in_set and b in in_set
     ]
 
-    tokens_seen = {tok for (_, tok) in nc if (_, tok) in kept} | dist_tokens | {h["token"] for h in highlight}
+    tokens_seen = set(in_set) | dist_tokens
     token_strs = {str(tok): lm.tokenizer.decode([tok]) for tok in tokens_seen}
-    for h in highlight:
-        h["token_str"] = token_strs[str(h["token"])]
 
     meta = {
         "model_id": lm.model_id, "revision": lm.revision, "prefix_text": prefix_text or "",
         "temperature": float(temperature), "n_particles": n_particles, "n_steps": n_steps,
         "token_strs": token_strs, "nodes": nodes, "links": links, "per_position": per_position,
-        "highlight": highlight,  # the user's response path (teacher-forced model probabilities)
+        "token_order": [int(t) for t in order_tokens],  # fixed row order, top → bottom (every column)
+        "max_pos": int(max_pos),
     }
     arrays = {"node_counts": np.array([n["count"] for n in nodes] or [0], dtype=np.int64)}
     return {"meta": meta, "arrays": arrays}

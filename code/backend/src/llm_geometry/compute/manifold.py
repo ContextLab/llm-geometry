@@ -237,20 +237,20 @@ def manifold_animation(
     resp_ids = [int(t) for t in (lm.tokenizer(response_text)["input_ids"] if response_text else []) if int(t) in printable_set]
 
     from ..reduce.sphere import reduce_3d_sphere
+    from .context import prefix_ids as _prefix_ids
 
     n_ref = int(token_ids.shape[0])
-    if resp_ids:
-        dirs_all = reduce_3d_sphere(np.vstack([emb, matrix[resp_ids]]), method="pca3", seed=seed).astype(np.float64)
-        dirs, traj_dirs = dirs_all[:n_ref], dirs_all[n_ref:]
-    else:
-        dirs = reduce_3d_sphere(emb, method="pca3", seed=seed).astype(np.float64)
-        traj_dirs = np.empty((0, 3), dtype=np.float64)
-
     n_frames = len(resp_ids) + 1
-    verts_per, warp_per, emis_per, faces = [], [], [], None
+    surface_k = min(40, n_ref)
+    prefix = _prefix_ids(lm, prefix_text)
+
+    # Pass 1 — per-frame emission + surface flow field: as the context unfolds, the top emitting
+    # tokens and where each one would lead NEXT both change, so we recompute them per key frame.
+    # Every predicted target is collected so it can be placed in the SAME sphere frame below.
+    emis_per, src_order_per, tgt_ids_per, tgt_prob_per = [], [], [], []
     for s in range(n_frames):
         if progress_cb:
-            progress_cb(0.1 + 0.85 * s / n_frames, f"key frame {s + 1}/{n_frames}")
+            progress_cb(0.05 + 0.45 * s / n_frames, f"frame {s + 1}/{n_frames}: emission + flow field")
         probs = next_token_distribution(
             model_id, prefix_text=prefix_text, temperature=temperature,
             response_text=response_text, response_step=s,
@@ -258,16 +258,58 @@ def manifold_animation(
         emis = probs[token_ids].astype(np.float64)
         if emis.max() > 0:
             emis = emis / emis.max()
-        fv, faces, warp = _warp_sphere(o3d, dirs, emis, width, warp_top)
+        emis_per.append(emis)
+        order = np.argsort(-emis)[:surface_k]
+        src_order_per.append(order)
+        ctx = list(prefix) + resp_ids[:s]
+        tids, tprobs = _surface_field(lm, ctx, [int(token_ids[i]) for i in order], printable_set)
+        tgt_ids_per.append(tids)
+        tgt_prob_per.append(tprobs)
+
+    uniq_tgt = sorted(set(t for fr in tgt_ids_per for t in fr))
+    tgt_row = {tk: i for i, tk in enumerate(uniq_tgt)}
+
+    # One reduction: reference markers + response tokens + every surface target share a frame.
+    stack = [emb]
+    if resp_ids:
+        stack.append(matrix[resp_ids])
+    if uniq_tgt:
+        stack.append(matrix[uniq_tgt])
+    dirs_all = reduce_3d_sphere(np.vstack(stack), method="pca3", seed=seed).astype(np.float64)
+    dirs = dirs_all[:n_ref]
+    off = n_ref
+    if resp_ids:
+        traj_dirs = dirs_all[off : off + len(resp_ids)]
+        off += len(resp_ids)
+    else:
+        traj_dirs = np.empty((0, 3), dtype=np.float64)
+    tgt_dirs = dirs_all[off : off + len(uniq_tgt)] if uniq_tgt else np.empty((0, 3), dtype=np.float64)
+
+    # Pass 2 — warp the sphere per frame + assemble that frame's surface arrows.
+    verts_per, warp_per, faces = [], [], None
+    surf_src_per, surf_dst_per, surf_srcstr_per, surf_dststr_per, surf_prob_per = [], [], [], [], []
+    for s in range(n_frames):
+        if progress_cb:
+            progress_cb(0.5 + 0.45 * s / n_frames, f"key frame {s + 1}/{n_frames}: warping")
+        fv, faces, warp = _warp_sphere(o3d, dirs, emis_per[s], width, warp_top)
         verts_per.append(fv.astype(np.float32))
         warp_per.append(warp.astype(np.float32))
-        emis_per.append(emis.astype(np.float32))
+        order = src_order_per[s]
+        tids = tgt_ids_per[s]
+        surf_src_per.append((dirs[order] * 2.0).astype(np.float32))
+        surf_dst_per.append((np.array([tgt_dirs[tgt_row[t]] for t in tids]) * 2.0).astype(np.float32))
+        surf_srcstr_per.append([token_strs[int(i)] for i in order])
+        surf_dststr_per.append([lm.tokenizer.decode([t]) for t in tids])
+        surf_prob_per.append([round(float(p), 5) for p in tgt_prob_per[s]])
 
     meta = {
         "model_id": lm.model_id, "revision": lm.revision, "n_frames": int(n_frames),
         "n_vertices": int(verts_per[0].shape[0]), "prefix_text": prefix_text or "",
         "token_strs": token_strs,
         "trajectory_token_strs": [lm.tokenizer.decode([t]) for t in resp_ids],
+        "surface_src_strs": surf_srcstr_per,   # (F)(K) per-frame source token strings
+        "surface_dst_strs": surf_dststr_per,   # (F)(K) per-frame predicted-next token strings
+        "surface_probs": surf_prob_per,        # (F)(K)
     }
     arrays = {
         "faces": faces.astype(np.int64),                       # static
@@ -275,7 +317,9 @@ def manifold_animation(
         "traj_points": (traj_dirs * 2.0).astype(np.float32),   # static
         "vertices": np.stack(verts_per),                       # (F, V, 3) — morph these
         "warp": np.stack(warp_per),                            # (F, V)
-        "token_emis": np.stack(emis_per),                      # (F, R) — marker alpha/size
+        "token_emis": np.stack(emis_per).astype(np.float32),   # (F, R) — marker alpha/size
+        "surface_src": np.stack(surf_src_per),                 # (F, K, 3)
+        "surface_dst": np.stack(surf_dst_per),                 # (F, K, 3)
     }
     if progress_cb:
         progress_cb(1.0, "done")

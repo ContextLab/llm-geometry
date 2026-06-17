@@ -160,7 +160,7 @@
     }
     geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
     geom.computeVertexNormals();
-    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.15 });
+    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.15, transparent: true, opacity: 0.72, depthWrite: false });
     mesh = new THREE.Mesh(geom, mat);
     scene.add(mesh);
 
@@ -236,11 +236,18 @@
         m.position.copy(p.clone().multiplyScalar(1.01));
         g.add(m);
       });
+      showThrough(g); // trajectory stays visible through the translucent manifold
       traj = g;
       scene.add(g);
     }
 
     drawSurface(d);
+  }
+
+  // Make a group draw over the (translucent) mesh so it shows through even from the far side.
+  function showThrough(g: THREE.Group) {
+    g.renderOrder = 10;
+    g.traverse((o: any) => { if (o.material) { o.material.depthTest = false; o.material.transparent = true; } });
   }
 
   function clearSurface() {
@@ -253,13 +260,15 @@
 
   // Surface flow field: for the most likely tokens, a geodesic arrow from that token's marker
   // toward the marker of the token the model would emit NEXT — "from here, the model goes there".
-  function drawSurface(d: ManifoldData) {
+  function drawSurfaceArrows(
+    src: number[][], dst: number[][], srcStrs: string[], dstStrs: string[], probs: number[],
+  ) {
     clearSurface();
-    if (!scene || !get(showSurface) || !d.surface_src?.length) return;
+    if (!scene || !get(showSurface) || !src?.length) return;
     const g = new THREE.Group();
     const amber = new THREE.Color("#ffb454");
-    for (let i = 0; i < d.surface_src.length; i++) {
-      const s = d.surface_src[i], t = d.surface_dst[i];
+    for (let i = 0; i < src.length; i++) {
+      const s = src[i], t = dst[i];
       const a = new THREE.Vector3(s[0], s[1], s[2]);
       const b = new THREE.Vector3(t[0], t[1], t[2]);
       if (a.distanceTo(b) < 1e-3) continue; // self-prediction → no arrow
@@ -276,11 +285,31 @@
       );
       cone.position.copy(tip);
       cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
-      cone.userData = { src: d.surface_src_strs[i], dst: d.surface_dst_strs[i], p: d.surface_probs[i] };
+      cone.userData = { src: srcStrs[i], dst: dstStrs[i], p: probs[i] };
       g.add(cone);
     }
     surf = g;
     scene.add(g);
+  }
+
+  function drawSurface(d: ManifoldData) {
+    drawSurfaceArrows(d.surface_src, d.surface_dst, d.surface_src_strs, d.surface_dst_strs, d.surface_probs);
+  }
+
+  // Animation: the surface field is computed per key frame, so redraw it (snapped to the nearest
+  // frame) whenever that frame changes or the toggle flips.
+  let lastSurfFrame = -1;
+  function updateAnimSurface(force = false) {
+    const a = manim;
+    if (!a) return;
+    const nf = Math.max(0, Math.min(a.n_frames - 1, Math.round(animTime)));
+    if (!force && nf === lastSurfFrame) return;
+    lastSurfFrame = nf;
+    if (get(showSurface)) {
+      drawSurfaceArrows(a.surface_src[nf], a.surface_dst[nf], a.surface_src_strs[nf], a.surface_dst_strs[nf], a.surface_probs[nf]);
+    } else {
+      clearSurface();
+    }
   }
 
   // --- Smooth animation (response present): precomputed key frames, morphed continuously. ---
@@ -301,7 +330,7 @@
     geom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(nv * 3), 3));
     geom.setAttribute("color", new THREE.BufferAttribute(new Float32Array(nv * 3), 3));
     geom.setIndex(new THREE.BufferAttribute(new Uint32Array(a.faces.flat()), 1));
-    mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.15 }));
+    mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.15, transparent: true, opacity: 0.72, depthWrite: false }));
     scene.add(mesh);
 
     // Token markers (static radius-2 positions). Color is derived from aEmis IN the shader so a
@@ -340,6 +369,7 @@
     points = new THREE.Points(pgeom, pmat);
     scene.add(points);
 
+    lastSurfFrame = -1; // force the surface field to redraw for the new animation
     setAnimFrame(animTime);
   }
 
@@ -377,6 +407,7 @@
     (points.geometry.attributes.aEmis as THREE.BufferAttribute).needsUpdate = true;
 
     rebuildAnimTrajectory(t);
+    updateAnimSurface();
   }
 
   // Geodesic trajectory that grows continuously: `whole` completed dots plus a partial arc to
@@ -415,6 +446,7 @@
       m.position.copy(pts[i].clone().multiplyScalar(1.01));
       g.add(m);
     }
+    showThrough(g);
     traj = g;
     scene.add(g);
   }
@@ -423,7 +455,7 @@
   function tweenTo(target: number) {
     cancelAnimationFrame(tweenRaf);
     const from = animTime;
-    const dur = 650;
+    const dur = 1200; // slow, gradual morph per key-frame step
     let start = -1;
     const easeInOutQuad = (x: number) => (x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2);
     const step = (ts: number) => {
@@ -495,11 +527,12 @@
     if (manim) tweenTo(Math.min(step, manim.n_frames - 1));
   });
 
-  // Toggle the surface flow field overlay without recomputing (static manifold only).
+  // Toggle the surface flow field overlay without recomputing (static manifold or animation).
   $effect(() => {
     const on = $showSurface;
     void on;
-    if (data && !manim) drawSurface(data);
+    if (manim) updateAnimSurface(true);
+    else if (data) drawSurface(data);
   });
 
   async function load(m: string, pfx: string, temp: number, resp: string, width: number, force = false) {
@@ -543,9 +576,9 @@
     }
   }
 
-  // Export: interpolate SUB sub-frames per key-frame transition for a watchable morph; settle a
-  // couple of rAFs so the WebGL buffer is captured after it actually draws.
-  const SUB = 12;
+  // Export: interpolate SUB sub-frames per key-frame transition for a slow, watchable morph;
+  // settle a couple of rAFs so the WebGL buffer is captured after it actually draws.
+  const SUB = 24;
   async function renderFrame(i: number) {
     if (manim) {
       animTime = Math.min(i / SUB, manim.n_frames - 1);

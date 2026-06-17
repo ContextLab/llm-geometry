@@ -273,11 +273,12 @@ def _plan(
         n_steps = int(params.get("n_steps", 8))
         seed = int(params.get("seed", DEFAULT_SEED))
         prefix_text = inputs.get("prefix_text", "") or ""
-        response_text = inputs.get("response_text", "") or ""
+        # The swarm is prompt-conditioned and RESPONSE-INDEPENDENT, so the response is NOT part of
+        # the cache key — editing it reuses this cached swarm and only refetches the cheap overlay.
         norm_params = {"temperature": temperature, "n_particles": n_particles, "n_steps": n_steps, "seed": seed}
         key, spec = make_cache_key(
             model_id=mid, revision=revision, artifact_type="sankey",
-            inputs={"prefix_text": prefix_text, "response_text": response_text},
+            inputs={"prefix_text": prefix_text},
             params=norm_params,
         )
 
@@ -285,8 +286,7 @@ def _plan(
             from .compute.sankey import sankey
 
             return sankey(mid, prefix_text=prefix_text, temperature=temperature,
-                          n_particles=n_particles, n_steps=n_steps, seed=seed,
-                          response_text=response_text, progress_cb=cb)
+                          n_particles=n_particles, n_steps=n_steps, seed=seed, progress_cb=cb)
 
         return key, spec, compute
 

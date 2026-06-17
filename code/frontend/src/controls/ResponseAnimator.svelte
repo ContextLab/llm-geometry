@@ -62,7 +62,7 @@
       } else {
         responseStep.set(next);
       }
-    }, 1100);
+    }, 1500); // give the per-step morph time to settle (slow, watchable playback)
   }
 
   function toggle() {

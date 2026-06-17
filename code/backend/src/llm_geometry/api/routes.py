@@ -294,16 +294,33 @@ def sankey_route(
     n_particles: int = 800,
     n_steps: int = 8,
     seed: int = DEFAULT_SEED,
-    response_text: str = "",
     force: bool = False,
 ) -> dict[str, Any]:
     payload = get_or_compute_sync(
         "sankey", model_id,
         {"temperature": temperature, "n_particles": n_particles, "n_steps": n_steps, "seed": seed},
-        {"prefix_text": prefix_text, "response_text": response_text},
+        {"prefix_text": prefix_text},
         force=force,
     )
-    return _jsonable(dict(payload["meta"]))  # nodes / links / token_strs / highlight live in meta
+    return _jsonable(dict(payload["meta"]))  # nodes / links / token_strs / token_order live in meta
+
+
+@router.get("/sankey_highlight")
+def sankey_highlight_route(
+    model_id: str,
+    prefix_text: str = "",
+    response_text: str = "",
+    temperature: float = 1.0,
+    n_steps: int = 8,
+    seed: int = DEFAULT_SEED,
+) -> dict[str, Any]:
+    """The user's response path over the prompt (teacher-forced) — a cheap overlay computed on
+    the fly (one forward pass), decoupled from the heavy swarm so editing the response is instant."""
+    from ..compute.sankey import sankey_highlight
+
+    payload = sankey_highlight(model_id, prefix_text=prefix_text, response_text=response_text,
+                               temperature=temperature, n_steps=n_steps, seed=seed)
+    return _jsonable(dict(payload["meta"]))
 
 
 @router.get("/manifold")
@@ -365,6 +382,7 @@ def manifold_animation_route(
         "faces": a["faces"].tolist(), "token_points": a["token_points"].tolist(),
         "traj_points": a["traj_points"].tolist(),
         "vertices": a["vertices"].tolist(), "warp": a["warp"].tolist(), "token_emis": a["token_emis"].tolist(),
+        "surface_src": a["surface_src"].tolist(), "surface_dst": a["surface_dst"].tolist(),
     })
 
 

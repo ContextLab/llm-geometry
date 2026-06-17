@@ -114,6 +114,12 @@ def test_sankey_swarm():
     pos0 = sum(n["count"] for n in m["nodes"] if n["pos"] == 0)
     assert 1 <= pos0 <= 10  # particles seeded at position 0
     assert all(str(n["token"]) in m["token_strs"] for n in m["nodes"])
+    # FIXED token rows: a global ordered set, every node's token is one of them, and only those
+    assert len(m["token_order"]) >= 1
+    order = set(m["token_order"])
+    assert all(n["token"] in order for n in m["nodes"])
+    assert all(0 <= n["prob"] <= 1 for n in m["nodes"])
+    assert m["max_pos"] < 5
     # combined next-token distribution recorded per position (FR §2)
     assert len(m["per_position"]) >= 1
     for entry in m["per_position"]:
@@ -121,6 +127,37 @@ def test_sankey_swarm():
         assert len(entry["top"]) >= 1
         assert all(0.0 <= t["prob"] <= 1.0 for t in entry["top"])
         assert all(str(t["token"]) in m["token_strs"] for t in entry["top"])
+
+
+def test_sankey_swarm_is_response_independent():
+    # The swarm is prompt-conditioned, so the same params give the SAME swarm regardless of any
+    # response — the response is a separate cheap overlay (test_sankey_highlight), so editing it
+    # never recomputes this. (Same cache key ⇒ identical artifact.)
+    from llm_geometry import precompute
+
+    a = get_or_compute_sync("sankey", M, {"n_particles": 12, "n_steps": 4, "seed": 1}, {"prefix_text": "Hello"})["meta"]
+    key = precompute.cache_key_for("sankey", M, {"n_particles": 12, "n_steps": 4, "seed": 1}, {"prefix_text": "Hello"})
+    # the cache key ignores response_text entirely (decoupled overlay)
+    key2 = precompute.cache_key_for("sankey", M, {"n_particles": 12, "n_steps": 4, "seed": 1}, {"prefix_text": "Hello", "response_text": "anything at all"})
+    assert key == key2
+    b = get_or_compute_sync("sankey", M, {"n_particles": 12, "n_steps": 4, "seed": 1}, {"prefix_text": "Hello"})["meta"]
+    assert a["nodes"] == b["nodes"] and a["token_order"] == b["token_order"]
+
+
+def test_sankey_highlight_overlay():
+    # The response overlay: teacher-forced P(tokenₖ | prompt + response[:k]) for each response
+    # token, with strings — cheap and decoupled from the swarm (real pretrained model).
+    from llm_geometry.compute.sankey import sankey_highlight
+
+    r = sankey_highlight("distilgpt2", prefix_text="The capital of France is", response_text=" Paris is", n_steps=8)
+    hl = r["meta"]["highlight"]
+    assert len(hl) >= 1
+    for k, e in enumerate(hl):
+        assert e["pos"] == k
+        assert 0.0 <= e["prob"] <= 1.0
+        assert e["token_str"] == r["meta"]["token_strs"][str(e["token"])]
+    # an empty response yields an empty overlay
+    assert sankey_highlight("distilgpt2", prefix_text="x", response_text="")["meta"]["highlight"] == []
 
 
 def test_sankey_reproducible_with_seed():

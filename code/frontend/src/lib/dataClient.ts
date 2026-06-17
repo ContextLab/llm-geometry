@@ -100,6 +100,12 @@ export interface ManifoldAnimation {
   vertices: number[][][]; // [frame][vertex][x,y,z] — the morphing mesh
   warp: number[][]; // [frame][vertex]
   token_emis: number[][]; // [frame][token]
+  // per-frame surface flow field (top emitters → predicted next token), placed on the sphere
+  surface_src: number[][][]; // [frame][k][x,y,z]
+  surface_dst: number[][][]; // [frame][k][x,y,z]
+  surface_src_strs: string[][]; // [frame][k]
+  surface_dst_strs: string[][]; // [frame][k]
+  surface_probs: number[][]; // [frame][k]
 }
 
 export interface VectorFieldAnimation {
@@ -134,8 +140,7 @@ export interface SankeyNode {
   pos: number;
   token: number;
   count: number;
-  prob: number; // empirical marginal share (or teacher-forced model prob for highlight nodes)
-  highlight: boolean;
+  prob: number; // empirical marginal share at this position
 }
 export interface SankeyLink {
   pos: number;
@@ -143,7 +148,6 @@ export interface SankeyLink {
   target_token: number;
   value: number;
   cond: number; // empirical P(target | source) at this position
-  highlight: boolean;
 }
 export interface SankeyHighlight {
   pos: number;
@@ -158,7 +162,13 @@ export interface SankeyData {
   links: SankeyLink[];
   token_strs: Record<string, string>;
   per_position: { pos: number; top: { token: number; prob: number }[] }[];
-  highlight: SankeyHighlight[]; // the user's response path (empty if none specified)
+  token_order: number[]; // fixed token rows (top → bottom), identical at every position
+  max_pos: number; // last sequence position reached
+}
+// The user's response path — a cheap, swarm-independent overlay (so editing it is instant).
+export interface SankeyHighlightData {
+  highlight: SankeyHighlight[];
+  token_strs: Record<string, string>;
 }
 
 export interface ManifoldData {
@@ -282,6 +292,10 @@ export function createClient(opts: ClientOptions = {}) {
     return request("/api/sankey" + qs({ model_id, ...params }));
   }
 
+  function getSankeyHighlight(model_id: string, params: Record<string, unknown> = {}): Promise<SankeyHighlightData> {
+    return request("/api/sankey_highlight" + qs({ model_id, ...params }));
+  }
+
   function getManifold(model_id: string, params: Record<string, unknown> = {}): Promise<ManifoldData> {
     return request("/api/manifold" + qs({ model_id, ...params }));
   }
@@ -385,6 +399,7 @@ export function createClient(opts: ClientOptions = {}) {
     getVectorField,
     getVectorFieldAnimation,
     getSankey,
+    getSankeyHighlight,
     getManifold,
     getManifoldAnimation,
     getTokenCloud,
