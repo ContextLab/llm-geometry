@@ -3,7 +3,7 @@
   import { get } from "svelte/store";
   import * as THREE from "three";
   import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-  import { modelId, prefixText, temperature, responseText, responseStep, responseTokenCount, refreshNonce } from "../lib/stores";
+  import { modelId, prefixText, temperature, responseText, responseStep, responseTokenCount, rbfWidth, showSurface, refreshNonce } from "../lib/stores";
   import { client, type ManifoldData, type ManifoldAnimation } from "../lib/dataClient";
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
@@ -23,6 +23,7 @@
   let containerEl: HTMLDivElement | undefined;
 
   const SEED = 0;
+  const MARKERS = 2000; // bounded token-marker set (keeps payloads small + loads snappy)
 
   let renderer: THREE.WebGLRenderer | undefined;
   let scene: THREE.Scene | undefined;
@@ -31,6 +32,7 @@
   let mesh: THREE.Mesh | undefined;
   let points: THREE.Points | undefined;
   let traj: THREE.Group | undefined;
+  let surf: THREE.Group | undefined; // surface flow field (toggle)
   let raf = 0;
   let resizeObs: ResizeObserver | undefined;
   let debounce: ReturnType<typeof setTimeout> | undefined;
@@ -86,6 +88,15 @@
       ndc.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
       ndc.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(ndc, camera);
+      // surface-field arrowheads take hover priority when shown
+      if (surf) {
+        const sh = raycaster.intersectObjects(surf.children, false).find((h) => h.object.userData?.dst);
+        if (sh) {
+          const u = sh.object.userData;
+          showTip(ev, `"${u.src}" → "${u.dst}"   next-token P ${(u.p * 100).toFixed(1)}%`);
+          return;
+        }
+      }
       const hits = raycaster.intersectObject(points);
       if (hits.length && hits[0].index != null) {
         const i = hits[0].index;
@@ -135,6 +146,7 @@
       traj.traverse((o: any) => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
       traj = undefined;
     }
+    clearSurface();
 
     const geom = new THREE.BufferGeometry();
     geom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(d.vertices.flat()), 3));
@@ -227,6 +239,48 @@
       traj = g;
       scene.add(g);
     }
+
+    drawSurface(d);
+  }
+
+  function clearSurface() {
+    if (surf && scene) {
+      scene.remove(surf);
+      surf.traverse((o: any) => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
+    }
+    surf = undefined;
+  }
+
+  // Surface flow field: for the most likely tokens, a geodesic arrow from that token's marker
+  // toward the marker of the token the model would emit NEXT — "from here, the model goes there".
+  function drawSurface(d: ManifoldData) {
+    clearSurface();
+    if (!scene || !get(showSurface) || !d.surface_src?.length) return;
+    const g = new THREE.Group();
+    const amber = new THREE.Color("#ffb454");
+    for (let i = 0; i < d.surface_src.length; i++) {
+      const s = d.surface_src[i], t = d.surface_dst[i];
+      const a = new THREE.Vector3(s[0], s[1], s[2]);
+      const b = new THREE.Vector3(t[0], t[1], t[2]);
+      if (a.distanceTo(b) < 1e-3) continue; // self-prediction → no arrow
+      const arc = geodesic(a, b, 24).map((v) => v.multiplyScalar(1.02)); // ride just above the surface
+      const lgeom = new THREE.BufferGeometry().setFromPoints(arc);
+      const line = new THREE.Line(lgeom, new THREE.LineBasicMaterial({ color: amber, transparent: true, opacity: 0.85 }));
+      g.add(line);
+      // a cone arrowhead at the destination, oriented along the final segment
+      const tip = arc[arc.length - 1], prev = arc[arc.length - 2];
+      const dir = tip.clone().sub(prev).normalize();
+      const cone = new THREE.Mesh(
+        new THREE.ConeGeometry(0.035, 0.11, 10),
+        new THREE.MeshBasicMaterial({ color: amber }),
+      );
+      cone.position.copy(tip);
+      cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+      cone.userData = { src: d.surface_src_strs[i], dst: d.surface_dst_strs[i], p: d.surface_probs[i] };
+      g.add(cone);
+    }
+    surf = g;
+    scene.add(g);
   }
 
   // --- Smooth animation (response present): precomputed key frames, morphed continuously. ---
@@ -414,7 +468,7 @@
       renderer.domElement.remove();
       renderer.dispose();
     }
-    renderer = scene = camera = controls = mesh = points = traj = undefined;
+    renderer = scene = camera = controls = mesh = points = traj = surf = undefined;
   }
 
   // Reload whenever the model / context / temperature / response text changes (NOT on step —
@@ -424,11 +478,12 @@
     const pfx = $prefixText;
     const temp = $temperature;
     const resp = $responseText;
+    const width = $rbfWidth;
     const rn = $refreshNonce;
     const force = rn !== lastRefresh;
     lastRefresh = rn;
     if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => void load(m, pfx, temp, resp, force), force ? 0 : 350);
+    debounce = setTimeout(() => void load(m, pfx, temp, resp, width, force), force ? 0 : 350);
     return () => {
       if (debounce) clearTimeout(debounce);
     };
@@ -440,14 +495,23 @@
     if (manim) tweenTo(Math.min(step, manim.n_frames - 1));
   });
 
-  async function load(m: string, pfx: string, temp: number, resp: string, force = false) {
+  // Toggle the surface flow field overlay without recomputing (static manifold only).
+  $effect(() => {
+    const on = $showSurface;
+    void on;
+    if (data && !manim) drawSurface(data);
+  });
+
+  async function load(m: string, pfx: string, temp: number, resp: string, width: number, force = false) {
     const my = ++runId;
     error = "";
     loading = true;
     progress = 0;
     progressMsg = force ? "recomputing…" : "starting…";
     try {
-      const params = { temperature: temp, seed: SEED }; // full vocab (a dot per token)
+      // A bounded reference set (the warp only uses the top tokens anyway): thousands of
+      // markers, not the whole vocab — far smaller payloads, so loads/refreshes stay snappy.
+      const params = { temperature: temp, seed: SEED, reference_set_size: MARKERS, width };
       const hasResp = resp.trim().length > 0;
       const artifact = hasResp ? "manifold_animation" : "manifold";
       const inputs: Record<string, unknown> = { prefix_text: pfx };
@@ -501,7 +565,7 @@
   <header>
     <div>
       <h2>Reachable "thoughts" as a manifold</h2>
-      <p class="sub">A unit sphere warped (RBF + ARAP) toward likely next tokens. <b>Bulges = high emission probability; dots = tokens on the radius-2 sphere.</b> Drag to rotate, scroll to zoom, hover a dot for its token. The response traces a geodesic across the sphere.</p>
+      <p class="sub">A unit sphere warped (RBF + ARAP) toward likely next tokens. <b>Bulges = high emission probability; dots = tokens on the radius-2 sphere.</b> Tune the bump width, or enable the <b>surface flow field</b> to see where each likely token would lead next. Drag to rotate, scroll to zoom, hover a dot or arrow. The response traces a geodesic across the sphere.</p>
     </div>
     <ExportBar name="manifold" webglCanvas={() => renderer?.domElement} anim={exportAnim} />
   </header>

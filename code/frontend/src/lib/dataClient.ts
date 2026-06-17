@@ -106,12 +106,16 @@ export interface VectorFieldAnimation {
   n_frames: number;
   layer_to: number;
   num_layers: number;
-  reference_points: number;
-  token_strs: string[]; // one per reference token (persistent across key frames)
+  grid_n: number;
+  reference_points: number; // G = grid_n^2 (STATIC vertices)
+  arrow_len: number; // in plot (PCA) units
+  token_strs: Record<string, string>; // token id (as string) -> decoded token
   trajectory_token_strs: string[];
-  points: number[][][]; // [frame][token][x,y] — same token tracked across key frames
-  ends: number[][][]; // [frame][token][x,y] — arrow tip (predicted token) per key frame
-  probs: number[][]; // [frame][token]
+  grid: number[][]; // [G][x,y] — fixed vertices, identical every frame
+  from_tokens: number[][]; // [frame][vertex] nearest reference token id (the token this spot refers to)
+  to_tokens: number[][]; // [frame][vertex] its predicted next token id
+  dirs: number[][][]; // [frame][vertex][x,y] unit arrow direction
+  probs: number[][]; // [frame][vertex]
   trajectory: number[][]; // [token][x,y] in the consistent frame
   trajectory_probs: number[];
 }
@@ -130,19 +134,31 @@ export interface SankeyNode {
   pos: number;
   token: number;
   count: number;
+  prob: number; // empirical marginal share (or teacher-forced model prob for highlight nodes)
+  highlight: boolean;
 }
 export interface SankeyLink {
   pos: number;
   source_token: number;
   target_token: number;
   value: number;
+  cond: number; // empirical P(target | source) at this position
+  highlight: boolean;
+}
+export interface SankeyHighlight {
+  pos: number;
+  token: number;
+  token_str: string;
+  prob: number; // teacher-forced P(token | prompt + response[:pos])
 }
 export interface SankeyData {
   n_steps: number;
+  n_particles: number;
   nodes: SankeyNode[];
   links: SankeyLink[];
   token_strs: Record<string, string>;
   per_position: { pos: number; top: { token: number; prob: number }[] }[];
+  highlight: SankeyHighlight[]; // the user's response path (empty if none specified)
 }
 
 export interface ManifoldData {
@@ -157,6 +173,12 @@ export interface ManifoldData {
   traj_points: number[][]; // response tokens on the radius-2 sphere (the trajectory line)
   trajectory_token_strs?: string[];
   trajectory_emis?: number[];
+  // surface flow field: from a likely token (src) to its predicted next token (dst), on the sphere
+  surface_src: number[][];
+  surface_dst: number[][];
+  surface_src_strs: string[];
+  surface_dst_strs: string[];
+  surface_probs: number[];
 }
 
 export class ApiError extends Error {

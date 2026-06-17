@@ -13,7 +13,7 @@ from pathlib import Path
 
 # Bump whenever any cached artifact's on-disk format changes. Reads of artifacts
 # tagged with a different schema version are treated as cache misses (FR-007).
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 11
 
 # Repo root resolved from this file:
 # .../code/backend/src/llm_geometry/config.py -> parents[4] == repo root
@@ -52,6 +52,10 @@ DEFAULT_2D_METHOD = "pca"
 # pca3 is the default 3D method: fast and deterministic (reproducible cache, SC-002).
 # Metric MDS is available as an opt-in alternative.
 DEFAULT_3D_METHOD = "pca3"
+
+# Manifold RBF cap width on the UNIT sphere (smaller = tighter, more localized domes toward
+# likely tokens). Exposed in the UI; this is the default a fresh session starts from.
+DEFAULT_RBF_WIDTH = 0.18
 
 # Embedding "reference set": the tokens we compute embeddings for. The full vocab is
 # free for the static (input-embedding) source but costs one forward pass per token

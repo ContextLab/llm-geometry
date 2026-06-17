@@ -83,21 +83,29 @@ export function webglToCanvas(gl: HTMLCanvasElement): HTMLCanvasElement {
 export async function svgToCanvas(svg: SVGSVGElement, scale = 1.5): Promise<HTMLCanvasElement> {
   const [w, h] = dims(svg);
   const s = new XMLSerializer().serializeToString(standalone(svg));
-  const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(s);
-  const img = new Image();
-  await new Promise<void>((res, rej) => {
-    img.onload = () => res();
-    img.onerror = () => rej(new Error("svg rasterise failed"));
-    img.src = url;
-  });
-  const cv = document.createElement("canvas");
-  cv.width = Math.round(w * scale);
-  cv.height = Math.round(h * scale);
-  const ctx = cv.getContext("2d")!;
-  ctx.fillStyle = BG;
-  ctx.fillRect(0, 0, cv.width, cv.height);
-  ctx.drawImage(img, 0, 0, cv.width, cv.height);
-  return cv;
+  // A Blob URL (not a data: URI) has no length limit, so large figures — a full quiver or a
+  // many-column Sankey — rasterise reliably instead of silently failing to load.
+  const url = URL.createObjectURL(new Blob([s], { type: "image/svg+xml" }));
+  try {
+    const img = new Image();
+    img.width = w;
+    img.height = h;
+    await new Promise<void>((res, rej) => {
+      img.onload = () => res();
+      img.onerror = () => rej(new Error("svg rasterise failed"));
+      img.src = url;
+    });
+    const cv = document.createElement("canvas");
+    cv.width = Math.round(w * scale);
+    cv.height = Math.round(h * scale);
+    const ctx = cv.getContext("2d")!;
+    ctx.fillStyle = BG;
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.drawImage(img, 0, 0, cv.width, cv.height);
+    return cv;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 export async function canvasPNG(svg: SVGSVGElement, filename: string, scale = 2) {

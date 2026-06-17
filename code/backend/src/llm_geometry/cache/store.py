@@ -31,6 +31,12 @@ class CacheStore:
     def __init__(self, cache_dir: Path | str | None = None) -> None:
         self.cache_dir = Path(cache_dir) if cache_dir is not None else CACHE_DIR
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # Per-process memo of payloads that already passed the (expensive) checksum check,
+        # keyed by absolute npz path → (size, mtime_ns). A cache hit then only needs a cheap
+        # stat instead of re-hashing the whole (potentially 25 MB+) payload on every read —
+        # which is what made the SECOND load of a big animation artifact slow. Any real change
+        # to the file changes size/mtime and forces a fresh integrity check.
+        self._validated: dict[str, tuple[int, int]] = {}
 
     def _npz_path(self, key: str) -> Path:
         return self.cache_dir / f"{key}.npz"
@@ -63,11 +69,18 @@ class CacheStore:
             return None  # format changed -> recompute
         try:
             npz_bytes = npz_path.read_bytes()
+            st = npz_path.stat()
         except OSError:
             return None
         meta = sidecar.get("meta", {})
-        if self._checksum(npz_bytes, meta) != sidecar.get("checksum"):
-            return None  # corruption -> recompute
+        sig = (st.st_size, st.st_mtime_ns)
+        path_key = str(npz_path)
+        if self._validated.get(path_key) != sig:
+            # not yet validated in this process (or the file changed) -> full integrity check
+            if self._checksum(npz_bytes, meta) != sidecar.get("checksum"):
+                self._validated.pop(path_key, None)
+                return None  # corruption -> recompute
+            self._validated[path_key] = sig
         with np.load(io.BytesIO(npz_bytes), allow_pickle=False) as data:
             arrays = {name: data[name] for name in data.files}
         return {"meta": meta, "arrays": arrays, "spec": sidecar.get("spec", {})}

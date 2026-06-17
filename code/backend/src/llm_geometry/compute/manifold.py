@@ -17,7 +17,7 @@ from typing import Any, Callable
 import numpy as np
 from scipy.spatial.distance import cdist
 
-from ..config import DEFAULT_SEED
+from ..config import DEFAULT_RBF_WIDTH, DEFAULT_SEED
 from ..errors import ComputeError, InvalidParamError
 from ..models.loader import load_model
 from .distributions import next_token_distribution
@@ -59,13 +59,36 @@ def _warp_sphere(o3d, dirs: np.ndarray, emis: np.ndarray, width: float, warp_top
     return final_verts, faces, warp
 
 
+def _surface_field(lm, prefix_list, src_token_ids, printable_ids):
+    """For each source token, the model's most-likely PRINTABLE next token given the prompt +
+    that token, and its probability — a flow field of "from here, the model goes there"."""
+    import torch
+
+    vocab = lm.model.get_output_embeddings().weight.shape[0]
+    pmask = torch.zeros(int(vocab), dtype=torch.bool, device=lm.device)
+    pmask[torch.as_tensor(sorted(printable_ids), device=lm.device, dtype=torch.long)] = True
+    neg = torch.finfo(torch.float32).min
+    tgt, prob = [], []
+    bs = 64
+    for s in range(0, len(src_token_ids), bs):
+        chunk = src_token_ids[s : s + bs]
+        ids = torch.tensor([list(prefix_list) + [int(tk)] for tk in chunk], dtype=torch.long, device=lm.device)
+        with torch.no_grad():
+            logits = lm.model(input_ids=ids).logits[:, -1, :].float()
+        p = torch.softmax(logits.masked_fill(~pmask.unsqueeze(0), neg), dim=-1)
+        pv, pi = p.max(dim=-1)
+        tgt.extend(int(x) for x in pi.cpu().numpy())
+        prob.extend(float(x) for x in pv.cpu().numpy())
+    return tgt, prob
+
+
 def manifold(
     model_id: str,
     prefix_text: str = "",
     temperature: float = 1.0,
     reference_set_size: int | None = None,  # None = a dot for EVERY vocab token
     seed: int = DEFAULT_SEED,
-    width: float = 0.3,  # RBF cap width on the UNIT sphere (small = localized rounded domes)
+    width: float = DEFAULT_RBF_WIDTH,  # RBF cap width on the UNIT sphere (small = localized domes)
     warp_top: int = 48,
     response_text: str = "",
     response_step: int = 0,
@@ -90,24 +113,13 @@ def manifold(
     matrix = lm.model.get_input_embeddings().weight.detach().float().cpu().numpy().astype(np.float64)
     emb = matrix[token_ids]
 
-    # Response trajectory: reduce the response tokens TOGETHER with the reference tokens so
-    # they sit in the same sphere frame, then split out their radius-2 positions (drawn as a
-    # line on the sphere; the frontend reveals it up to response_step as ▶ Play advances).
     printable_set = set(int(i) for i in all_ids.tolist())
     resp_ids = [int(t) for t in (lm.tokenizer(response_text)["input_ids"] if response_text else []) if int(t) in printable_set]
 
-    from ..reduce.sphere import reduce_3d_sphere
-
-    n_ref = int(token_ids.shape[0])
-    if resp_ids:
-        dirs_all = reduce_3d_sphere(np.vstack([emb, matrix[resp_ids]]), method="pca3", seed=seed).astype(np.float64)
-        dirs, traj_dirs = dirs_all[:n_ref], dirs_all[n_ref:]
-    else:
-        dirs = reduce_3d_sphere(emb, method="pca3", seed=seed).astype(np.float64)
-        traj_dirs = np.empty((0, 3), dtype=np.float64)
-
+    # Emission distribution FIRST: the surface flow field needs the top emitters before we fit
+    # the sphere, so each one's predicted next token can be placed in the SAME frame.
     if progress_cb:
-        progress_cb(0.35, "computing emission distribution")
+        progress_cb(0.3, "computing emission distribution")
     probs_full = next_token_distribution(
         model_id, prefix_text=prefix_text, temperature=temperature,
         response_text=response_text, response_step=response_step,
@@ -116,8 +128,43 @@ def manifold(
     if emis.max() > 0:
         emis = emis / emis.max()
 
+    # Surface flow field: for the top emitting tokens, the model's most-likely NEXT token —
+    # "given an embedding here, where on the manifold does the model go next?"
+    from .context import prefix_ids as _prefix_ids
+
+    n_ref = int(token_ids.shape[0])
+    surface_k = min(40, n_ref)
+    src_order = np.argsort(-emis)[:surface_k]
+    src_token_ids = [int(token_ids[i]) for i in src_order]
     if progress_cb:
-        progress_cb(0.5, "warping the sphere toward likely tokens")
+        progress_cb(0.45, "tracing the surface flow field")
+    tgt_ids, tgt_probs = _surface_field(lm, _prefix_ids(lm, prefix_text), src_token_ids, printable_set)
+    uniq_tgt = sorted(set(tgt_ids))
+    tgt_row = {tk: i for i, tk in enumerate(uniq_tgt)}
+
+    # Reduce reference tokens + response tokens + surface targets TOGETHER so they share one
+    # sphere frame, then split out each group's radius-2 positions.
+    from ..reduce.sphere import reduce_3d_sphere
+
+    stack = [emb]
+    if resp_ids:
+        stack.append(matrix[resp_ids])
+    if uniq_tgt:
+        stack.append(matrix[uniq_tgt])
+    dirs_all = reduce_3d_sphere(np.vstack(stack), method="pca3", seed=seed).astype(np.float64)
+    dirs = dirs_all[:n_ref]
+    off = n_ref
+    if resp_ids:
+        traj_dirs = dirs_all[off : off + len(resp_ids)]
+        off += len(resp_ids)
+    else:
+        traj_dirs = np.empty((0, 3), dtype=np.float64)
+    tgt_dirs = dirs_all[off : off + len(uniq_tgt)] if uniq_tgt else np.empty((0, 3), dtype=np.float64)
+    surf_src = dirs[src_order] * 2.0
+    surf_dst = (np.array([tgt_dirs[tgt_row[tk]] for tk in tgt_ids]) * 2.0) if uniq_tgt else np.empty((0, 3))
+
+    if progress_cb:
+        progress_cb(0.6, "warping the sphere toward likely tokens")
     final_verts, faces, warp = _warp_sphere(o3d, dirs, emis, width, warp_top)
 
     if progress_cb:
@@ -134,6 +181,9 @@ def manifold(
             for i in top_list
         ],
         "token_strs": token_strs,  # real decoded strings (printable), aligned with token markers
+        "surface_src_strs": [token_strs[int(i)] for i in src_order],
+        "surface_dst_strs": [lm.tokenizer.decode([t]) for t in tgt_ids],
+        "surface_probs": [round(float(p), 5) for p in tgt_probs],
     }
     arrays = {
         "vertices": final_verts.astype(np.float32),
@@ -143,6 +193,9 @@ def manifold(
         "token_emis": emis.astype(np.float32),
         "token_ids": token_ids.astype(np.int64),
         "traj_points": (traj_dirs * 2.0).astype(np.float32),  # response tokens on the sphere
+        # surface flow field: from a likely token (src) to its predicted next token (dst)
+        "surface_src": surf_src.astype(np.float32),
+        "surface_dst": surf_dst.astype(np.float32),
     }
     if resp_ids:
         meta["trajectory_token_strs"] = [lm.tokenizer.decode([t]) for t in resp_ids]
@@ -156,7 +209,7 @@ def manifold_animation(
     temperature: float = 1.0,
     reference_set_size: int | None = None,
     seed: int = DEFAULT_SEED,
-    width: float = 0.3,
+    width: float = DEFAULT_RBF_WIDTH,
     warp_top: int = 48,
     response_text: str = "",
     progress_cb: ProgressCb | None = None,

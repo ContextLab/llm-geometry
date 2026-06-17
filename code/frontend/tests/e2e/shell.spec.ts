@@ -125,16 +125,23 @@ test("prompt presets dropdown updates the prefix", async ({ page }) => {
   expect(txt.length).toBeGreaterThan(0);
 });
 
-test("controls are view-specific (layers→vector, swarm→sankey)", async ({ page }) => {
+test("controls are view-specific (layers→vector, swarm→sankey, width→manifold)", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("tab-vector").click();
   await expect(page.getByTestId("layer-to")).toBeVisible(); // readout layer on the vector field
+  await expect(page.getByTestId("response-input")).toBeVisible(); // response animates the vector field
   await expect(page.getByTestId("particles-input")).toHaveCount(0); // no swarm controls
+  await expect(page.getByTestId("rbfwidth-input")).toHaveCount(0); // no manifold controls
   await page.getByTestId("tab-sankey").click();
   await expect(page.getByTestId("particles-input")).toBeVisible(); // swarm controls on the sankey
   await expect(page.getByTestId("seqlen-input")).toBeVisible();
+  await expect(page.getByTestId("response-input")).toBeVisible(); // response highlights a path on the swarm
+  await expect(page.getByTestId("play-button")).toHaveCount(0); // ...but no stepper (the Sankey has its own Play)
   await expect(page.getByTestId("layer-to")).toHaveCount(0); // no layer control
-  await expect(page.getByTestId("response-input")).toHaveCount(0); // response doesn't apply
+  await page.getByTestId("tab-manifold").click();
+  await expect(page.getByTestId("rbfwidth-input")).toBeVisible(); // RBF width + surface-field toggle on the manifold
+  await expect(page.getByTestId("surface-toggle")).toBeVisible();
+  await expect(page.getByTestId("particles-input")).toHaveCount(0);
 });
 
 test("export bar saves a vector SVG of the figure", async ({ page }) => {

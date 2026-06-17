@@ -31,22 +31,31 @@ def test_token_cloud_printable_only():
     assert a["pca_mean"].ndim == 1 and a["raw"].shape == (vocab, 2)
 
 
-def test_vector_field_animation_consistent_frame():
-    # All key frames (response steps) share ONE frame, so a token's position is comparable
-    # across frames and MOVES as the context unfolds (the basis for smooth interpolation).
+def test_vector_field_animation_static_grid():
+    # The grid vertices are STATIC across key frames; what changes is which token is nearest
+    # each vertex (the token that location refers to) and the arrow it casts. All frames share
+    # ONE PCA so those assignments are comparable as the context unfolds.
     p = get_or_compute_sync(
         "vector_field_animation", "distilgpt2",
-        {"temperature": 0.0, "layer_to": 6, "reference_set_size": 80, "seed": 0},
+        {"temperature": 0.0, "layer_to": 6, "reference_set_size": 150, "grid_n": 12, "seed": 0},
         {"prefix_text": "I want", "response_text": "money and power"},
     )
     a, m = p["arrays"], p["meta"]
-    F, R = m["n_frames"], m["reference_points"]
-    assert F == 4 and R == 80  # 3 response tokens -> 4 key frames
-    assert a["points"].shape == (F, R, 2) and a["ends"].shape == (F, R, 2)
-    assert len(m["token_strs"]) == R
-    # the SAME token moves between key frames (context-dependent prediction-layer embedding)
-    move = np.linalg.norm(a["points"][-1] - a["points"][0], axis=1)
-    assert float(move.mean()) > 0.1
+    F, G = m["n_frames"], m["reference_points"]
+    assert F == 4 and G == 144 and m["grid_n"] == 12  # 3 response tokens -> 4 key frames, 12x12 grid
+    assert a["grid"].shape == (G, 2)
+    assert a["from_tokens"].shape == (F, G) and a["to_tokens"].shape == (F, G)
+    assert a["dirs"].shape == (F, G, 2) and a["probs"].shape == (F, G)
+    # arrow directions are unit (or zero where degenerate)
+    norms = np.hypot(a["dirs"][..., 0], a["dirs"][..., 1])
+    assert np.all((np.abs(norms - 1.0) < 1e-3) | (norms < 1e-6))
+    # the token a fixed vertex refers to CHANGES as the context unfolds
+    changed = (a["from_tokens"][0] != a["from_tokens"][-1]).mean()
+    assert float(changed) > 0.1
+    # token strings ship as an id->string map covering every labelled token
+    assert isinstance(m["token_strs"], dict)
+    assert str(int(a["from_tokens"][0, 0])) in m["token_strs"]
+    assert len(m["trajectory_token_strs"]) == F - 1
 
 
 def test_vector_field_trajectory_is_contextual():
@@ -142,6 +151,30 @@ def test_manifold_warped_sphere():
     assert len(m["top_tokens"]) >= 1
     # token strings align with token_points (used by the manifold raycast hover)
     assert len(m["token_strs"]) == a["token_points"].shape[0]
+
+
+def test_manifold_surface_field_and_width():
+    # The surface flow field: for the top emitting tokens, the model's predicted NEXT token,
+    # placed on the SAME radius-2 sphere (src marker -> dst marker). A configurable RBF width.
+    p = get_or_compute_sync(
+        "manifold", "distilgpt2",
+        {"reference_set_size": 300, "seed": 0, "width": 0.15},
+        {"prefix_text": "The capital of France is"},
+    )
+    a, m = p["arrays"], p["meta"]
+    S = a["surface_src"].shape[0]
+    assert S >= 1 and a["surface_src"].shape == (S, 3) and a["surface_dst"].shape == (S, 3)
+    # every source and destination sits on the radius-2 sphere (same frame as the markers)
+    assert np.allclose(np.linalg.norm(a["surface_src"], axis=1), 2.0, atol=1e-3)
+    assert np.allclose(np.linalg.norm(a["surface_dst"], axis=1), 2.0, atol=1e-3)
+    # aligned source/target strings + probabilities for the hover labels
+    assert len(m["surface_src_strs"]) == S and len(m["surface_dst_strs"]) == S
+    assert len(m["surface_probs"]) == S and all(0.0 <= q <= 1.0 for q in m["surface_probs"])
+    # a smaller RBF width makes a TIGHTER warp (fewer vertices pushed far out) than a broad one
+    far = lambda d: int((np.linalg.norm(d["arrays"]["vertices"], axis=1) > 1.25).sum())
+    narrow = get_or_compute_sync("manifold", "distilgpt2", {"reference_set_size": 300, "seed": 0, "width": 0.08}, {"prefix_text": "The capital of France is"})
+    broad = get_or_compute_sync("manifold", "distilgpt2", {"reference_set_size": 300, "seed": 0, "width": 0.5}, {"prefix_text": "The capital of France is"})
+    assert far(narrow) < far(broad)  # width clearly changes the surface
 
 
 def test_manifold_animation_morphs_per_frame():

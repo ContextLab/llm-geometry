@@ -21,6 +21,7 @@ from .config import (
     DEFAULT_2D_METHOD,
     DEFAULT_3D_METHOD,
     DEFAULT_GRID_N,
+    DEFAULT_RBF_WIDTH,
     DEFAULT_REFERENCE_SET_SIZE,
     DEFAULT_SEED,
 )
@@ -242,13 +243,13 @@ def _plan(
         if temperature < 0:
             raise InvalidParamError(f"temperature must be >= 0, got {temperature}")
         layer_to = int(params.get("layer_to", 0))
-        spread_mu = float(params.get("spread_mu", 0.65))
+        grid_n = int(params.get("grid_n", DEFAULT_GRID_N))
         rss = params.get("reference_set_size", 576)
         rss = int(rss) if rss is not None else None
         seed = int(params.get("seed", DEFAULT_SEED))
         prefix_text = inputs.get("prefix_text", "") or ""
         response_text = inputs.get("response_text", "") or ""
-        norm_params = {"temperature": temperature, "layer_to": layer_to, "spread_mu": spread_mu,
+        norm_params = {"temperature": temperature, "layer_to": layer_to, "grid_n": grid_n,
                        "reference_set_size": rss, "seed": seed}
         key, spec = make_cache_key(
             model_id=mid, revision=revision, artifact_type="vector_field_animation",
@@ -260,7 +261,7 @@ def _plan(
 
             return vector_field_animation(mid, prefix_text=prefix_text, temperature=temperature,
                                           layer_to=layer_to, reference_set_size=rss, seed=seed,
-                                          spread_mu=spread_mu, response_text=response_text, progress_cb=cb)
+                                          grid_n=grid_n, response_text=response_text, progress_cb=cb)
 
         return key, spec, compute
 
@@ -268,16 +269,15 @@ def _plan(
         temperature = float(params.get("temperature", 1.0))
         if temperature < 0:
             raise InvalidParamError(f"temperature must be >= 0, got {temperature}")
-        n_particles = int(params.get("n_particles", 24))
+        n_particles = int(params.get("n_particles", 800))
         n_steps = int(params.get("n_steps", 8))
         seed = int(params.get("seed", DEFAULT_SEED))
         prefix_text = inputs.get("prefix_text", "") or ""
         response_text = inputs.get("response_text", "") or ""
-        response_step = int(inputs.get("response_step", 0) or 0)
         norm_params = {"temperature": temperature, "n_particles": n_particles, "n_steps": n_steps, "seed": seed}
         key, spec = make_cache_key(
             model_id=mid, revision=revision, artifact_type="sankey",
-            inputs={"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step},
+            inputs={"prefix_text": prefix_text, "response_text": response_text},
             params=norm_params,
         )
 
@@ -286,7 +286,7 @@ def _plan(
 
             return sankey(mid, prefix_text=prefix_text, temperature=temperature,
                           n_particles=n_particles, n_steps=n_steps, seed=seed,
-                          response_text=response_text, response_step=response_step, progress_cb=cb)
+                          response_text=response_text, progress_cb=cb)
 
         return key, spec, compute
 
@@ -297,10 +297,11 @@ def _plan(
         rss = params.get("reference_set_size", None)  # None = every vocab token
         rss = int(rss) if rss is not None else None
         seed = int(params.get("seed", DEFAULT_SEED))
+        width = float(params.get("width", DEFAULT_RBF_WIDTH))
         prefix_text = inputs.get("prefix_text", "") or ""
         response_text = inputs.get("response_text", "") or ""
         response_step = int(inputs.get("response_step", 0) or 0)
-        norm_params = {"temperature": temperature, "reference_set_size": rss, "seed": seed}
+        norm_params = {"temperature": temperature, "reference_set_size": rss, "seed": seed, "width": width}
         key, spec = make_cache_key(
             model_id=mid, revision=revision, artifact_type="manifold",
             inputs={"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step},
@@ -311,7 +312,7 @@ def _plan(
             from .compute.manifold import manifold
 
             return manifold(mid, prefix_text=prefix_text, temperature=temperature,
-                            reference_set_size=rss, seed=seed,
+                            reference_set_size=rss, seed=seed, width=width,
                             response_text=response_text, response_step=response_step, progress_cb=cb)
 
         return key, spec, compute
@@ -323,9 +324,10 @@ def _plan(
         rss = params.get("reference_set_size", None)
         rss = int(rss) if rss is not None else None
         seed = int(params.get("seed", DEFAULT_SEED))
+        width = float(params.get("width", DEFAULT_RBF_WIDTH))
         prefix_text = inputs.get("prefix_text", "") or ""
         response_text = inputs.get("response_text", "") or ""
-        norm_params = {"temperature": temperature, "reference_set_size": rss, "seed": seed}
+        norm_params = {"temperature": temperature, "reference_set_size": rss, "seed": seed, "width": width}
         key, spec = make_cache_key(
             model_id=mid, revision=revision, artifact_type="manifold_animation",
             inputs={"prefix_text": prefix_text, "response_text": response_text}, params=norm_params,
@@ -335,7 +337,7 @@ def _plan(
             from .compute.manifold import manifold_animation
 
             return manifold_animation(mid, prefix_text=prefix_text, temperature=temperature,
-                                      reference_set_size=rss, seed=seed,
+                                      reference_set_size=rss, seed=seed, width=width,
                                       response_text=response_text, progress_cb=cb)
 
         return key, spec, compute

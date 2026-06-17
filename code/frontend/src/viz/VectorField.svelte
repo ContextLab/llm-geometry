@@ -77,8 +77,9 @@
     progressMsg = force ? "recomputing…" : "starting…";
     try {
       if (resp.trim()) {
-        // Animation mode: all key frames in one consistent frame (smooth, token-continuous).
-        const ap = { temperature: temp, layer_to: lt, reference_set_size: 576, seed: SEED };
+        // Animation mode: all key frames over ONE static grid (only the per-vertex token
+        // assignment + arrow direction change as the context unfolds).
+        const ap = { temperature: temp, layer_to: lt, reference_set_size: 576, grid_n: GRID_N, seed: SEED };
         const ainputs = { prefix_text: pfx, response_text: resp };
         if (!force) {
           await client.ensureArtifact("vector_field_animation", m, ap, ainputs, (p, msg) => {
@@ -161,9 +162,10 @@
   function scales(w: number) {
     let xs: number[], ys: number[];
     if (anim) {
+      // STATIC grid extent (+ one arrow length of headroom) + the trajectory.
       xs = []; ys = [];
-      for (const f of anim.points) for (const p of f) { xs.push(p[0]); ys.push(p[1]); }
-      for (const f of anim.ends) for (const p of f) { xs.push(p[0]); ys.push(p[1]); }
+      const L = anim.arrow_len;
+      for (const v of anim.grid) { xs.push(v[0] - L, v[0] + L); ys.push(v[1] - L, v[1] + L); }
       for (const t of anim.trajectory) { xs.push(t[0]); ys.push(t[1]); }
     } else {
       const d = data!;
@@ -309,40 +311,62 @@
       });
   }
 
-  // Animation mode: each token is a persistent point that MOVES between key frames (response
-  // steps). Positions are interpolated at the continuous `animTime`, so you can follow each
-  // point and watch the field reorganise as the context unfolds.
+  // Animation mode: the grid is STATIC. Per (interpolated) frame, each fixed vertex casts an
+  // arrow in the direction of the local flow, and the token it "refers to" (its nearest
+  // reference token) is revealed on hover. The arrow direction interpolates smoothly between
+  // key frames; the discrete token assignment snaps at the nearest key frame.
   function drawAnimation(w: number, x: d3.ScaleLinear<number, number>, y: d3.ScaleLinear<number, number>) {
     const a = anim!;
     const svg = ensure().attr("viewBox", `0 0 ${w} ${H}`);
-    svg.select("g.origins").selectAll("*").remove();
     const t = Math.max(0, Math.min(animTime, a.n_frames - 1));
     const f0 = Math.floor(t), f1 = Math.min(f0 + 1, a.n_frames - 1), fr = t - f0;
+    const nf = Math.min(a.n_frames - 1, Math.round(t)); // nearest key frame for discrete labels
     const mix = (u: number, v: number) => u + (v - u) * fr;
-    const pA = a.points[f0], pB = a.points[f1], eA = a.ends[f0], eB = a.ends[f1], qA = a.probs[f0], qB = a.probs[f1];
+    const dA = a.dirs[f0], dB = a.dirs[f1], qA = a.probs[f0], qB = a.probs[f1];
+    const L = a.arrow_len;
+    const tokStr = (id: number) => a.token_strs[String(id)] ?? "";
     let maxp = 1e-6;
-    const rows = pA.map((_p, i) => {
+    const rows = a.grid.map((v, i) => {
       const p = mix(qA[i], qB[i]);
       if (p > maxp) maxp = p;
-      return { i, px: mix(pA[i][0], pB[i][0]), py: mix(pA[i][1], pB[i][1]), ex: mix(eA[i][0], eB[i][0]), ey: mix(eA[i][1], eB[i][1]), p };
+      // interpolate the unit direction, then renormalise so the arrow keeps a fixed length
+      let dx = mix(dA[i][0], dB[i][0]), dy = mix(dA[i][1], dB[i][1]);
+      const n = Math.hypot(dx, dy) || 1;
+      dx /= n; dy /= n;
+      return { i, vx: v[0], vy: v[1], ex: v[0] + dx * L, ey: v[1] + dy * L, p };
     });
     const pcolor = d3.scaleSequential(d3.interpolatePlasma).domain([-0.15 * maxp, maxp]);
     const rel = (p: number) => Math.min(1, p / maxp);
+    const arrowTip = (r: any) =>
+      `"${tokStr(a.from_tokens[nf][r.i])}" → "${tokStr(a.to_tokens[nf][r.i])}"\nlayer ${a.layer_to}/${a.num_layers} · ${(r.p * 100).toFixed(1)}%`;
 
     svg.select("g.arrows").selectAll<SVGLineElement, any>("line").data(rows, (r: any) => r.i).join("line")
-      .attr("x1", (r) => x(r.px)).attr("y1", (r) => y(r.py))
+      .attr("x1", (r) => x(r.vx)).attr("y1", (r) => y(r.vy))
       .attr("x2", (r) => x(r.ex)).attr("y2", (r) => y(r.ey))
       .attr("marker-end", "url(#vf-arrow)")
-      .attr("stroke", (r) => pcolor(r.p)).attr("stroke-width", (r) => 0.7 + 1.1 * rel(r.p))
-      .attr("opacity", (r) => 0.25 + 0.55 * rel(r.p))
-      .on("mousemove", (e, r: any) => showTip(e, `${a.token_strs[r.i]}  ${(r.p * 100).toFixed(1)}%`))
+      .attr("stroke", (r) => pcolor(r.p)).attr("stroke-width", (r) => 1.0 + 1.3 * rel(r.p))
+      .attr("opacity", (r) => 0.4 + 0.5 * rel(r.p))
+      .on("mousemove", (e, r: any) => showTip(e, arrowTip(r)))
       .on("mouseleave", hideTip);
 
-    svg.select("g.points").selectAll<SVGCircleElement, any>("circle").data(rows, (r: any) => r.i).join("circle")
-      .attr("cx", (r) => x(r.px)).attr("cy", (r) => y(r.py))
-      .attr("r", (r) => 1.6 + 1.6 * rel(r.p)).attr("fill", (r) => pcolor(r.p)).attr("opacity", 0.92)
-      .on("mousemove", (e, r: any) => showTip(e, `${a.token_strs[r.i]}  ${(r.p * 100).toFixed(1)}%`))
-      .on("mouseleave", hideTip);
+    // STATIC grid vertices: a small dot + a transparent hit halo; hover shows the current token.
+    svg.select("g.points").selectAll<SVGGElement, any>("g.o").data(rows, (r: any) => r.i).join(
+      (enter) => {
+        const g = enter.append("g").attr("class", "o");
+        g.append("circle").attr("class", "hit").attr("r", 6).attr("fill", "transparent");
+        g.append("circle").attr("class", "dot").attr("r", 1.8).attr("pointer-events", "none");
+        return g;
+      },
+      (update) => update,
+      (exit) => exit.remove(),
+    )
+      .attr("transform", (r) => `translate(${x(r.vx)},${y(r.vy)})`)
+      .each(function (this: any, r: any) {
+        d3.select(this).select("circle.dot").attr("fill", "#9fb1e6").attr("opacity", 0.75);
+        d3.select(this).select<SVGCircleElement>("circle.hit")
+          .on("mousemove", (event) => showTip(event, `grid vertex · refers to "${tokStr(a.from_tokens[nf][r.i])}" → predicts "${tokStr(a.to_tokens[nf][r.i])}"  ${(r.p * 100).toFixed(1)}%`))
+          .on("mouseleave", hideTip);
+      });
 
     // Trajectory: dots laid down once each token is reached; the line builds in gradually.
     const g = svg.select("g.traj");
@@ -386,8 +410,8 @@
   </div>
   {#if anim}
     <p class="caption">
-      {anim.reference_points} moving token points · {anim.n_frames} key frames (response steps) ·
-      layer {anim.layer_to}/{anim.num_layers} · ▶ Play interpolates between frames; each point tracks its token
+      {anim.reference_points} static grid arrows · {anim.n_frames} key frames (response steps) ·
+      layer {anim.layer_to}/{anim.num_layers} · the lattice stays fixed; each vertex's token + arrow re-organise as the context unfolds
     </p>
   {:else if data}
     <p class="caption">

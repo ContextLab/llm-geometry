@@ -2,7 +2,7 @@
   import * as d3 from "d3";
   import { sankey as d3sankey, sankeyLinkHorizontal } from "d3-sankey";
   import { onDestroy } from "svelte";
-  import { modelId, prefixText, temperature, nParticles, nSteps, refreshNonce } from "../lib/stores";
+  import { modelId, prefixText, temperature, nParticles, nSteps, responseText, refreshNonce } from "../lib/stores";
   import { client, type SankeyData } from "../lib/dataClient";
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
@@ -34,17 +34,18 @@
     const temp = $temperature;
     const np = $nParticles;
     const ns = $nSteps;
+    const resp = $responseText;
     const rn = $refreshNonce;
     const force = rn !== lastRefresh;
     lastRefresh = rn;
     if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => void load(m, pfx, temp, np, ns, force), force ? 0 : 350);
+    debounce = setTimeout(() => void load(m, pfx, temp, np, ns, resp, force), force ? 0 : 350);
     return () => {
       if (debounce) clearTimeout(debounce);
     };
   });
 
-  async function load(m: string, pfx: string, temp: number, np: number, ns: number, force = false) {
+  async function load(m: string, pfx: string, temp: number, np: number, ns: number, resp: string, force = false) {
     const my = ++runId;
     error = "";
     loading = true;
@@ -52,7 +53,7 @@
     progressMsg = force ? "recomputing…" : "starting…";
     try {
       const params = { temperature: temp, n_particles: np, n_steps: ns, seed: SEED };
-      const inputs = { prefix_text: pfx };
+      const inputs = { prefix_text: pfx, response_text: resp };
       if (!force) {
         await client.ensureArtifact("sankey", m, params, inputs, (p, msg) => {
           if (my === runId) {
@@ -62,7 +63,7 @@
         });
       }
       if (my !== runId) return;
-      data = await client.getSankey(m, { prefix_text: pfx, ...params, ...(force ? { force: true } : {}) });
+      data = await client.getSankey(m, { ...inputs, ...params, ...(force ? { force: true } : {}) });
       if (my !== runId) return;
       draw();
     } catch (e: any) {
@@ -117,7 +118,7 @@
     const indexOf = new Map<string, number>();
     const nodes = d.nodes.map((n, i) => {
       indexOf.set(key(n.pos, n.token), i);
-      return { name: label(n.token), pos: n.pos, token: n.token, count: n.count };
+      return { name: label(n.token), pos: n.pos, token: n.token, count: n.count, prob: n.prob, highlight: n.highlight };
     });
     const links = d.links
       .map((l) => ({
@@ -126,6 +127,8 @@
         value: l.value,
         st: l.source_token,
         tt: l.target_token,
+        cond: l.cond,
+        highlight: l.highlight,
       }))
       .filter((l) => l.source !== undefined && l.target !== undefined) as any[];
 
@@ -181,6 +184,7 @@
       const maxVal = Math.max(...graph.links.map((l: any) => l.value), 1);
       const linkAlpha = (l: any) => 0.08 + 0.5 * (l.value / maxVal);
 
+      const GOLD = "#ffd166";
       const linkSel = svg
         .append("g")
         .attr("fill", "none")
@@ -188,12 +192,12 @@
         .data(shownLinks)
         .join("path")
         .attr("d", sankeyLinkHorizontal())
-        .attr("stroke", (l: any) => color(l.source.pos))
-        .attr("stroke-width", (l: any) => Math.max(1, l.width))
+        .attr("stroke", (l: any) => (l.highlight ? GOLD : color(l.source.pos)))
+        .attr("stroke-width", (l: any) => Math.max(l.highlight ? 2 : 1, l.width))
         // Growing column's flows draw in progressively (pathLength=1 + dash), and fade up with fr.
         .attr("pathLength", 1)
         .attr("stroke-dasharray", (l: any) => (l.target.pos === full + 1 ? `${fr} 1` : null))
-        .attr("stroke-opacity", (l: any) => linkAlpha(l) * (l.target.pos === full + 1 ? fr : 1));
+        .attr("stroke-opacity", (l: any) => (l.highlight ? 0.95 : linkAlpha(l)) * (l.target.pos === full + 1 ? fr : 1));
 
       // The dominant trajectory through a link: walk the max-flow chain backward from its
       // source and forward from its target, collecting the ordered token sequence.
@@ -215,14 +219,20 @@
       };
       const growF = (l: any) => (l.target.pos === full + 1 ? fr : 1);
       const restoreLinks = () =>
-        linkSel.attr("stroke-opacity", (l: any) => linkAlpha(l) * growF(l)).attr("stroke-width", (l: any) => Math.max(1, l.width));
+        linkSel
+          .attr("stroke-opacity", (l: any) => (l.highlight ? 0.95 : linkAlpha(l)) * growF(l))
+          .attr("stroke-width", (l: any) => Math.max(l.highlight ? 2 : 1, l.width));
       linkSel
         .on("mousemove", (event, l: any) => {
           const { set, tokens } = tracePath(l);
+          // trajectory probability = product of the conditional probs along the traced chain
+          let logp = 0, nseg = 0;
+          set.forEach((ll: any) => { if (typeof ll.cond === "number" && ll.cond > 0) { logp += Math.log(ll.cond); nseg++; } });
+          const pPct = nseg ? `${(Math.exp(logp) * 100).toPrecision(2)}%  ·  log p = ${logp.toFixed(2)}` : "";
           linkSel
-            .attr("stroke-opacity", (ll: any) => (set.has(ll) ? 0.92 : 0.05))
-            .attr("stroke-width", (ll: any) => Math.max(1, ll.width) * (set.has(ll) ? 1.5 : 1));
-          showTip(event, `trajectory (${l.value} particles):\n${tokens.join(" → ")}`);
+            .attr("stroke-opacity", (ll: any) => (set.has(ll) ? 0.95 : 0.05))
+            .attr("stroke-width", (ll: any) => Math.max(1, ll.width) * (set.has(ll) ? 1.6 : 1));
+          showTip(event, `${tokens.join(" → ")}\nstep ${l.source.pos}→${l.target.pos}: P=${(l.cond * 100).toFixed(1)}% · ${l.value} particles\ntrajectory ${pPct}`);
         })
         .on("mouseleave", () => { restoreLinks(); hideTip(); });
 
@@ -235,18 +245,24 @@
         .attr("height", (n: any) => Math.max(1, n.y1 - n.y0))
         .attr("fill", (n: any) => color(n.pos))
         .attr("rx", 2)
-        .attr("stroke", "none")
-        .attr("opacity", (n: any) => nodeAlpha(n) * revFactor(n.pos)) // probability × fade-in of the growing column
+        .attr("stroke", (n: any) => (n.highlight ? GOLD : "none"))
+        .attr("stroke-width", (n: any) => (n.highlight ? 1.5 : 0))
+        // highlight nodes can be a thin sliver (true prob is often tiny) — the gold overlay dot
+        // marks them, so don't inflate their opacity beyond their real share.
+        .attr("opacity", (n: any) => nodeAlpha(n) * revFactor(n.pos))
         .on("mousemove", (event, n: any) => {
           // highlight the hovered token + the links that touch it
           rectSel.attr("opacity", (m: any) => (m === n ? 1 : nodeAlpha(m) * revFactor(m.pos) * 0.4));
           rectSel.filter((m: any) => m === n).attr("stroke", "#eaf0ff").attr("stroke-width", 2);
           const touch = new Set<any>([...(n.sourceLinks ?? []), ...(n.targetLinks ?? [])]);
-          linkSel.attr("stroke-opacity", (l: any) => (touch.has(l) ? 0.92 : 0.05));
-          showTip(event, `position ${n.pos}: ${n.name}   ${n.count} particles`);
+          linkSel.attr("stroke-opacity", (l: any) => (touch.has(l) ? 0.95 : 0.05));
+          const tag = n.highlight ? " · ✦ your response (teacher-forced)" : "";
+          showTip(event, `position ${n.pos}: "${n.name}"\nP = ${(n.prob * 100).toFixed(2)}%${tag} · ${n.count} particles`);
         })
         .on("mouseleave", () => {
-          rectSel.attr("opacity", (m: any) => nodeAlpha(m) * revFactor(m.pos)).attr("stroke", "none");
+          rectSel.attr("opacity", (m: any) => nodeAlpha(m) * revFactor(m.pos))
+            .attr("stroke", (m: any) => (m.highlight ? GOLD : "none"))
+            .attr("stroke-width", (m: any) => (m.highlight ? 1.5 : 0));
           restoreLinks();
           hideTip();
         });
@@ -263,6 +279,29 @@
         .text((n: any) => n.name)
         .filter((n: any) => n.y1 - n.y0 < 9)
         .remove();
+
+      // The user's response, overlaid as a bold golden trace through its (force-kept) nodes,
+      // with each dot's teacher-forced probability on hover.
+      const hlNodes = graph.nodes.filter((n: any) => n.highlight && revFactor(n.pos) > 0).sort((a: any, b: any) => a.pos - b.pos);
+      if (hlNodes.length) {
+        const cx = (n: any) => (n.x0 + n.x1) / 2, cy = (n: any) => (n.y0 + n.y1) / 2;
+        const hprob = new Map<number, any>(d.highlight.map((h) => [h.pos, h]));
+        const hg = svg.append("g").attr("data-testid", "sankey-highlight");
+        if (hlNodes.length >= 2) {
+          hg.append("path")
+            .attr("d", "M" + hlNodes.map((n: any) => `${cx(n)},${cy(n)}`).join("L"))
+            .attr("fill", "none").attr("stroke", GOLD).attr("stroke-width", 2.5)
+            .attr("stroke-opacity", 0.9).attr("stroke-linejoin", "round");
+        }
+        hg.selectAll("circle").data(hlNodes).join("circle")
+          .attr("cx", cx).attr("cy", cy).attr("r", 4.5)
+          .attr("fill", GOLD).attr("stroke", "#1a1408").attr("stroke-width", 1)
+          .on("mousemove", (event, n: any) => {
+            const h = hprob.get(n.pos);
+            showTip(event, `✦ your response · "${n.name}"\nP = ${((h?.prob ?? n.prob) * 100).toPrecision(3)}% (teacher-forced)`);
+          })
+          .on("mouseleave", hideTip);
+      }
     }
   }
 </script>
@@ -271,7 +310,7 @@
   <header>
     <div>
       <h2>Token sequences as a Sankey diagram</h2>
-      <p class="sub">A particle swarm samples next tokens across positions. <b>A token's opacity = its share of the combined distribution at that timepoint; flow width = particle count.</b> Every flow starts at the prompt and ends where its particles stop. Hover a flow for its trajectory; hover a token to highlight it.</p>
+      <p class="sub">A swarm of particles samples <b>actual responses to the prompt</b> — each starts from the context and samples its own continuation until it stops. <b>Token opacity = its share of the swarm; flow width = particle count.</b> Add a response to <b>highlight that exact path in gold</b>. Hover any node or flow for probabilities.</p>
     </div>
     <div class="tools">
       {#if data}<button class="play" onclick={togglePlay} data-testid="sankey-play">{playing ? "⏸ Pause" : "▶ Play"}</button>{/if}
@@ -281,7 +320,7 @@
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}
   {#if error}<div class="error" data-testid="viz-sankey-error">{error}</div>{/if}
   <svg bind:this={svgEl} class="canvas" height="560" data-testid="sankey-svg"></svg>
-  {#if data}<p class="caption">{data.nodes.length} token nodes · {data.links.length} transitions · {$nParticles} particles · up to {$nSteps} steps · opacity = probability at each position</p>{/if}
+  {#if data}<p class="caption">{data.nodes.length} token nodes · {data.links.length} transitions · {data.n_particles} particles · up to {$nSteps} steps{#if data.highlight?.length} · <span class="gold">✦ {data.highlight.length}-token response highlighted</span>{/if}</p>{/if}
 </section>
 
 <style>
@@ -290,6 +329,7 @@
   header > div:first-child { min-width: 0; }
   .tools { display: flex; flex-direction: column; align-items: flex-end; gap: 0.4rem; flex-shrink: 0; }
   .play { background: var(--accent-grad); color: #0b0e14; border: none; border-radius: 8px; padding: 0.3rem 0.7rem; font-size: 0.8rem; font-weight: 600; cursor: pointer; white-space: nowrap; }
+  .gold { color: #ffd166; }
   header h2 { margin: 0; font-size: 1.1rem; }
   .sub { margin: 0.2rem 0 0; color: var(--text-dim); font-size: 0.82rem; }
   .loading { padding: 0.3rem 0; }

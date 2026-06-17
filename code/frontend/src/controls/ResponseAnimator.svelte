@@ -1,8 +1,12 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
   import { get } from "svelte/store";
-  import { responseText, responseStep, responseTokenCount, isPlaying, modelId } from "../lib/stores";
+  import { responseText, responseStep, responseTokenCount, isPlaying, modelId, view } from "../lib/stores";
   import { client } from "../lib/dataClient";
+
+  // On the Sankey the response isn't stepped — it's highlighted over the swarm — so the
+  // ▶ Play / step row is hidden and the label reflects that.
+  const sankeyMode = $derived($view === "sankey");
 
   let timer: ReturnType<typeof setInterval> | undefined;
 
@@ -74,7 +78,10 @@
 </script>
 
 <label class="control">
-  <span class="label">Response trajectory <span class="opt">(optional · ▶ animates the views)</span></span>
+  <span class="label">
+    {#if sankeyMode}Response to highlight <span class="opt">(optional · marks this path on the swarm)</span>
+    {:else}Response trajectory <span class="opt">(optional · ▶ animates the views)</span>{/if}
+  </span>
   <select
     onchange={(e) => { if (e.currentTarget.value) responseText.set(e.currentTarget.value); e.currentTarget.selectedIndex = 0; }}
     data-testid="response-presets"
@@ -83,7 +90,7 @@
     {#each presets as p (p)}<option value={p}>{p.slice(0, 34)}</option>{/each}
   </select>
   <textarea rows="2" bind:value={$responseText} placeholder="e.g. Paris, the capital of France." data-testid="response-input"></textarea>
-  {#if $responseTokenCount > 0}
+  {#if $responseTokenCount > 0 && !sankeyMode}
     <div class="row">
       <button onclick={toggle} data-testid="play-button">{$isPlaying ? "⏸ Pause" : "▶ Play"}</button>
       <input type="range" min="0" max={$responseTokenCount} step="1" bind:value={$responseStep} data-testid="step-input" />

@@ -5,6 +5,7 @@
   import Temperature from "./controls/Temperature.svelte";
   import LayerSlider from "./controls/LayerSlider.svelte";
   import SwarmControls from "./controls/SwarmControls.svelte";
+  import ManifoldControls from "./controls/ManifoldControls.svelte";
   import VectorField from "./viz/VectorField.svelte";
   import Sankey from "./viz/Sankey.svelte";
   import Manifold from "./viz/Manifold.svelte";
@@ -38,14 +39,15 @@
       <ModelSelector />
       <PromptPrefix />
       <Temperature />
-      <!-- View-specific controls: layers only shape the vector field's representation layer;
-           the response trajectory animates the vector field + manifold; the particle swarm
-           (count + sequence length) is the Sankey only. -->
+      <!-- View-specific controls: the readout layer only shapes the vector field; the response
+           animates the vector field + manifold and highlights a path on the Sankey; the particle
+           swarm (count + sequence length) and RBF width are each their own view's. -->
       <div class="divider"></div>
       <span class="group-label">{$view === "sankey" ? "Sankey" : $view === "manifold" ? "Manifold" : "Vector field"} settings</span>
       {#if $view === "vector"}<LayerSlider />{/if}
-      {#if $view !== "sankey"}<ResponseAnimator />{/if}
+      <ResponseAnimator />
       {#if $view === "sankey"}<SwarmControls />{/if}
+      {#if $view === "manifold"}<ManifoldControls />{/if}
       <p class="hint">Cached results return instantly; the first computation streams progress. ▶ Play animates token-by-token. Each figure can be exported as a vector PDF/SVG, a high-res PNG, or an animated GIF/MP4.</p>
     </aside>
 

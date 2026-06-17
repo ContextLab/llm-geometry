@@ -18,8 +18,13 @@ export const responseTokenCount = writable<number>(0);
 export const isPlaying = writable<boolean>(false);
 
 // Particle-swarm controls (Sankey): how many particles, and the max sequence length.
-export const nParticles = writable<number>(600);
+export const nParticles = writable<number>(1000);
 export const nSteps = writable<number>(10);
+
+// Manifold control: RBF cap width on the unit sphere (smaller = tighter, more localized domes).
+export const rbfWidth = writable<number>(0.18);
+// Manifold: overlay the surface flow field (from a likely token → its predicted next token).
+export const showSurface = writable<boolean>(false);
 
 // Which view is active in the main panel.
 export type View = "vector" | "sankey" | "manifold";

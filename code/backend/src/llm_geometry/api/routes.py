@@ -18,6 +18,7 @@ from ..config import (
     DEFAULT_2D_METHOD,
     DEFAULT_3D_METHOD,
     DEFAULT_GRID_N,
+    DEFAULT_RBF_WIDTH,
     DEFAULT_SEED,
     SCHEMA_VERSION,
 )
@@ -260,13 +261,14 @@ def vector_field_animation_route(
     temperature: float = 1.0,
     layer_to: int = 0,
     reference_set_size: int | None = 576,
+    grid_n: int = DEFAULT_GRID_N,
     seed: int = DEFAULT_SEED,
     response_text: str = "",
     force: bool = False,
 ) -> dict[str, Any]:
-    """All key frames of the response animation in one consistent frame (for smooth,
-    interpolated playback / export — see compute.vector_field.vector_field_animation)."""
-    params: dict[str, Any] = {"temperature": temperature, "layer_to": layer_to, "seed": seed}
+    """All key frames of the response animation over one STATIC grid (only the per-vertex token
+    assignment + arrow direction change — see compute.vector_field.vector_field_animation)."""
+    params: dict[str, Any] = {"temperature": temperature, "layer_to": layer_to, "grid_n": grid_n, "seed": seed}
     if reference_set_size is not None:
         params["reference_set_size"] = reference_set_size
     payload = get_or_compute_sync(
@@ -277,7 +279,9 @@ def vector_field_animation_route(
     a = payload["arrays"]
     return _jsonable({
         **meta,
-        "points": a["points"].tolist(), "ends": a["ends"].tolist(), "probs": a["probs"].tolist(),
+        "grid": a["grid"].tolist(),
+        "from_tokens": a["from_tokens"].tolist(), "to_tokens": a["to_tokens"].tolist(),
+        "dirs": a["dirs"].tolist(), "probs": a["probs"].tolist(),
         "trajectory": a["trajectory"].tolist(), "trajectory_probs": a["trajectory_probs"].tolist(),
     })
 
@@ -287,20 +291,19 @@ def sankey_route(
     model_id: str,
     prefix_text: str = "",
     temperature: float = 1.0,
-    n_particles: int = 24,
+    n_particles: int = 800,
     n_steps: int = 8,
     seed: int = DEFAULT_SEED,
     response_text: str = "",
-    response_step: int = 0,
     force: bool = False,
 ) -> dict[str, Any]:
     payload = get_or_compute_sync(
         "sankey", model_id,
         {"temperature": temperature, "n_particles": n_particles, "n_steps": n_steps, "seed": seed},
-        {"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step},
+        {"prefix_text": prefix_text, "response_text": response_text},
         force=force,
     )
-    return _jsonable(dict(payload["meta"]))  # nodes / links / token_strs live in meta
+    return _jsonable(dict(payload["meta"]))  # nodes / links / token_strs / highlight live in meta
 
 
 @router.get("/manifold")
@@ -310,11 +313,12 @@ def manifold_route(
     temperature: float = 1.0,
     seed: int = DEFAULT_SEED,
     reference_set_size: int | None = None,
+    width: float = DEFAULT_RBF_WIDTH,
     response_text: str = "",
     response_step: int = 0,
     force: bool = False,
 ) -> dict[str, Any]:
-    params: dict[str, Any] = {"temperature": temperature, "seed": seed}
+    params: dict[str, Any] = {"temperature": temperature, "seed": seed, "width": width}
     if reference_set_size is not None:
         params["reference_set_size"] = reference_set_size
     payload = get_or_compute_sync(
@@ -330,6 +334,7 @@ def manifold_route(
         "token_points": a["token_points"].tolist(), "token_emis": a["token_emis"].tolist(),
         "token_ids": a["token_ids"].tolist(),
         "traj_points": a["traj_points"].tolist(),  # response trajectory on the radius-2 sphere
+        "surface_src": a["surface_src"].tolist(), "surface_dst": a["surface_dst"].tolist(),
     })
 
 
@@ -340,12 +345,13 @@ def manifold_animation_route(
     temperature: float = 1.0,
     seed: int = DEFAULT_SEED,
     reference_set_size: int | None = None,
+    width: float = DEFAULT_RBF_WIDTH,
     response_text: str = "",
     force: bool = False,
 ) -> dict[str, Any]:
     """All key frames of the manifold response animation (static geometry once + per-frame
     warped vertices / emission), for a smooth gradual morph + a trajectory that builds in."""
-    params: dict[str, Any] = {"temperature": temperature, "seed": seed}
+    params: dict[str, Any] = {"temperature": temperature, "seed": seed, "width": width}
     if reference_set_size is not None:
         params["reference_set_size"] = reference_set_size
     payload = get_or_compute_sync(

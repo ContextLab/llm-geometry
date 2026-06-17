@@ -244,18 +244,18 @@ def vector_field_animation(
     layer_to: int | None = None,
     reference_set_size: int | None = 576,
     seed: int = DEFAULT_SEED,
-    spread_mu: float = 0.65,
+    grid_n: int = DEFAULT_GRID_N,
     response_text: str = "",
     progress_cb: ProgressCb | None = None,
 ) -> dict[str, Any]:
-    """All KEY FRAMES of the response animation in ONE consistent frame.
+    """All KEY FRAMES of the response animation over ONE STATIC grid.
 
-    A key frame is a response step (context = prefix + response[:s]). Every reference token
-    and every predicted token from every step is projected through a SINGLE PCA (fit on the
-    union), so the same token's position is comparable across key frames and can be smoothly
-    interpolated — you can follow each point as the context unfolds. Each frame ships the
-    reference-token positions, the arrow tips (toward the predicted token), and the per-token
-    emission; the trajectory is projected once and revealed step by step.
+    A key frame is a response step (context = prefix + response[:s]). A single PCA frame is fit
+    on the union of all frames' contextual embeddings, and a regular n×n grid of fixed vertices
+    is laid over it ONCE. The grid vertices never move; what changes frame to frame is (a) which
+    reference token is nearest each vertex — the token that location "refers to" right now — and
+    (b) the arrow that vertex casts toward that token's predicted next token. So you watch the
+    flow field re-organise as the context unfolds, while the lattice stays put for continuity.
     """
     lm = load_model(model_id)
     n_to = lm.num_layers if layer_to is None else max(0, min(int(layer_to), lm.num_layers))
@@ -289,8 +289,9 @@ def vector_field_animation(
     traj = _trajectory_embeddings(lm, prefix, response_text, n_to) if response_text else None
 
     if progress_cb:
-        progress_cb(0.8, "projecting all key frames into one frame")
+        progress_cb(0.8, "projecting all key frames into one consistent frame")
     from sklearn.decomposition import PCA
+    from scipy.spatial import cKDTree
 
     fit = [f[0] for f in per_frame] + [f[1] for f in per_frame]
     if traj is not None:
@@ -300,20 +301,56 @@ def vector_field_animation(
         if pca.components_[i].sum() < 0:
             pca.components_[i] *= -1.0
 
-    points = np.stack([pca.transform(f[0].astype(np.float64)) for f in per_frame]).astype(np.float32)  # (F, R, 2)
-    ends = np.stack([pca.transform(f[1].astype(np.float64)) for f in per_frame]).astype(np.float32)     # (F, R, 2)
-    probs = np.stack([f[2] for f in per_frame]).astype(np.float32)                                       # (F, R)
+    # The reference CLOUD moves with the context; we use it only to decide which token is
+    # nearest each (fixed) grid vertex per frame and which way that vertex's arrow points.
+    ref_pos = [pca.transform(f[0].astype(np.float64)) for f in per_frame]   # list of (R, 2)
+    pred_pos = [pca.transform(f[1].astype(np.float64)) for f in per_frame]  # list of (R, 2)
+
+    # ONE static grid over the union extent — these vertices never move.
+    allref = np.vstack(ref_pos)
+    lo = np.percentile(allref, 1, axis=0)
+    hi = np.percentile(allref, 99, axis=0)
+    gn = max(2, int(grid_n))
+    gx, gy = np.meshgrid(np.linspace(lo[0], hi[0], gn), np.linspace(lo[1], hi[1], gn))
+    grid = np.column_stack([gx.ravel(), gy.ravel()]).astype(np.float32)     # (G, 2) STATIC
+    G = int(grid.shape[0])
+    cell = min((hi[0] - lo[0]) / (gn - 1), (hi[1] - lo[1]) / (gn - 1))
+    arrow_len = 0.85 * float(cell)
+
+    from_tok = np.empty((n_frames, G), dtype=np.int64)
+    to_tok = np.empty((n_frames, G), dtype=np.int64)
+    dirs = np.empty((n_frames, G, 2), dtype=np.float32)
+    gprob = np.empty((n_frames, G), dtype=np.float32)
+    for s in range(n_frames):
+        _, nn = cKDTree(ref_pos[s]).query(grid, k=1)          # nearest ref token at each vertex
+        d = pred_pos[s][nn] - ref_pos[s][nn]                  # that token's ref→prediction flow
+        norm = np.hypot(d[:, 0], d[:, 1])
+        u = np.where(norm[:, None] > 1e-9, d / np.maximum(norm[:, None], 1e-9), 0.0)
+        dirs[s] = u.astype(np.float32)
+        from_tok[s] = ref_ids[nn]
+        to_tok[s] = per_frame[s][3][nn]
+        gprob[s] = per_frame[s][2][nn]
+
     traj_pos = pca.transform(traj[0]).astype(np.float32) if traj is not None else np.empty((0, 2), dtype=np.float32)
+
+    # token id → decoded string, for the union of every token that labels a vertex in any frame
+    involved = set(int(t) for t in ref_ids.tolist()) | set(int(t) for t in np.unique(to_tok).tolist())
+    token_strs = {str(t): lm.tokenizer.decode([t]) for t in involved}
 
     meta = {
         "model_id": lm.model_id, "revision": lm.revision, "n_frames": int(n_frames),
-        "layer_to": int(n_to), "num_layers": lm.num_layers, "reference_points": R,
+        "layer_to": int(n_to), "num_layers": lm.num_layers, "grid_n": gn,
+        "reference_points": G, "arrow_len": arrow_len,
         "temperature": float(temperature), "prefix_text": prefix_text or "",
-        "token_strs": [lm.tokenizer.decode([int(t)]) for t in ref_ids],
+        "token_strs": token_strs,  # id (as str) -> decoded token
         "trajectory_token_strs": (traj[2] if traj is not None else []),
     }
     arrays = {
-        "points": points, "ends": ends, "probs": probs,
+        "grid": grid,                       # (G, 2) static vertices
+        "from_tokens": from_tok,            # (F, G) nearest ref token id per vertex, per frame
+        "to_tokens": to_tok,                # (F, G) its predicted next token id
+        "dirs": dirs,                       # (F, G, 2) unit arrow direction per vertex
+        "probs": gprob,                     # (F, G) top-1 probability
         "trajectory": traj_pos,
         "trajectory_probs": (traj[1] if traj is not None else np.empty((0,), dtype=np.float32)),
     }
