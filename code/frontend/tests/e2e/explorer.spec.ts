@@ -43,7 +43,8 @@ test.describe("Architecture Explorer", () => {
     await expect(page.getByTestId("arch-trace-strip")).toContainText("capital", {
       timeout: 120_000,
     });
-    await expect(page.getByTestId("arch-view")).toContainText("NEXT-TOKEN TOP-10");
+    // (the label is lowercase in the DOM; CSS uppercases it)
+    await expect(page.getByTestId("arch-breakdown")).toContainText("next-token top-10");
   });
 
   test("clicking a diagram node opens the inspector with real weights", async ({ page }) => {
@@ -63,8 +64,10 @@ test.describe("Architecture Explorer", () => {
     await page.getByTestId("arch-prompt").fill("Say hi in three words.");
     await page.getByTestId("arch-generate").click();
     await expect(page.getByTestId("arch-reply")).not.toBeEmpty({ timeout: 180_000 });
-    // Reply tokens carry real probabilities (hoverable); at least one token span.
-    await expect(page.getByTestId("arch-reply").locator("[data-prob]").first()).toBeAttached();
+    // Reply tokens are probability-underlined spans with an accessible tooltip label.
+    const tok = page.getByTestId("arch-reply").locator(".tok").first();
+    await expect(tok).toBeAttached();
+    await expect(tok).toHaveAttribute("aria-label", /%|prob/i);
   });
 });
 
@@ -78,12 +81,11 @@ test.describe("Geometry Lab", () => {
 
   test("tokenization strip marks out-of-vocabulary words", async ({ page }) => {
     await openGeometry(page);
-    const prompt = page.getByTestId("geo-view").locator("input, textarea").first();
-    await prompt.fill("alice met a zorblatt");
+    await page.getByTestId("geo-prompt").fill("alice met a zorblatt");
     await expect(page.getByTestId("geo-tokenize-strip")).toContainText("zorblatt", {
       timeout: 60_000,
     });
-    await expect(page.getByTestId("geo-tokenize-strip")).toContainText("unknown");
+    await expect(page.getByTestId("geo-view")).toContainText("unknown");
   });
 
   test("force mode shows the residual badge; antisymmetrize makes it exact", async ({ page }) => {
