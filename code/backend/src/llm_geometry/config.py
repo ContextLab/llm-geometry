@@ -67,16 +67,30 @@ DEFAULT_REFERENCE_SET_SIZE: int | None = 2000
 # Batch size for the contextual-embedding forward passes.
 EMBED_BATCH_SIZE = 64
 
+# --- Architecture Explorer (feature 002, /api/arch/*) ------------------------------
+# Hard parameter ceiling: larger models are rejected BEFORE any download (FR-107).
+ARCH_MAX_PARAMS = 1_500_000_000
+# Version of the traced-graph artifact format; part of the graph cache key.
+ARCH_GRAPH_SCHEMA_VERSION = 1
+# Trace prompts truncate LEFT to this many tokens by default (contracts/api.md).
+ARCH_DEFAULT_MAX_CONTEXT = 64
+# Attention matrices are downsampled to at most this many rows/cols per head.
+ARCH_ATTENTION_MAX_SIDE = 64
+# Default exact-window cell budget for /api/arch/weights before downsampling kicks in.
+ARCH_WEIGHTS_MAX_CELLS = 4096
+# Hard cap on tokens generated per /api/arch/generate call.
+ARCH_MAX_NEW_TOKENS = 128
+
 
 @dataclass(frozen=True)
 class PerfBudget:
     """The feature's measurable performance budgets (spec Success Criteria)."""
 
-    cache_hit_ms: float = 100.0       # SC-001: backend cache-hit response
+    cache_hit_ms: float = 100.0  # SC-001: backend cache-hit response
     full_roundtrip_ms: float = 1000.0  # SC-001: control change -> preview updated
-    target_fps: float = 60.0          # SC-004: shell animations
+    target_fps: float = 60.0  # SC-004: shell animations
     first_precompute_s: float = 180.0  # SC-003: first default-model precompute
-    progress_min_hz: float = 1.0      # SC-003: progress updates per second
+    progress_min_hz: float = 1.0  # SC-003: progress updates per second
 
 
 PERF = PerfBudget()

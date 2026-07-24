@@ -52,3 +52,21 @@ class NotFoundError(LLMGeometryError):
 
     http_status = 404
     error_type = "NotFoundError"
+
+
+class ModelTooLargeError(LLMGeometryError):
+    """The model exceeds the Architecture Explorer parameter ceiling
+    (``ARCH_MAX_PARAMS``) and is rejected before any weights are downloaded
+    (FR-107, contracts/api.md feature 002)."""
+
+    http_status = 422
+    error_type = "ModelTooLargeError"
+
+
+class InvalidWeightEditError(LLMGeometryError):
+    """A Geometry Lab weight edit is unusable: bad matrix name/shape, both or neither
+    of preset/values supplied, non-finite values, or an edit that cannot satisfy the
+    unit-norm embedding constraint (feature 002 contract, `/api/geo/weights`)."""
+
+    http_status = 422
+    error_type = "InvalidWeightEditError"
