@@ -183,6 +183,7 @@ norms) use `C=1`. → `404` unknown `param_path`.
 → `200 {
   "tokens": [ { "id": …, "text": … } ],               # T ≤ max_context (truncates left)
   "chat_template_used": <bool>,
+  "truncated": <bool>,                                # prompt exceeded max_context (left-truncated)
   "layers": [ { "layer": <int>,
       "attention": [heads][T][T],                     # downsampled to ≤64×64 per head
       "attention_downsampled": <bool>,
