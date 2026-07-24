@@ -12,11 +12,26 @@ https://github.com/ContextLab/llm-geometry/issues/1#issuecomment-5071465097
 - [x] `specs/002-interactive-model-explorer/spec.md` (FR-101..110, SC-101..104).
 - [x] `specs/002-interactive-model-explorer/contracts/api.md` — **FROZEN** contract
       for `/api/geo/*` + `/api/arch/*`. All agents implement against it.
-- [ ] Batch 0 code stubs: `api/routes_geo.py`, `api/routes_arch.py`, app.py include,
-      view enum + stub views, App.svelte wiring.
-- [ ] Batch 1 (parallel): A1 `geo/` package · A2 `arch/` package · A3 frontend
-      scaffolding (MatrixHeatmap, PipelineDiagram, dataClient methods).
-- [ ] Batch 1 red-team + fixes + issue comment.
+- [x] Batch 0 code stubs (commit 50a38ec) + progress comment posted.
+- [x] Batch 1 (parallel): A1 geo (995894d, 54 tests, ALL GATES PASS: loss 4.885,
+      coverage 0.9005, entropy 2.812) · A2 arch (00d6be2, 43 tests, traced graph
+      424/340 nodes SmolLM2/Qwen) · A3 frontend (bfe389f, 20 tests). Reports in
+      notes/agent-reports/batch1-A{1,2,3}.md.
+- [x] Integration bug found by combined-suite gate + FIXED (92e5854):
+      models/loader.py globally disabled autograd on every HF load (latent 001
+      bug) -> geo training failed after any HF test. Fix: model.requires_grad_(False)
+      + local no_grad. Also repo-wide ruff/black conformance. 162/162 green.
+- [x] Batch 1 red-team: backend ACCEPT-WITH-FIXES (force math verified to ~1e-8;
+      2 MAJOR: global RNG leak, unlocked forwards) + frontend REQUEST-CHANGES
+      (ApiError hardening, abort on weight getters, component tests). ALL fixed
+      (a1327c5) + 2 extra bugs the new tests exposed (svelte server-build
+      resolution; heatmap editor bind race). Issue comment posted.
+- [x] Batch 2: B1 geo routes (+geo/jobs.py; ADDITIVE Job.phase/result on shared
+      registry; python-multipart dep) · B2 arch routes (gate-first, _sig6
+      encoding). 36 contract tests. 198/198 green. Commit 93478d5. Comment posted.
+- [ ] Batch 3 (running): B3 Architecture Explorer view (viz/arch/) · B4 Geometry
+      Lab view (viz/geo/) — both verify live in a real browser via scripts/dev.sh.
+- [ ] Batch 2+3 red-team + fixes + screenshots comment.
 - [ ] Batch 2 (parallel): B1 geo routes · B2 arch routes (+contract tests).
 - [ ] Batch 3 (parallel): B3 Architecture Explorer view · B4 Geometry Lab view.
 - [ ] Batch 2+3 red-team + fixes + issue comments with screenshots.
