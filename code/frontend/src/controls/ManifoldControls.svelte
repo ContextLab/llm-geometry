@@ -5,7 +5,7 @@
 <div class="control">
   <span class="label">Bump width <b data-testid="rbfwidth-value">{$rbfWidth.toFixed(2)}</b></span>
   <input
-    type="range" min="0.05" max="0.6" step="0.01" bind:value={$rbfWidth}
+    type="range" min="0.05" max="0.6" step="0.05" bind:value={$rbfWidth}
     data-testid="rbfwidth-input"
   />
   <span class="hint">RBF cap width on the sphere: smaller = tighter, more localized domes toward likely tokens; larger = broad, blended swells.</span>

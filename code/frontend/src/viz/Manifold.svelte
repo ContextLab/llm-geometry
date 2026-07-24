@@ -19,7 +19,24 @@
   let manim = $state<ManifoldAnimation | null>(null); // precomputed key frames (response present)
   let animTime = 0; // continuous key-frame index; tweened toward responseStep
   let tweenRaf = 0;
-  let emisNow: Float32Array | null = null; // current interpolated per-token emission (for hover)
+  let emisNow: Float32Array | null = null; // aEmis attribute buffer (DISPLAY-normalized)
+  let emisTrueNow: Float32Array | null = null; // true interpolated emissions (for hover)
+  // Hover re-cast machinery: the camera moves under a stationary pointer (auto-rotate),
+  // so the last pointer position is re-cast every few frames from the animate loop.
+  let lastHover: { clientX: number; clientY: number } | null = null;
+  let reHover: ((ev: { clientX: number; clientY: number }) => void) | null = null;
+  let hoverTick = 0;
+  // Memoized max of the active emission array (display normalization + tooltip floor).
+  let emisRef: ArrayLike<number> | null | undefined = null;
+  let emisRefMax = 0;
+  function emisMax(arr: ArrayLike<number> | null | undefined): number {
+    if (arr !== emisRef) {
+      emisRef = arr;
+      emisRefMax = 0;
+      if (arr) for (let i = 0; i < arr.length; i++) emisRefMax = Math.max(emisRefMax, arr[i]);
+    }
+    return emisRefMax;
+  }
   let containerEl: HTMLDivElement | undefined;
 
   const SEED = 0;
@@ -64,6 +81,10 @@
     }
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(w, h);
+    renderer.domElement.addEventListener("webglcontextlost", (e) => {
+      e.preventDefault();
+      error = "The 3-D view lost its graphics context — reload the page to restore it.";
+    });
     containerEl.appendChild(renderer.domElement);
 
     scene.add(new THREE.AmbientLight(0x6677aa, 1.1));
@@ -77,10 +98,13 @@
     controls.autoRotateSpeed = 0.7;
 
     // Interactive hover: raycast the token points to reveal the token under the cursor.
+    // The camera moves WITHOUT the pointer (auto-rotate, wheel zoom), so the last
+    // pointer position is kept and the hover re-cast every few frames — a tooltip can
+    // never linger over a token that has rotated away (red-team M4).
     const raycaster = new THREE.Raycaster();
     raycaster.params.Points = { threshold: 0.1 };
     const ndc = new THREE.Vector2();
-    renderer.domElement.addEventListener("pointermove", (ev: PointerEvent) => {
+    const updateHover = (ev: { clientX: number; clientY: number }) => {
       if (!points || !camera || !renderer) return;
       const strs = data?.token_strs ?? manim?.token_strs;
       if (!strs) return;
@@ -97,20 +121,35 @@
           return;
         }
       }
-      const hits = raycaster.intersectObject(points);
-      if (hits.length && hits[0].index != null) {
-        const i = hits[0].index;
-        const emis = data ? (data.token_emis?.[i] ?? 0) : (emisNow?.[i] ?? 0);
-        showTip(ev, `${strs[i] ?? ""}   emission ${(emis * 100).toFixed(1)}%`);
+      const emisArr = data ? data.token_emis : emisTrueNow;
+      const maxE = emisMax(emisArr);
+      // Skip visually-invisible markers (faded alpha): phantom tooltips over
+      // apparently-empty surface were a red-team finding.
+      const hit = raycaster
+        .intersectObject(points)
+        .find((h) => h.index != null && maxE > 0 && (emisArr?.[h.index!] ?? 0) / maxE >= 0.02);
+      if (hit && hit.index != null) {
+        const i = hit.index;
+        const emis = emisArr?.[i] ?? 0;
+        showTip(ev, `${strs[i] ?? ""}   emission ${(emis * 100).toFixed(2)}%`);
       } else {
         hideTip();
       }
+    };
+    renderer.domElement.addEventListener("pointermove", (ev: PointerEvent) => {
+      lastHover = { clientX: ev.clientX, clientY: ev.clientY };
+      updateHover(ev);
     });
-    renderer.domElement.addEventListener("pointerleave", () => hideTip());
+    renderer.domElement.addEventListener("pointerleave", () => {
+      lastHover = null;
+      hideTip();
+    });
+    reHover = updateHover;
 
     const animate = () => {
       raf = requestAnimationFrame(animate);
       controls?.update();
+      if (lastHover && reHover && ++hoverTick % 6 === 0) reHover(lastHover);
       if (renderer && scene && camera) renderer.render(scene, camera);
     };
     animate();
@@ -174,8 +213,11 @@
       pgeom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(d.token_points.flat()), 3));
       const pcolors = new Float32Array(n * 3);
       const aEmis = new Float32Array(n);
+      // token_emis now carries TRUE probabilities (tooltips report them honestly);
+      // normalize for DISPLAY so marker color/alpha still spans the full range.
+      const dispMax = emisMax(d.token_emis) || 1;
       for (let i = 0; i < n; i++) {
-        const e = Math.max(0, Math.min(1, d.token_emis?.[i] ?? 0));
+        const e = Math.max(0, Math.min(1, (d.token_emis?.[i] ?? 0) / dispMax));
         const c = LOW.clone().lerp(HIGH, e);
         pcolors[i * 3] = c.r; pcolors[i * 3 + 1] = c.g; pcolors[i * 3 + 2] = c.b;
         aEmis[i] = e;
@@ -267,21 +309,41 @@
     if (!scene || !get(showSurface) || !src?.length) return;
     const g = new THREE.Group();
     const amber = new THREE.Color("#ffb454");
-    for (let i = 0; i < src.length; i++) {
+    // Readability (red-team M3): the flows ride the radius-2 TOKEN shell, so (a) show a
+    // faint guide shell to make that surface visible, (b) draw only the strongest flows
+    // (dozens of near-equal arcs read as a hairball), (c) weight opacity/head size by
+    // probability so what remains is ranked at a glance.
+    const shell = new THREE.Mesh(
+      new THREE.SphereGeometry(2.02, 28, 18),
+      new THREE.MeshBasicMaterial({ color: 0x6ea8fe, wireframe: true, transparent: true, opacity: 0.05, depthWrite: false }),
+    );
+    g.add(shell);
+    const order = probs
+      .map((p, i) => [p, i] as const)
+      .sort((x, y) => y[0] - x[0])
+      .slice(0, 12)
+      .map(([, i]) => i);
+    const pMax = Math.max(...order.map((i) => probs[i]), 1e-9);
+    for (const i of order) {
       const s = src[i], t = dst[i];
       const a = new THREE.Vector3(s[0], s[1], s[2]);
       const b = new THREE.Vector3(t[0], t[1], t[2]);
       if (a.distanceTo(b) < 1e-3) continue; // self-prediction → no arrow
-      const arc = geodesic(a, b, 24).map((v) => v.multiplyScalar(1.02)); // ride just above the surface
+      const rel = probs[i] / pMax;
+      const arc = geodesic(a, b, 24).map((v) => v.multiplyScalar(1.02)); // ride just above the shell
       const lgeom = new THREE.BufferGeometry().setFromPoints(arc);
-      const line = new THREE.Line(lgeom, new THREE.LineBasicMaterial({ color: amber, transparent: true, opacity: 0.85 }));
+      const line = new THREE.Line(
+        lgeom,
+        new THREE.LineBasicMaterial({ color: amber, transparent: true, opacity: 0.25 + 0.6 * rel }),
+      );
       g.add(line);
       // a cone arrowhead at the destination, oriented along the final segment
       const tip = arc[arc.length - 1], prev = arc[arc.length - 2];
       const dir = tip.clone().sub(prev).normalize();
+      const headScale = 0.55 + 0.65 * rel;
       const cone = new THREE.Mesh(
-        new THREE.ConeGeometry(0.035, 0.11, 10),
-        new THREE.MeshBasicMaterial({ color: amber }),
+        new THREE.ConeGeometry(0.035 * headScale, 0.11 * headScale, 10),
+        new THREE.MeshBasicMaterial({ color: amber, transparent: true, opacity: 0.35 + 0.65 * rel }),
       );
       cone.position.copy(tip);
       cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
@@ -337,6 +399,7 @@
     // frame update only has to touch the single aEmis attribute (cheap even at full vocab).
     const n = a.token_points.length;
     emisNow = new Float32Array(n);
+    emisTrueNow = new Float32Array(n);
     const pgeom = new THREE.BufferGeometry();
     pgeom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(a.token_points.flat()), 3));
     pgeom.setAttribute("aEmis", new THREE.BufferAttribute(emisNow, 1));
@@ -403,7 +466,16 @@
 
     const E0 = a.token_emis[f0], E1 = a.token_emis[f1];
     const ae = emisNow!;
-    for (let i = 0; i < ae.length; i++) ae[i] = E0[i] + (E1[i] - E0[i]) * fr;
+    const at = emisTrueNow!;
+    // token_emis carries TRUE probabilities: tooltips read `at`; the shader attribute
+    // gets a display-normalized copy so marker color/alpha still spans the full range.
+    let frameMax = 0;
+    for (let i = 0; i < at.length; i++) {
+      at[i] = E0[i] + (E1[i] - E0[i]) * fr;
+      frameMax = Math.max(frameMax, at[i]);
+    }
+    const dm = frameMax || 1;
+    for (let i = 0; i < ae.length; i++) ae[i] = at[i] / dm;
     (points.geometry.attributes.aEmis as THREE.BufferAttribute).needsUpdate = true;
 
     rebuildAnimTrajectory(t);
@@ -499,6 +571,9 @@
     if (renderer) {
       renderer.domElement.remove();
       renderer.dispose();
+      // dispose() alone keeps the GL context alive until GC — repeated tab switches
+      // then exhaust the browser's context limit (red-team M2; same fix as GeoScene).
+      renderer.forceContextLoss();
     }
     renderer = scene = camera = controls = mesh = points = traj = surf = undefined;
   }
@@ -515,7 +590,9 @@
     const force = rn !== lastRefresh;
     lastRefresh = rn;
     if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => void load(m, pfx, temp, resp, width, force), force ? 0 : 350);
+    // 600 ms: every distinct width value is its own cached ARAP precompute, so slow
+    // slider sweeps otherwise fire a chain of full recomputes (red-team M5).
+    debounce = setTimeout(() => void load(m, pfx, temp, resp, width, force), force ? 0 : 600);
     return () => {
       if (debounce) clearTimeout(debounce);
     };
@@ -607,7 +684,8 @@
   <div bind:this={containerEl} class="canvas" data-testid="manifold-canvas"></div>
   {#if data}
     <p class="caption">
-      {data.vertices.length} mesh vertices · bulging toward: {data.top_tokens.slice(0, 5).map((t) => t.token_str.trim() || "∅").join(", ")}
+      {data.vertices.length} mesh vertices · bulging toward: {data.top_tokens.slice(0, 5).map((t) => `${t.token_str.trim() || "∅"} ${(t.prob * 100).toFixed(1)}%`).join(", ")}
+      · temperature re-weights bump heights only (the ranking is temperature-invariant)
     </p>
   {:else if manim}
     <p class="caption">

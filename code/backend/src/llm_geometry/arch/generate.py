@@ -80,6 +80,11 @@ def generate(
 
             k = min(5, int(logits.shape[0]))
             top_ids = [int(i) for i in torch.topk(logits, k=k).indices]
+            # Alternatives always report the MODEL's distribution (plain softmax):
+            # at temperature 0 the sampling distribution is one-hot, and showing
+            # "Paris 0.0%" for a genuinely ~2% alternative misleads (red-team F4).
+            # `prob` of the chosen token stays the sampling probability (1.0 greedy).
+            model_probs = torch.softmax(logits, dim=-1)
             tokens.append(
                 {
                     "id": next_id,
@@ -88,7 +93,7 @@ def generate(
                     "topk": {
                         "ids": top_ids,
                         "texts": [lm.tokenizer.decode([i]) for i in top_ids],
-                        "probs": [float(probs[i]) for i in top_ids],
+                        "probs": [float(model_probs[i]) for i in top_ids],
                     },
                 }
             )

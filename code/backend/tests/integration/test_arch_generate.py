@@ -58,3 +58,16 @@ def test_invalid_params_rejected():
         generate(MODEL, "hi", max_new_tokens=129)
     with pytest.raises(InvalidParamError):
         generate(MODEL, "   ")
+
+
+def test_greedy_topk_reports_model_distribution_not_one_hot():
+    """Red-team F4: at temperature 0 the top-k alternatives must carry the MODEL's
+    probabilities (softmax of the logits), not the degenerate one-hot sampling probs."""
+    out = generate(MODEL, "The capital of France is", temperature=0.0, max_new_tokens=1)
+    tok = out["tokens"][0]
+    assert tok["prob"] == 1.0  # sampling prob of the greedy choice stays 1.0
+    probs = tok["topk"]["probs"]
+    assert all(0.0 < p <= 1.0 for p in probs)
+    assert sorted(probs, reverse=True) == probs
+    # the alternatives are NOT all zero (the old one-hot bug)
+    assert sum(probs[1:]) > 0.0

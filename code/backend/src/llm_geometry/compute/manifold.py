@@ -26,6 +26,33 @@ from .printable import printable_reference_ids, printable_tokens
 ProgressCb = Callable[[float, str], None]
 
 
+def _reference_with_top_emitters(
+    lm: Any,
+    all_ids: np.ndarray,
+    all_strs: list[str],
+    reference_set_size: int | None,
+    probs_list: list[np.ndarray],
+    top_k: int = 64,
+) -> tuple[np.ndarray, list[str]]:
+    """Reference markers = the evenly-spaced background subset UNION the top printable
+    tokens of every supplied next-token distribution.
+
+    Without the union the warp targets whatever happens to fall in the arbitrary
+    evenly-spaced subset: with a 2000-marker subset over a ~150k vocab the true top
+    token (e.g. " Paris" at 30%) was usually absent, so the surface bulged toward
+    ~0.1%-probability tokens instead (red-team CRITICAL finding). The union guarantees
+    every token the model actually reaches for is a marker the surface can bulge toward.
+    """
+    if reference_set_size is None or int(reference_set_size) >= all_ids.shape[0]:
+        return all_ids, all_strs
+    base = printable_reference_ids(lm, reference_set_size)
+    tops = [all_ids[np.argsort(-probs[all_ids])[: int(top_k)]] for probs in probs_list]
+    token_ids = np.unique(np.concatenate([base, *tops]))
+    id2s = dict(zip(all_ids.tolist(), all_strs))
+    token_strs = [id2s[int(t)] for t in token_ids]
+    return token_ids, token_strs
+
+
 def _warp_sphere(o3d, dirs: np.ndarray, emis: np.ndarray, width: float, warp_top: int):
     """Build the radius-1 sphere, raise a smooth (capped, order-invariant) outward-lift field
     toward the top emitting tokens, ARAP-smooth, and return (vertices, faces, normalized warp)."""
@@ -106,12 +133,22 @@ def manifold(
     lm = load_model(model_id)
     # Only PRINTABLE tokens become markers (no special/byte-fragment noise); ship strings.
     all_ids, all_strs = printable_tokens(lm)
-    if reference_set_size is None or int(reference_set_size) >= all_ids.shape[0]:
-        token_ids, token_strs = all_ids, all_strs
-    else:
-        token_ids = printable_reference_ids(lm, reference_set_size)
-        id2s = dict(zip(all_ids.tolist(), all_strs))
-        token_strs = [id2s[int(t)] for t in token_ids]
+
+    # Emission distribution FIRST: both the reference-set union (the markers must
+    # include the tokens the model actually predicts) and the surface flow field need it.
+    if progress_cb:
+        progress_cb(0.2, "computing emission distribution")
+    probs_full = next_token_distribution(
+        model_id,
+        prefix_text=prefix_text,
+        temperature=temperature,
+        response_text=response_text,
+        response_step=response_step,
+    )["arrays"]["probs"]
+
+    token_ids, token_strs = _reference_with_top_emitters(
+        lm, all_ids, all_strs, reference_set_size, [probs_full]
+    )
     matrix = (
         lm.model.get_input_embeddings().weight.detach().float().cpu().numpy().astype(np.float64)
     )
@@ -124,20 +161,11 @@ def manifold(
         if int(t) in printable_set
     ]
 
-    # Emission distribution FIRST: the surface flow field needs the top emitters before we fit
-    # the sphere, so each one's predicted next token can be placed in the SAME frame.
-    if progress_cb:
-        progress_cb(0.3, "computing emission distribution")
-    probs_full = next_token_distribution(
-        model_id,
-        prefix_text=prefix_text,
-        temperature=temperature,
-        response_text=response_text,
-        response_step=response_step,
-    )["arrays"]["probs"]
+    # TRUE emission probabilities are what we report (tooltips/captions must never show
+    # a subset-max-normalized "100%"); the geometry alone uses a normalized copy so the
+    # warp amplitude stays visually strong regardless of the distribution's peak.
     emis = probs_full[token_ids].astype(np.float64)
-    if emis.max() > 0:
-        emis = emis / emis.max()
+    emis_geom = emis / emis.max() if emis.max() > 0 else emis
 
     # Surface flow field: for the top emitting tokens, the model's most-likely NEXT token —
     # "given an embedding here, where on the manifold does the model go next?"
@@ -184,7 +212,7 @@ def manifold(
 
     if progress_cb:
         progress_cb(0.6, "warping the sphere toward likely tokens")
-    final_verts, faces, warp = _warp_sphere(o3d, dirs, emis, width, warp_top)
+    final_verts, faces, warp = _warp_sphere(o3d, dirs, emis_geom, width, warp_top)
 
     if progress_cb:
         progress_cb(1.0, "done")
@@ -245,16 +273,9 @@ def manifold_animation(
 
     lm = load_model(model_id)
     all_ids, all_strs = printable_tokens(lm)
-    if reference_set_size is None or int(reference_set_size) >= all_ids.shape[0]:
-        token_ids, token_strs = all_ids, all_strs
-    else:
-        token_ids = printable_reference_ids(lm, reference_set_size)
-        id2s = dict(zip(all_ids.tolist(), all_strs))
-        token_strs = [id2s[int(t)] for t in token_ids]
     matrix = (
         lm.model.get_input_embeddings().weight.detach().float().cpu().numpy().astype(np.float64)
     )
-    emb = matrix[token_ids]
     printable_set = set(int(i) for i in all_ids.tolist())
     resp_ids = [
         int(t)
@@ -265,30 +286,43 @@ def manifold_animation(
     from ..reduce.sphere import reduce_3d_sphere
     from .context import prefix_ids as _prefix_ids
 
-    n_ref = int(token_ids.shape[0])
     n_frames = len(resp_ids) + 1
-    surface_k = min(40, n_ref)
     prefix = _prefix_ids(lm, prefix_text)
+
+    # Pass 0 — every frame's next-token distribution up front: the reference set must be
+    # FIXED across frames (the mesh morphs between identical marker sets), and it must
+    # contain the top emitters of EVERY frame so each frame's bulges target real tokens.
+    probs_per: list[np.ndarray] = []
+    for s in range(n_frames):
+        if progress_cb:
+            progress_cb(0.02 + 0.1 * s / n_frames, f"frame {s + 1}/{n_frames}: distribution")
+        probs_per.append(
+            next_token_distribution(
+                model_id,
+                prefix_text=prefix_text,
+                temperature=temperature,
+                response_text=response_text,
+                response_step=s,
+            )["arrays"]["probs"]
+        )
+    token_ids, token_strs = _reference_with_top_emitters(
+        lm, all_ids, all_strs, reference_set_size, probs_per
+    )
+    emb = matrix[token_ids]
+    n_ref = int(token_ids.shape[0])
+    surface_k = min(40, n_ref)
 
     # Pass 1 — per-frame emission + surface flow field: as the context unfolds, the top emitting
     # tokens and where each one would lead NEXT both change, so we recompute them per key frame.
     # Every predicted target is collected so it can be placed in the SAME sphere frame below.
+    # `emis_per` keeps TRUE probabilities (reported); the warp normalizes per frame itself.
     emis_per, src_order_per, tgt_ids_per, tgt_prob_per = [], [], [], []
     for s in range(n_frames):
         if progress_cb:
             progress_cb(
-                0.05 + 0.45 * s / n_frames, f"frame {s + 1}/{n_frames}: emission + flow field"
+                0.12 + 0.38 * s / n_frames, f"frame {s + 1}/{n_frames}: emission + flow field"
             )
-        probs = next_token_distribution(
-            model_id,
-            prefix_text=prefix_text,
-            temperature=temperature,
-            response_text=response_text,
-            response_step=s,
-        )["arrays"]["probs"]
-        emis = probs[token_ids].astype(np.float64)
-        if emis.max() > 0:
-            emis = emis / emis.max()
+        emis = probs_per[s][token_ids].astype(np.float64)
         emis_per.append(emis)
         order = np.argsort(-emis)[:surface_k]
         src_order_per.append(order)
@@ -324,7 +358,9 @@ def manifold_animation(
     for s in range(n_frames):
         if progress_cb:
             progress_cb(0.5 + 0.45 * s / n_frames, f"key frame {s + 1}/{n_frames}: warping")
-        fv, faces, warp = _warp_sphere(o3d, dirs, emis_per[s], width, warp_top)
+        eg = emis_per[s]
+        eg = eg / eg.max() if eg.max() > 0 else eg  # geometry-only normalization
+        fv, faces, warp = _warp_sphere(o3d, dirs, eg, width, warp_top)
         verts_per.append(fv.astype(np.float32))
         warp_per.append(warp.astype(np.float32))
         order = src_order_per[s]

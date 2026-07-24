@@ -184,7 +184,9 @@ def test_manifold_warped_sphere():
     # all tokens are placed on the radius-2 sphere
     token_radii = np.linalg.norm(a["token_points"], axis=1)
     assert np.allclose(token_radii, 2.0, atol=1e-3)
-    assert a["token_points"].shape == (150, 3)
+    # markers = the 150 background references UNION the true top emitters (so the
+    # surface can bulge toward tokens the model actually predicts)
+    assert a["token_points"].shape[0] >= 150 and a["token_points"].shape[1] == 3
     assert len(m["top_tokens"]) >= 1
     # token strings align with token_points (used by the manifold raycast hover)
     assert len(m["token_strs"]) == a["token_points"].shape[0]
@@ -226,7 +228,9 @@ def test_manifold_animation_morphs_per_frame():
     )
     a, m = p["arrays"], p["meta"]
     F, V, R = m["n_frames"], m["n_vertices"], a["token_points"].shape[0]
-    assert F == 4 and R == 200  # 3 response tokens -> 4 key frames
+    # 3 response tokens -> 4 key frames; markers = 200 background refs UNION every
+    # frame's true top emitters (reference set fixed across frames for smooth morphs)
+    assert F == 4 and R >= 200
     assert a["vertices"].shape == (F, V, 3) and a["warp"].shape == (F, V)
     assert a["token_emis"].shape == (F, R)
     assert a["faces"].shape[1] == 3  # one static face list, shared by every frame
@@ -237,3 +241,38 @@ def test_manifold_animation_morphs_per_frame():
     assert a["traj_points"].shape == (F - 1, 3)
     assert np.allclose(np.linalg.norm(a["traj_points"], axis=1), 2.0, atol=1e-3)
     assert len(m["trajectory_token_strs"]) == F - 1
+
+
+def test_manifold_bulges_target_true_top_tokens_with_true_probs():
+    """Red-team CRITICAL regression: with a subsetted reference set, the manifold must
+    still bulge toward the ACTUAL top next tokens (union into the marker set) and must
+    report TRUE emission probabilities, never subset-max-normalized ones."""
+    from llm_geometry.compute.printable import printable_tokens
+    from llm_geometry.models.loader import load_model
+
+    prefix = "The capital of France is"
+    m = get_or_compute_sync(
+        "manifold",
+        "distilgpt2",
+        {"reference_set_size": 300, "seed": 0, "width": 0.18},
+        {"prefix_text": prefix},
+    )
+    probs = get_or_compute_sync(
+        "distribution", "distilgpt2", {"temperature": 1.0}, {"prefix_text": prefix}
+    )["arrays"]["probs"]
+
+    lm = load_model("distilgpt2")
+    all_ids, all_strs = printable_tokens(lm)
+    top_printable_idx = int(np.argmax(probs[all_ids]))
+    top_id = int(all_ids[top_printable_idx])
+    top_str = all_strs[top_printable_idx]
+    top_prob = float(probs[top_id])
+
+    meta, arrays = m["meta"], m["arrays"]
+    # The true top printable token is IN the marker set...
+    assert top_str in meta["token_strs"]
+    # ...and it is what the surface bulges toward, with its TRUE probability.
+    assert meta["top_tokens"][0]["token_str"] == top_str
+    assert abs(meta["top_tokens"][0]["prob"] - top_prob) < 1e-6
+    # Emissions are true probabilities (a real prompt never yields a 1.0 max).
+    assert 0.0 < float(arrays["token_emis"].max()) == abs(top_prob) < 1.0

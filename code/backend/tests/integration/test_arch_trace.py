@@ -94,3 +94,15 @@ def test_gpt2_trace_covers_graph_nodes():
     activation_ids = [a["node_id"] for a in trace["node_activations"]]
     assert len(activation_ids) == len(set(activation_ids))  # one entry per node
     assert set(activation_ids) == {n["id"] for n in graph["nodes"]}
+
+
+def test_trace_reports_left_truncation():
+    """Red-team F9: a prompt over max_context must set the additive `truncated` flag."""
+    from llm_geometry.arch.trace import trace_forward
+
+    short = trace_forward(MODELS[0], "hello there", max_context=64)
+    assert short["truncated"] is False
+    long_prompt = " word" * 300
+    long = trace_forward(MODELS[0], long_prompt, max_context=64)
+    assert long["truncated"] is True
+    assert len(long["tokens"]) == 64

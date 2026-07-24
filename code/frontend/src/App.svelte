@@ -108,8 +108,8 @@
   .logo { width: 38px; height: 38px; border-radius: 11px; background: var(--accent-grad); box-shadow: 0 0 22px rgba(110,168,254,0.5); }
   h1 { margin: 0; font-size: 1.4rem; letter-spacing: -0.01em; }
   .brand p { margin: 0.1rem 0 0; color: var(--text-dim); font-size: 0.86rem; }
-  .layout { display: grid; grid-template-columns: 320px 1fr; gap: 1.2rem; align-items: start; }
-  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  .layout { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 1.2rem; align-items: start; }
+  @media (max-width: 900px) { .layout { grid-template-columns: minmax(0, 1fr); } }
   .controls { padding: 1.2rem 1.3rem; display: flex; flex-direction: column; gap: 1.05rem; }
   .controls-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
   .controls h2 { margin: 0; font-size: 1rem; letter-spacing: 0.01em; }
@@ -121,8 +121,10 @@
   .divider { height: 1px; background: var(--border); margin: 0.1rem -0.2rem; }
   .group-label { font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
   .hint { margin: 0; color: var(--text-dim); font-size: 0.78rem; line-height: 1.45; }
-  .main { display: flex; flex-direction: column; gap: 0.9rem; }
-  .tabs { display: inline-flex; gap: 0.3rem; padding: 0.3rem; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 999px; align-self: flex-start; }
+  .main { display: flex; flex-direction: column; gap: 0.9rem; min-width: 0; }
+  /* flex-wrap + max-width keep all five pills reachable on narrow phones (three tab
+     red-teams measured 95px+ of horizontal page overflow at 390-420px). */
+  .tabs { display: inline-flex; flex-wrap: wrap; gap: 0.3rem; padding: 0.3rem; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 999px; align-self: flex-start; max-width: 100%; }
   .tabs button {
     background: transparent;
     color: var(--text-dim);

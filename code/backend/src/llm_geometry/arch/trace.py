@@ -52,6 +52,7 @@ def trace_forward(
 
     lm = load_model(model_id)
     ids, chat_template_used = encode_prompt(lm, prompt, system_prompt)
+    truncated = len(ids) > max_context
     ids = ids[-max_context:]  # truncate LEFT: keep the most recent context
     seq_len = len(ids)
     input_ids = torch.tensor([ids], dtype=torch.long, device=lm.device)
@@ -110,6 +111,7 @@ def trace_forward(
     return {
         "tokens": tokens,
         "chat_template_used": chat_template_used,
+        "truncated": truncated,
         "layers": layers,
         "logits_topk": logits_topk,
         "node_activations": node_activations,
