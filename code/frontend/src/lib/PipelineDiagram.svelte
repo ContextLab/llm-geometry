@@ -218,14 +218,33 @@
   });
 
   let panning = $state<{ px: number; py: number } | null>(null);
+  // Capturing at pointerdown retargets the browser's derived click to the SVG, so
+  // node/group click handlers never fire from a real pointer. Instead, arm on
+  // pointerdown and only capture once movement crosses a drag threshold — taps stay
+  // ordinary clicks, drags still pan smoothly.
+  let armedPan: { px: number; py: number; id: number } | null = null;
+  const DRAG_THRESHOLD_PX = 4;
 
   function onPointerDown(e: PointerEvent) {
-    panning = { px: e.clientX, py: e.clientY };
-    (e.currentTarget as SVGSVGElement).setPointerCapture(e.pointerId);
+    armedPan = { px: e.clientX, py: e.clientY, id: e.pointerId };
   }
 
   function onPointerMove(e: PointerEvent) {
-    if (!panning || !svgEl) return;
+    if (!svgEl) return;
+    if (!panning) {
+      if (!armedPan) return;
+      if (
+        Math.hypot(e.clientX - armedPan.px, e.clientY - armedPan.py) < DRAG_THRESHOLD_PX
+      ) {
+        return;
+      }
+      panning = { px: armedPan.px, py: armedPan.py };
+      try {
+        svgEl.setPointerCapture(armedPan.id);
+      } catch {
+        // pointer may already be gone (e.g. pen leaving the digitizer) — pan uncaptured
+      }
+    }
     const rect = svgEl.getBoundingClientRect();
     const dx = ((e.clientX - panning.px) / rect.width) * vb.w;
     const dy = ((e.clientY - panning.py) / rect.height) * vb.h;
@@ -235,6 +254,7 @@
 
   function onPointerUp() {
     panning = null;
+    armedPan = null;
   }
 
   function kindClass(n: ArchNode): string {

@@ -664,12 +664,30 @@ export function createClient(opts: ClientOptions = {}) {
   // Live progress via SSE when available; polling otherwise. Returns an unsubscribe fn.
   function subscribeProgress(
     job_id: string,
-    handlers: { onProgress?: ProgressFn; onDone?: () => void; onError?: (type: string, message: string) => void },
+    handlers: {
+      onProgress?: ProgressFn;
+      // Receives the done event's payload (e.g. {cache_key, checkpoint_id} for geo
+      // training, {weights_token, loss_before, loss_after} for fine-tunes).
+      onDone?: (data?: Record<string, unknown>) => void;
+      onError?: (type: string, message: string) => void;
+    },
   ): () => void {
     if (!ESImpl) {
       let cancelled = false;
       pollJob(job_id, (p, m) => !cancelled && handlers.onProgress?.(p, m))
-        .then(() => !cancelled && handlers.onDone?.())
+        .then(async () => {
+          if (cancelled) return;
+          let data: Record<string, unknown> | undefined;
+          try {
+            const snap = (await getJob(job_id)) as unknown as {
+              result?: Record<string, unknown> | null;
+            };
+            data = snap.result ?? undefined;
+          } catch {
+            data = undefined; // the job finished; a missing snapshot shouldn't fail done
+          }
+          if (!cancelled) handlers.onDone?.(data);
+        })
         .catch((e: ApiError) => !cancelled && handlers.onError?.(e.type, e.message));
       return () => {
         cancelled = true;
@@ -680,8 +698,14 @@ export function createClient(opts: ClientOptions = {}) {
       const d = JSON.parse(ev.data);
       handlers.onProgress?.(d.progress, d.message);
     });
-    es.addEventListener("done", () => {
-      handlers.onDone?.();
+    es.addEventListener("done", (ev: MessageEvent) => {
+      let data: Record<string, unknown> | undefined;
+      try {
+        data = JSON.parse(ev.data);
+      } catch {
+        data = undefined;
+      }
+      handlers.onDone?.(data);
       es.close();
     });
     es.addEventListener("error", (ev: MessageEvent) => {
