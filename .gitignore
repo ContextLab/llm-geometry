@@ -14,14 +14,16 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
 wheels/
 pip-wheel-metadata/
 share/python-wheels/
+# NOTE: lib/ and lib64/ are anchored to the repo root below so they only match
+# Python build output and not source dirs like code/frontend/src/lib.
 *.egg-info/
 .installed.cfg
 *.egg
@@ -132,16 +134,22 @@ dmypy.json
 
 # latex "junk" files
 *.cb*
-*.dvi
 *.log
-*.blg
-*.aux
-*.fff
-*.synctex.gz
-*.bbl
 
 # Claude Code local settings
 .claude/settings.local.json
 
 # oh-my-claudecode local state
 .omc/
+
+# llm-geometry: derived precompute cache (regenerable from model+params) and JS deps/build
+.cache/
+node_modules/
+code/frontend/node_modules/
+code/frontend/dist/
+code/frontend/test-results/
+code/frontend/playwright-report/
+code/frontend/tests/e2e/__screenshots__/
+.playwright-mcp/
+/live-*.png
+.devservers/

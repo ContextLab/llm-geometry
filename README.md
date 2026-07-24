@@ -1,63 +1,113 @@
-# Contextual Dynamics Lab LaTeX Template
+# llm-geometry
 
-This template repository provides a convenient way of setting up new paper-based projects.  The template includes our lab-recommended systems for organizing LaTeX code (including bibliography and figures), analysis code (e.g., notebooks for reproducing each figure and a containerized environment for guaranteeing the notebooks will run correctly), and data (raw and pre-processed), and all associated documentation.  The repository also includes scripts for automatically setting up the repository and compiling the latex files into PDFs.
+Understanding large language models through **interactive geometric visualizations**.
+Five explorable views over real open-weights models — no mocks, no canned data:
 
-# Using this template repository
+1. **Vector field** — an *n×n* grid of reference tokens in 2D-reduced embedding
+   space, each casting arrows toward its likely next tokens (temperature fans the
+   arrows out; a typed response traces an animated trajectory).
+2. **Sankey** — a particle swarm samples next tokens position-by-position; flow width
+   is the particle count, with a teacher-forced gold path for your own response.
+3. **Manifold** — a unit sphere warped (RBF + ARAP) toward the true top next tokens,
+   with an optional surface flow field showing where each likely token leads next.
+4. **Architecture** — a real model (default SmolLM2-135M-Instruct; any open HF id,
+   size-gated before download) traced live: **every op of the forward pass** — RoPE,
+   attention softmax, residual adds included — is a clickable node. Re-trace your own
+   prompt, ▶ play the trace through the diagram, zoom into any weight matrix's actual
+   values, and generate replies with per-token probabilities.
+5. **Geometry** — a from-scratch *GeoTransformer* (`d_model=3`, 4 layers, 1 head,
+   1000-word vocab) really trained on Alice in Wonderland, its 3-D token embeddings
+   living directly on a rendered sphere. Explore the *next-next-token* field or the
+   attention-force field `Σ softmax(⟨Kz_j,Qz_i⟩)·Vz_j`
+   ([arXiv:2607.13295](https://arxiv.org/abs/2607.13295)) per layer, edit
+   W_Q/W_K/W_V/W_O or the embeddings (presets or cell-by-cell), and fine-tune on your
+   own text/file/HF dataset with real SGD.
 
-There are two simple ways of using this repository as a template for a new project:
+See [`project_description.md`](project_description.md) for the science and UX vision,
+and [issue #1](https://github.com/ContextLab/llm-geometry/issues/1) for the build log
+(design decisions, red-team rounds, screenshots).
 
-1. Visit the [GitHub page](https://github.com/ContextLab/latex-base) for this project and click the green "Use this template" button.  You will be taken to a new page that enables you to name and configure your new repository.
-2. Create a [new GitHub repository](https://github.com/new) and select "ContextLab/latex-template" from the "Repository template" dropdown menu.  Then name and configure your repository from the same page.
+## Quickstart
 
-# Basic setup
+Requires Python ≥ 3.10 and Node ≥ 20 (or use conda/Docker below). First run downloads
+a small open-weights model from HuggingFace and caches it; the Geometry tab trains its
+tiny model once (~25 s) and caches the checkpoint.
 
-After cloning your new repository, you'll want to get it set up and configured for you to start using it in your new project:
-
-1.  The first step is to **run the `setup.sh` script** in Terminal:
 ```bash
-sh setup.sh
-```
-2.  Next, you'll want to **customize the `Dockerfile` to include any packages needed for your project**.
-3.  You should also update the README files (including this one) to reference your paper (rather than this template).  Suggested example text for this file is provided below, and suggested code and data README files are provided in the code and data folders, respectively.
+# Backend (FastAPI + PyTorch/transformers + reduction stack)
+cd code/backend
+python -m venv .venv && . .venv/bin/activate
+pip install -e ".[test]"
+uvicorn llm_geometry.api.app:app --port 8000      # JSON API on :8000
 
-***
-
-# *Paper title*
-
-This repository contains data and code used to produce the paper ["_Paper title_"](link.to.preprint) by Authors. The repository is organized as follows:
-
-```
-root
-└── code: all code used in the paper
-    └── notebooks : Jupyter notebooks for paper analyses
-└── data: all data used in the paper
-    ├── raw : raw data before processing
-    └── processed : all processed data
-└── paper: all files needed to generate a PDF of the paper
-    └── figs : pdf copies of each figure
-        └── source: source files used to construct individual figure panels or components
-    ├── CDL-bibliography: bibliography management based on https://github.com/ContextLab/CDL-bibliography
-    └── admin: files and documents related to administrative tasks (e.g., cover letters, forms, etc.)    
+# Frontend (Svelte + Vite) — in a second terminal
+cd code/frontend
+npm install
+npm run dev                                       # http://localhost:5173 (proxies /api)
 ```
 
-We also include a Dockerfile to reproduce our computational environment. Instruction for use are below (copied and modified from [this project](https://github.com/ContextLab/sherlock-topic-model-paper)):
+Or start both with one command (health-checked, stale-port guarded):
 
-## One time setup
-1. Install Docker on your computer using the appropriate guide below:
-    - [OSX](https://docs.docker.com/docker-for-mac/install/#download-docker-for-mac)
-    - [Windows](https://docs.docker.com/docker-for-windows/install/)
-    - [Ubuntu](https://docs.docker.com/engine/installation/linux/docker-ce/ubuntu/)
-    - [Debian](https://docs.docker.com/engine/installation/linux/docker-ce/debian/)
-2. Launch Docker and adjust the preferences to allocate sufficient resources (e.g. > 4GB RAM)
-3. Build the docker image by opening a terminal in this repo folder and enter `docker build -t cdl .`  
-4. Use the image to create a new container for the workshop
-    - The command below will create a new container that will map your local copy of the repository to `/mnt` within the container, so that all the files in the repo are shared between your host OS and the container. The command will also share port `9999` with your host computer so any jupyter notebooks launched from *within* the container will be accessible at `localhost:9999` in your web browser
-    - `docker run -it -p 9999:9999 --name cdl -v $PWD:/mnt cdl`
-    - You should now see the `root@` prefix in your terminal, if so you've successfully created a container and are running a shell from *inside*!
-5. To launch any of the notebooks: `jupyter notebook --port=9999 --no-browser --ip=0.0.0.0 --allow-root`
+```bash
+sh scripts/dev.sh          # start · sh scripts/dev.sh stop
+```
 
-## Using the container after setup
-1. You can always fire up the container by typing the following into a terminal
-    - `docker start --attach cdl`
-    - When you see the `root@` prefix, letting you know you're inside the container
-2. Close a running container with `ctrl + d` from the same terminal you used to launch the container, or `docker stop cdl` from any other terminal
+### Reproducible environments
+
+One `conda`/`mamba` env pins both stacks (Python 3.11 + Node 20):
+
+```bash
+mamba env create -f environment.yml && conda activate llm-geometry
+uvicorn llm_geometry.api.app:app --port 8000          # backend
+cd code/frontend && npm install && npm run dev        # frontend
+```
+
+Or Docker (serves the API + built UI on :8000):
+
+```bash
+docker build -t llm-geometry . && docker run -it -p 8000:8000 llm-geometry
+```
+
+## Tests
+
+Everything runs against **real models** — real downloads, real training, real
+browsers; the project forbids mocks:
+
+```bash
+cd code/backend && . .venv/bin/activate
+ruff check src/ tests/ && black --check src/ && pytest -q      # 200+ real-model tests
+
+cd ../frontend
+npm run check && npm run test && npm run build                 # types · unit · build
+npx playwright install chromium && npm run test:e2e            # e2e vs the live stack
+```
+
+The same gate runs in CI (`.github/workflows/ci.yml`) on every push plus a nightly
+schedule, with HuggingFace model and artifact caches.
+
+## Repository layout
+
+```
+code/
+├── backend/                  # Python package `llm_geometry`
+│   ├── src/llm_geometry/     #   models · compute · reduce · cache · jobs · api
+│   │   ├── arch/             #   Architecture tab: traced graphs, weight windows, generation
+│   │   └── geo/              #   Geometry tab: GeoTransformer, training, fields (+ corpus data)
+│   └── tests/                #   unit · integration · contract (all real-model)
+└── frontend/                 # Svelte + TypeScript + Vite app
+    └── src/{viz,controls,lib}/   # five views · shared controls · typed API client
+docs/screenshots/             # verification screenshots referenced from issue threads
+notes/                        # session notes + agent red-team/fix reports
+scripts/dev.sh                # dev-stack launcher (both servers, health-checked)
+specs/                        # Spec Kit features: 001 core machinery · 002 explorer tabs
+.cache/llm-geometry/          # derived precompute artifacts (git-ignored, regenerable)
+```
+
+The API contract for the explorer tabs is frozen at
+[`specs/002-interactive-model-explorer/contracts/api.md`](specs/002-interactive-model-explorer/contracts/api.md).
+
+## Development
+
+This project uses **Spec-Driven Development** (Spec Kit): specify → clarify → plan →
+tasks → analyze → implement. See [`CLAUDE.md`](CLAUDE.md) and the project constitution
+at [`.specify/memory/constitution.md`](.specify/memory/constitution.md).
