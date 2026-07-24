@@ -29,9 +29,25 @@ https://github.com/ContextLab/llm-geometry/issues/1#issuecomment-5071465097
 - [x] Batch 2: B1 geo routes (+geo/jobs.py; ADDITIVE Job.phase/result on shared
       registry; python-multipart dep) · B2 arch routes (gate-first, _sig6
       encoding). 36 contract tests. 198/198 green. Commit 93478d5. Comment posted.
-- [ ] Batch 3 (running): B3 Architecture Explorer view (viz/arch/) · B4 Geometry
-      Lab view (viz/geo/) — both verify live in a real browser via scripts/dev.sh.
-- [ ] Batch 2+3 red-team + fixes + screenshots comment.
+- [x] Batch 3: B3 Architecture Explorer + B4 Geometry Lab, live-verified (8213e27);
+      my screenshot pass -> docs/screenshots/issue-1/ + issue comment (617df5c).
+- [x] Flagged-bug fixes: PipelineDiagram arm-then-capture pan; subscribeProgress
+      done payload; GPT-2-family tracing (id-stable for SmolLM2/Qwen; 5 real-gpt2
+      tests) (617df5c, f4efece).
+- [x] Batch 2+3 red-team: backend REQUEST-CHANGES (1 MAJOR: validation errors
+      bypassed the frozen envelope -> app-level handler; +4 minors: shared
+      TORCH_GLOBAL_LOCK, sidecar provenance, SSE rounding, job-map pruning,
+      shared jsonable_6sig w/ non-finite fail-loud). Frontend REQUEST-CHANGES
+      (1 HIGH: FinetunePanel false-failure on mid-run weight edits -> consume SSE
+      done payload; WebGL context exhaustion -> forceContextLoss; evicted-token
+      self-heal; non-JSON 5xx -> NetworkError copy; double-fetch effect; dead
+      workaround removed). ALL fixed (f4efece). Reports in notes/agent-reports/.
+- [x] Batch 4: CI (.github/workflows/ci.yml, Python 3.10 to match the lock),
+      9 explorer e2e specs (all green after 3 selector fixes; suite 21/21),
+      favicon, README/CLAUDE.md docs (8bbf4c1, b3e0fb7).
+- [ ] Awaiting: CI run 30113059912 green + final local gate sweep -> cleanup ->
+      final issue comment. Deferred follow-ups to file as issues: in-browser
+      inference; big-model training exploration; multi-turn chat; a11y audit.
 - [ ] Batch 2 (parallel): B1 geo routes · B2 arch routes (+contract tests).
 - [ ] Batch 3 (parallel): B3 Architecture Explorer view · B4 Geometry Lab view.
 - [ ] Batch 2+3 red-team + fixes + issue comments with screenshots.
