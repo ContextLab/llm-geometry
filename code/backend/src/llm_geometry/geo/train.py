@@ -62,14 +62,22 @@ _TRAINER_VERSION = 1
 
 @contextmanager
 def deterministic_torch(seed: int):
-    """Fully-seeded, deterministic torch execution (restores the prior mode)."""
-    prev = torch.are_deterministic_algorithms_enabled()
+    """Fully-seeded, deterministic torch execution.
+
+    Restores BOTH the deterministic-algorithms flag and the global RNG state on exit:
+    ``torch.manual_seed`` mutates the process-global generator, and leaking that would
+    make unrelated later sampling (e.g. an unseeded ``arch.generate``) depend on
+    whether a geo train/finetune ran earlier in the process.
+    """
+    prev_mode = torch.are_deterministic_algorithms_enabled()
+    prev_rng = torch.get_rng_state()
     torch.manual_seed(seed)
     torch.use_deterministic_algorithms(True)
     try:
         yield
     finally:
-        torch.use_deterministic_algorithms(prev)
+        torch.use_deterministic_algorithms(prev_mode)
+        torch.set_rng_state(prev_rng)
 
 
 # -- data --------------------------------------------------------------------------------

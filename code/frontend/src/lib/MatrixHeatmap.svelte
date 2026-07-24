@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
+
   import { showTip, hideTip } from "./tooltip";
 
   // Reusable canvas heatmap for weight/attention matrices (Architecture + Geometry
@@ -24,7 +26,11 @@
   }: Props = $props();
 
   let canvasEl: HTMLCanvasElement | undefined = $state();
-  let editor = $state<{ row: number; col: number; text: string } | null>(null);
+  // The input's text lives in its own $state (not on the editor object): binding to
+  // `editor.text` races the input's teardown when `editor` is nulled on commit,
+  // firing an async `null.text` read.
+  let editor = $state<{ row: number; col: number } | null>(null);
+  let editorText = $state("");
 
   // Normalize to number[][] (a 1-D vector is a single-column matrix).
   const grid = $derived(
@@ -65,15 +71,35 @@
     return `rgb(${r},${g},${b})`;
   }
 
+  // The tooltip is a global singleton — clear it if this component unmounts mid-hover.
+  onDestroy(hideTip);
+
+  // Track devicePixelRatio reactively (a matchMedia "resolution" query fires when the
+  // window moves to a different-DPI display) so the canvas re-renders crisply there.
+  let dpr = $state(typeof devicePixelRatio === "number" ? devicePixelRatio : 1);
+  $effect(() => {
+    if (typeof matchMedia !== "function") return;
+    const mq = matchMedia(`(resolution: ${dpr}dppx)`);
+    const update = () => {
+      dpr = typeof devicePixelRatio === "number" ? devicePixelRatio : 1;
+    };
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  });
+
   // Redraw whenever the data or geometry changes; devicePixelRatio-aware so cells
   // stay crisp on retina displays.
   $effect(() => {
     const el = canvasEl;
     if (!el || rows === 0 || cols === 0) return;
-    const dpr = typeof devicePixelRatio === "number" ? devicePixelRatio : 1;
     el.width = Math.max(1, Math.round(cssW * dpr));
     el.height = Math.max(1, Math.round(cssH * dpr));
-    const ctx = el.getContext("2d");
+    let ctx: CanvasRenderingContext2D | null = null;
+    try {
+      ctx = el.getContext("2d");
+    } catch {
+      ctx = null; // some environments (jsdom) throw instead of returning null
+    }
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
@@ -115,12 +141,13 @@
     const hit = hitCell(e);
     if (!hit) return;
     hideTip();
-    editor = { row: hit.row, col: hit.col, text: formatValue(grid[hit.row][hit.col]) };
+    editor = { row: hit.row, col: hit.col };
+    editorText = formatValue(grid[hit.row][hit.col]);
   }
 
   function commitEdit() {
     if (!editor) return;
-    const v = Number(editor.text);
+    const v = Number(editorText);
     if (Number.isFinite(v)) onCellEdit?.(editor.row, editor.col, v);
     editor = null;
   }
@@ -171,7 +198,7 @@
       data-testid="heatmap-cell-editor"
       style:left={`${Math.min(editor.col * cell, Math.max(0, cssW - 76))}px`}
       style:top={`${editor.row * cell}px`}
-      bind:value={editor.text}
+      bind:value={editorText}
       use:autofocus
       onkeydown={onEditorKeydown}
       onblur={commitEdit}

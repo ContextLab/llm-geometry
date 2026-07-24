@@ -523,11 +523,31 @@ export function createClient(opts: ClientOptions = {}) {
   const pollIntervalMs = opts.pollIntervalMs ?? 250;
 
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
-    const res = await doFetch(base + path, init);
+    let res: Response;
+    try {
+      res = await doFetch(base + path, init);
+    } catch (e) {
+      // Cancellation is not an API failure — let callers distinguish it (FR-108).
+      if (e instanceof DOMException && e.name === "AbortError") throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new ApiError("NetworkError", `Could not reach the server: ${msg}`);
+    }
     const text = await res.text();
-    const data = text ? JSON.parse(text) : null;
+    let data: unknown = null;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        // Non-JSON body (proxy error page, truncated stream): still a typed error,
+        // never a raw SyntaxError escaping to the UI (FR-107).
+        throw new ApiError(
+          res.ok ? "BadResponse" : "HttpError",
+          res.ok ? "Server returned invalid JSON" : `HTTP ${res.status}`,
+        );
+      }
+    }
     if (!res.ok) {
-      const env = data?.error;
+      const env = (data as { error?: { type?: string; message?: string } } | null)?.error;
       throw new ApiError(env?.type ?? "HttpError", env?.message ?? `HTTP ${res.status}`);
     }
     return data as T;
@@ -729,9 +749,9 @@ export function createClient(opts: ClientOptions = {}) {
     );
   }
 
-  function getGeoWeights(params: GeoWeightsParams): Promise<GeoWeightsData> {
+  function getGeoWeights(params: GeoWeightsParams, signal?: AbortSignal): Promise<GeoWeightsData> {
     const { matrix, layer, weights_token } = params;
-    return request("/api/geo/weights" + qs({ weights_token, layer, matrix }));
+    return request("/api/geo/weights" + qs({ weights_token, layer, matrix }), { signal });
   }
 
   function postGeoWeights(body: GeoWeightsPostBody): Promise<GeoWeightsPostResult> {
@@ -763,9 +783,14 @@ export function createClient(opts: ClientOptions = {}) {
     return request("/api/arch/graph" + qs({ model_id }));
   }
 
-  function getArchWeights(params: ArchWeightsParams): Promise<ArchWeightsData> {
+  function getArchWeights(
+    params: ArchWeightsParams,
+    signal?: AbortSignal,
+  ): Promise<ArchWeightsData> {
     const { model_id, param, r0, r1, c0, c1, max_cells } = params;
-    return request("/api/arch/weights" + qs({ model_id, param, r0, r1, c0, c1, max_cells }));
+    return request("/api/arch/weights" + qs({ model_id, param, r0, r1, c0, c1, max_cells }), {
+      signal,
+    });
   }
 
   function getArchTrace(params: ArchTraceParams, signal?: AbortSignal): Promise<ArchTrace> {
@@ -822,8 +847,10 @@ export const client = createClient();
 // ---------------------------------------------------------------------------
 // Trailing-edge debounce for interactive controls (FR-108 cancel-and-restart):
 // the wrapped fn runs once, `ms` after the last invocation, with the last args;
-// `cancel()` drops any pending call (e.g. on component teardown, or right before
-// aborting the in-flight request it would have replaced).
+// `cancel()` drops any PENDING (not-yet-fired) call — it does NOT abort a fetch
+// that already started. Callers implementing cancel-and-restart (FR-108) must pair
+// this with an AbortController: abort the previous request's controller when the
+// debounced fn fires, and call `cancel()` + `controller.abort()` on teardown.
 // ---------------------------------------------------------------------------
 
 export interface DebouncedFn<A extends unknown[]> {

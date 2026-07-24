@@ -16,7 +16,7 @@ import torch
 from ..config import ARCH_MAX_NEW_TOKENS
 from ..errors import InvalidParamError
 from ..models.loader import LoadedModel, load_model
-from .tracing import encode_prompt
+from .tracing import _TRACE_LOCK, encode_prompt
 
 
 def _eos_ids(lm: LoadedModel) -> set[int]:
@@ -61,7 +61,10 @@ def generate(
     finish_reason = "length"
     current = torch.tensor([ids], dtype=torch.long, device=lm.device)
     past = None
-    with torch.no_grad():
+    # Serialize with tracing: a trace installs global forward hooks on this SAME cached
+    # model instance, so an unlocked concurrent generate would fire the tracer's hooks
+    # from another thread and corrupt its event stream.
+    with _TRACE_LOCK, torch.no_grad():
         for _ in range(max_new_tokens):
             out = lm.model(input_ids=current, past_key_values=past, use_cache=True)
             past = out.past_key_values

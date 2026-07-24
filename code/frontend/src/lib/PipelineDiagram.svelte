@@ -1,7 +1,10 @@
 <script lang="ts">
-  import { untrack } from "svelte";
+  import { onDestroy, untrack } from "svelte";
   import type { ArchNode, ArchEdge } from "./dataClient";
   import { showTip, hideTip } from "./tooltip";
+
+  // The tooltip is a global singleton — clear it if this component unmounts mid-hover.
+  onDestroy(hideTip);
 
   // Generic SVG diagram of an /api/arch/graph architecture graph. Vertical flow
   // grouped by node.group (stem → layer_0..layer_{n-1} → head). Every traced op is
@@ -48,7 +51,8 @@
   // Reset overrides when a different graph arrives.
   let lastGraphKey = "";
   $effect(() => {
-    const key = nodes.length + ":" + (nodes[0]?.id ?? "") + ":" + (nodes[nodes.length - 1]?.id ?? "");
+    // Full id list: count+endpoints alone can collide for same-architecture models.
+    const key = nodes.map((n) => n.id).join("|");
     if (key !== lastGraphKey) {
       lastGraphKey = key;
       untrack(() => {

@@ -23,7 +23,7 @@ import torch
 
 from ..cache.keys import make_cache_key
 from ..cache.store import CacheStore
-from ..errors import InvalidParamError, NotFoundError, UnsupportedModelError
+from ..errors import ComputeError, InvalidParamError, NotFoundError, UnsupportedModelError
 from .config import (
     EOS_ID,
     FINETUNE_DEFAULT_LR,
@@ -53,10 +53,14 @@ def load_text_from_hf(
         raise UnsupportedModelError(f"the `datasets` package is unavailable: {exc}")
     try:
         stream = load_dataset(dataset_id, split=split, streaming=True)
-    except Exception as exc:  # noqa: BLE001 — any load failure means "unusable id"
+    except (FileNotFoundError, ValueError) as exc:  # unknown id / bad split / bad config
         raise UnsupportedModelError(
             f"HuggingFace dataset {dataset_id!r} (split {split!r}) could not be loaded: {exc}"
         )
+    except Exception as exc:  # noqa: BLE001 — hub/network trouble is NOT a bad id
+        raise ComputeError(
+            f"Could not reach HuggingFace to stream dataset {dataset_id!r}: {exc}"
+        ) from exc
     texts: list[str] = []
     text_field: str | None = None
     try:

@@ -343,6 +343,9 @@ class _Tracer:
         # Force eager attention during the traced pass: it exposes the softmax to the
         # function mode and (unlike v5 SDPA) supports output_attentions=True, so the
         # graph and the trace see the same per-layer attention_softmax node.
+        # Sentinel (not None): a config whose value is genuinely None must be restored
+        # to None, not left permanently "eager" on the shared cached model.
+        self._had_attn_impl = hasattr(self.model.config, "_attn_implementation")
         self._prev_attn_impl = getattr(self.model.config, "_attn_implementation", None)
         self.model.config._attn_implementation = "eager"
         self._install_hooks()
@@ -354,8 +357,13 @@ class _Tracer:
             handle.remove()
         for mod, fn in self._rope_patches:
             mod.apply_rotary_pos_emb = fn
-        if self._prev_attn_impl is not None:
+        if self._had_attn_impl:
             self.model.config._attn_implementation = self._prev_attn_impl
+        else:
+            try:
+                delattr(self.model.config, "_attn_implementation")
+            except AttributeError:
+                pass
         self.stack.clear()
 
 

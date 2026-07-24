@@ -9,6 +9,7 @@ and raises ``ModelTooLargeError`` (HTTP 422) when the count exceeds
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from huggingface_hub import get_safetensors_metadata
@@ -17,6 +18,8 @@ from transformers import AutoConfig
 from ..config import ARCH_MAX_PARAMS
 from ..errors import ModelTooLargeError, UnsupportedModelError
 from ..models.registry import normalize_model_id
+
+logger = logging.getLogger(__name__)
 
 
 def estimate_params_from_config(config: Any) -> int:
@@ -62,8 +65,11 @@ def check_model_size(model_id: str) -> dict[str, Any]:
         if counts:
             total = int(sum(counts.values()))
             source = "safetensors_metadata"
-    except Exception:
-        total = None  # no safetensors metadata (or hub hiccup) -> config estimate
+    except Exception as exc:
+        # No safetensors metadata (or hub hiccup) -> config estimate. Log rather than
+        # swallow: FR-107 depends on this gate, so the degraded path must be visible.
+        logger.warning("size gate: safetensors metadata unavailable for %s: %s", mid, exc)
+        total = None
 
     if total is None:
         try:
@@ -77,7 +83,13 @@ def check_model_size(model_id: str) -> dict[str, Any]:
         total = estimate_params_from_config(config)
         source = "config_estimate"
 
-    if total > ARCH_MAX_PARAMS:
+    # The config estimate can undercount (multimodal towers, exotic blocks); give it a
+    # 20% safety margin so an undercounted giant can't slip under the ceiling (FR-107).
+    effective_ceiling = (
+        ARCH_MAX_PARAMS if source == "safetensors_metadata" else ARCH_MAX_PARAMS * 0.8
+    )
+
+    if total > effective_ceiling:
         raise ModelTooLargeError(
             f"Model '{mid}' has ~{total:,} parameters, over the Architecture Explorer "
             f"ceiling of {ARCH_MAX_PARAMS:,}. Choose a smaller open-weights model.",

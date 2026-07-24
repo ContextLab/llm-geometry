@@ -318,3 +318,76 @@ describe("debounced helper", () => {
     }
   });
 });
+
+describe("explorer client — hardening (red-team round 1 fixes)", () => {
+  it("geoFinetuneFile posts multipart FormData with the file and coerced options", async () => {
+    let captured: RequestInit | undefined;
+    const c = createClient({
+      fetchImpl: async (_url, init) => {
+        captured = init;
+        return jsonResponse({ job_id: "j1", ready: false }, 202);
+      },
+    });
+    const blob = new Blob(["once upon a time"], { type: "text/plain" });
+    await c.geoFinetuneFile(blob, "story.txt", { steps: 50, base: "learned" });
+    expect(captured?.body).toBeInstanceOf(FormData);
+    const form = captured!.body as FormData;
+    expect((form.get("file") as File).name).toBe("story.txt");
+    expect(form.get("steps")).toBe("50");
+    expect(form.get("base")).toBe("learned");
+    // content-type left to the runtime so the multipart boundary is set correctly
+    expect((captured!.headers as Record<string, string> | undefined)?.["content-type"]).toBeUndefined();
+  });
+
+  it("wraps a non-JSON error body as ApiError (no raw SyntaxError escapes)", async () => {
+    const c = createClient({
+      fetchImpl: async () => new Response("Internal Server Error", { status: 500 }),
+    });
+    await expect(c.getGeoSpec()).rejects.toMatchObject({
+      name: "ApiError",
+      type: "HttpError",
+      message: "HTTP 500",
+    });
+  });
+
+  it("wraps a non-JSON 200 body as ApiError BadResponse", async () => {
+    const c = createClient({ fetchImpl: async () => new Response("<html>", { status: 200 }) });
+    await expect(c.getGeoSpec()).rejects.toMatchObject({ type: "BadResponse" });
+  });
+
+  it("wraps network failures as ApiError NetworkError", async () => {
+    const c = createClient({
+      fetchImpl: async () => {
+        throw new TypeError("Failed to fetch");
+      },
+    });
+    await expect(c.getGeoSpec()).rejects.toMatchObject({
+      name: "ApiError",
+      type: "NetworkError",
+    });
+  });
+
+  it("still lets AbortError through untouched (cancellation is not an API failure)", async () => {
+    const c = createClient({
+      fetchImpl: async () => {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      },
+    });
+    await expect(c.getGeoTrace("hi")).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("getArchWeights and getGeoWeights accept an AbortSignal", async () => {
+    const seen: Array<AbortSignal | null | undefined> = [];
+    const c = createClient({
+      fetchImpl: async (_url, init) => {
+        seen.push(init?.signal);
+        return jsonResponse({});
+      },
+    });
+    const ctrl = new AbortController();
+    await c.getArchWeights({ model_id: "m", param: "p" }, ctrl.signal);
+    await c.getGeoWeights({ matrix: "W_Q", layer: 0 }, ctrl.signal);
+    expect(seen[0]).toBe(ctrl.signal);
+    expect(seen[1]).toBe(ctrl.signal);
+  });
+});

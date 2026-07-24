@@ -197,6 +197,30 @@ def _build(lm: LoadedModel) -> dict[str, Any]:
     if len(covered) != len(set(covered)):
         raise ComputeError(f"Traced graph for '{lm.model_id}' assigned a parameter twice.")
 
+    # Functional completeness (FR-101): parameter coverage alone can't catch a missed
+    # softmax/residual — a degraded-but-plausible graph would render fine. For the
+    # decoder-only models this feature targets, every decoder layer must expose the
+    # attention softmax and both residual adds; fail loud rather than draw an
+    # incomplete architecture.
+    by_layer: dict[int, dict[str, int]] = {}
+    for node in nodes:
+        if node["layer"] is not None and node["op"] == "functional":
+            counts = by_layer.setdefault(int(node["layer"]), {})
+            counts[node["kind"]] = counts.get(node["kind"], 0) + 1
+    n_layers_cfg = int(getattr(lm.model.config, "num_hidden_layers", lm.num_layers))
+    bad = [
+        k
+        for k in range(n_layers_cfg)
+        if by_layer.get(k, {}).get("attention_softmax", 0) < 1
+        or by_layer.get(k, {}).get("residual_add", 0) < 2
+    ]
+    if bad:
+        raise ComputeError(
+            f"Traced graph for '{lm.model_id}' is missing functional steps "
+            f"(attention_softmax/residual_add) in decoder layer(s) {bad[:5]} — "
+            "the 1-to-1 visualization guarantee would be violated."
+        )
+
     config = lm.model.config
     heads = int(getattr(config, "num_attention_heads", 0) or 0)
     meta = {
