@@ -147,6 +147,7 @@
       })
       .catch((e) => {
         if (ctl !== fieldCtl || isAbort(e)) return;
+        if (healEvictedToken(e)) return; // token cleared -> effect refires on learned
         fieldError = friendly(e);
         fieldLoading = false;
       });
@@ -166,6 +167,7 @@
       })
       .catch((e) => {
         if (ctl !== traceCtl || isAbort(e)) return;
+        if (healEvictedToken(e)) return;
         trace = null;
         traceError = friendly(e);
       });
@@ -224,6 +226,17 @@
 
   function isAbort(e: unknown): boolean {
     return e instanceof DOMException && e.name === "AbortError";
+  }
+
+  // A sessionStorage-restored weights_token can outlive its server-side artifact
+  // (LRU eviction). Rather than wedging the view in a retry loop against a dead
+  // token, drop it — the field/trace effects re-fire against the learned weights.
+  function healEvictedToken(e: unknown): boolean {
+    if (e instanceof ApiError && e.type === "NotFoundError" && $geoWeightsToken) {
+      geoWeightsToken.set(null);
+      return true;
+    }
+    return false;
   }
 
   function friendly(e: unknown): string {

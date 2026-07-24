@@ -499,3 +499,21 @@ def test_finetune_unusable_hf_dataset_422():
     )
     assert resp.status_code == 422
     assert resp.json()["error"]["type"] == "UnsupportedModelError"
+
+
+def test_framework_validation_failures_use_the_error_envelope():
+    """Malformed typed params must return the contract envelope, not Starlette's
+    {"detail": [...]} shape (red-team round 2, finding 1)."""
+    # missing required query param
+    r = client.get("/api/geo/weights")
+    assert r.status_code == 400
+    env = r.json()["error"]
+    assert env["type"] == "InvalidParamError" and "matrix" in env["message"]
+    # un-parseable typed param
+    r = client.get("/api/geo/vector_field", params={"temperature": "abc"})
+    assert r.status_code == 400
+    assert r.json()["error"]["type"] == "InvalidParamError"
+    # arch router goes through the same app-level handler
+    r = client.get("/api/arch/weights", params={"model_id": "gpt2", "r1": "abc"})
+    assert r.status_code == 400
+    assert r.json()["error"]["type"] == "InvalidParamError"

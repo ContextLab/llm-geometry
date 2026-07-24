@@ -42,7 +42,10 @@ async def job_event_response(job_id: str) -> EventSourceResponse:
                     # checkpoint_id / weights_token) rides along on the done event.
                     done_data: dict = {"cache_key": job.cache_key}
                     if job.result:
-                        done_data.update(job.result)
+                        # Same numeric encoding as the HTTP path (6 significant digits)
+                        # so the two delivery routes agree on e.g. loss_before.
+                        for k, v in job.result.items():
+                            done_data[k] = float(f"{v:.6g}") if isinstance(v, float) else v
                     yield {"event": "done", "data": json.dumps(done_data)}
                     return
                 if job.status == "error":

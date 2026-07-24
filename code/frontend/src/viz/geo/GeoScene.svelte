@@ -103,6 +103,12 @@
     }
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(w, HEIGHT);
+    // If the browser reclaims our context anyway (limit pressure), surface the
+    // designed error instead of a silently blank canvas.
+    renderer.domElement.addEventListener("webglcontextlost", (e) => {
+      e.preventDefault();
+      webglError = "The 3-D view lost its graphics context — reload the page to restore it.";
+    });
     containerEl.appendChild(renderer.domElement);
 
     scene.add(new THREE.AmbientLight(0x6677aa, 1.0));
@@ -490,6 +496,9 @@
     if (renderer) {
       renderer.domElement.remove();
       renderer.dispose();
+      // dispose() alone keeps the GL context alive until GC — repeated tab switches
+      // then exhaust the browser's context limit and silently blank the oldest canvas.
+      renderer.forceContextLoss();
     }
     renderer = scene = camera = controls = points = shaft = head = fShaft = fHead = path = undefined;
   }

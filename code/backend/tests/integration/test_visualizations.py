@@ -208,7 +208,8 @@ def test_manifold_surface_field_and_width():
     assert len(m["surface_src_strs"]) == S and len(m["surface_dst_strs"]) == S
     assert len(m["surface_probs"]) == S and all(0.0 <= q <= 1.0 for q in m["surface_probs"])
     # a smaller RBF width makes a TIGHTER warp (fewer vertices pushed far out) than a broad one
-    far = lambda d: int((np.linalg.norm(d["arrays"]["vertices"], axis=1) > 1.25).sum())
+    def far(d):
+        return int((np.linalg.norm(d["arrays"]["vertices"], axis=1) > 1.25).sum())
     narrow = get_or_compute_sync("manifold", "distilgpt2", {"reference_set_size": 300, "seed": 0, "width": 0.08}, {"prefix_text": "The capital of France is"})
     broad = get_or_compute_sync("manifold", "distilgpt2", {"reference_set_size": 300, "seed": 0, "width": 0.5}, {"prefix_text": "The capital of France is"})
     assert far(narrow) < far(broad)  # width clearly changes the surface

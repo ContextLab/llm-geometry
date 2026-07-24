@@ -19,12 +19,14 @@ from ..cache.store import CacheStore
 from ..config import SCHEMA_VERSION
 from ..errors import InvalidParamError, LLMGeometryError
 from ..jobs.registry import registry
-from .config import SEED
+from ..torchstate import TORCH_GLOBAL_LOCK
+from .config import N_LAYERS, SEED
 from .finetune import finetune, finetune_cache_key
 from .tokenizer import get_tokenizer
 from .train import canonical_cache_key, resolve_weight_set, train_canonical
 from .weights import (
     _ARTIFACT_PREFIX as _WEIGHTS_PREFIX,  # stable on-disk prefix ("geo-weights")
+    EDITABLE_MATRICES,
     build_weight_set,
     save_weight_set,
     weights_token,
@@ -80,11 +82,18 @@ def _run_train(job_id: str, seed: int) -> None:
         registry.update(job_id, progress=progress, message=message)
 
     try:
-        meta = train_canonical(progress_cb=cb, seed=seed)
+        # deterministic_torch flips process-global torch state (determinism flag +
+        # RNG); serialize with arch tracing/generation on the shared lock.
+        with TORCH_GLOBAL_LOCK:
+            meta = train_canonical(progress_cb=cb, seed=seed)
         registry.finish(job_id, result={"checkpoint_id": meta["checkpoint_id"]})
     except Exception as exc:  # noqa: BLE001 — surfaced verbatim via the job error event
         # Contract: training failures surface as TrainingFailedError (500 via SSE).
         registry.fail(job_id, {"type": "TrainingFailedError", "message": str(exc)})
+    finally:
+        with _jobs_lock:  # prune the spec-reporting map once the job is terminal
+            if _jobs_by_key.get(canonical_cache_key(seed)[0]) == job_id:
+                _jobs_by_key.pop(canonical_cache_key(seed)[0], None)
 
 
 # -- fine-tuning -------------------------------------------------------------------------
@@ -136,7 +145,9 @@ def _run_finetune(job_id: str, text: str, base: str, steps: int, lr: float, seed
         registry.update(job_id, progress=progress, message=message)
 
     try:
-        result = finetune(base=base, text=text, steps=steps, lr=lr, seed=seed, progress_cb=cb)
+        # Same global-torch-state serialization as canonical training.
+        with TORCH_GLOBAL_LOCK:
+            result = finetune(base=base, text=text, steps=steps, lr=lr, seed=seed, progress_cb=cb)
         registry.finish(
             job_id,
             result={
@@ -186,12 +197,25 @@ def _matrix_key(layer: int | None, matrix: str) -> str:
     return "embedding" if matrix == "embedding" else f"layers.{int(layer)}.{matrix}"
 
 
+def _all_matrix_keys() -> list[str]:
+    keys = ["embedding"]
+    for layer in range(N_LAYERS):
+        keys.extend(f"layers.{layer}.{m}" for m in EDITABLE_MATRICES if m != "embedding")
+    return keys
+
+
 def _source_map(token_or_learned: str, store: CacheStore) -> dict[str, str]:
     if token_or_learned == "learned":
         return {}
     entry = store.get(f"{_SOURCES_PREFIX}-{token_or_learned}")
     if entry is not None:
         return dict(entry["meta"].get("sources", {}))
+    # No sidecar (fine-tuned base, or evicted): every matrix inherited the base's
+    # set-level provenance — seed the map from it so edits ON TOP of a fine-tune
+    # don't mislabel untouched-but-fine-tuned matrices as "learned".
+    artifact = store.get(f"{_WEIGHTS_PREFIX}-{token_or_learned}")
+    if artifact is not None and artifact["meta"].get("source") != "learned":
+        return {k: "edited" for k in _all_matrix_keys()}
     return {}
 
 

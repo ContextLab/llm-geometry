@@ -8,6 +8,7 @@ serves the built Svelte bundle in production when it exists.
 from __future__ import annotations
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -33,6 +34,18 @@ def create_app() -> FastAPI:
     @app.exception_handler(LLMGeometryError)
     async def _handle_llm_error(_request: Request, exc: LLMGeometryError) -> JSONResponse:
         return JSONResponse(status_code=exc.http_status, content=exc.to_envelope())
+
+    @app.exception_handler(RequestValidationError)
+    async def _handle_validation(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        # Malformed/missing typed params must use the SAME envelope as every other
+        # failure (contract: one error shape) — not Starlette's {"detail": [...]}.
+        first = exc.errors()[0] if exc.errors() else {}
+        loc = ".".join(str(p) for p in first.get("loc", []) if p != "body")
+        msg = f"{loc}: {first.get('msg', 'invalid request')}" if loc else "invalid request"
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"type": "InvalidParamError", "message": msg, "detail": {}}},
+        )
 
     @app.exception_handler(Exception)
     async def _handle_unexpected(_request: Request, exc: Exception) -> JSONResponse:

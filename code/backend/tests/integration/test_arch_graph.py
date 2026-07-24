@@ -96,3 +96,54 @@ def test_node_ids_stable_across_builds(graph_lm):
     assert [n["kind"] for n in fresh["nodes"]] == [n["kind"] for n in graph["nodes"]]
     cached = build_graph(lm.model_id)  # cache hit path
     assert [n["id"] for n in cached["nodes"]] == [n["id"] for n in graph["nodes"]]
+
+
+# --- GPT-2 family: Conv1D projections, learned positions (no rope), `h.<k>` blocks ---
+
+GPT2_MODEL = "gpt2"
+
+
+@pytest.fixture(scope="module")
+def gpt2_graph_lm():
+    return build_graph(GPT2_MODEL), load_model(GPT2_MODEL)
+
+
+def test_gpt2_functional_steps_complete_per_layer(gpt2_graph_lm):
+    """Every ``transformer.h.<k>`` block exposes its softmax and both residual adds."""
+    graph, _ = gpt2_graph_lm
+    by_layer: dict[int, Counter] = {}
+    for node in graph["nodes"]:
+        if node["layer"] is not None and node["op"] == "functional":
+            by_layer.setdefault(node["layer"], Counter())[node["kind"]] += 1
+    assert sorted(by_layer) == list(range(graph["meta"]["n_layers"]))
+    for counts in by_layer.values():
+        assert counts["attention_softmax"] >= 1
+        assert counts["residual_add"] >= 2
+
+
+def test_gpt2_has_no_rope_nodes(gpt2_graph_lm):
+    """GPT-2 uses learned positions — a rope node would be a fabricated step."""
+    graph, _ = gpt2_graph_lm
+    assert not any(n["kind"] == "rope" for n in graph["nodes"])
+    wpe = next(n for n in graph["nodes"] if n["id"] == "transformer.wpe")
+    assert wpe["kind"] == "embedding"
+
+
+def test_gpt2_conv1d_projections_are_linear_nodes(gpt2_graph_lm):
+    """Conv1D (c_attn/c_proj/c_fc) classifies as ``linear``, one node per module."""
+    graph, _ = gpt2_graph_lm
+    linear_ids = [n["id"] for n in graph["nodes"] if n["kind"] == "linear"]
+    assert len(linear_ids) == 4 * graph["meta"]["n_layers"]
+    assert "transformer.h.0.attn.c_attn" in linear_ids
+    assert "transformer.h.0.mlp.c_fc" in linear_ids
+
+
+def test_gpt2_every_parameter_owned_and_wte_lm_head_tied(gpt2_graph_lm):
+    """Full parameter coverage; gpt2's tied wte/lm_head aliased once (FR-102)."""
+    graph, lm = gpt2_graph_lm
+    all_params = sorted(name for name, _ in lm.model.named_parameters(remove_duplicate=False))
+    covered = sorted(p["param_path"] for n in graph["nodes"] for p in n["params"])
+    assert covered == all_params
+    params = {p["param_path"]: p for n in graph["nodes"] for p in n["params"]}
+    assert params["transformer.wte.weight"]["tied_to"] is None  # canonical owner
+    assert params["lm_head.weight"]["tied_to"] == "transformer.wte.weight"

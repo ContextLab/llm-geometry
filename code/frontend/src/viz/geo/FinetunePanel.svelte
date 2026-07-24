@@ -31,9 +31,6 @@
     file = input.files?.[0] ?? null;
   }
 
-  // The shared subscribeProgress drops the SSE done-event payload, so after the job
-  // finishes we re-submit the identical request: the content-hash cache turns it into
-  // an instant 200 carrying the minted weights_token + before/after losses.
   function submitOnce(): Promise<GeoFinetuneResult> {
     const base = $geoWeightsToken ?? "learned";
     if (source === "file") {
@@ -68,16 +65,21 @@
           progress = p;
           progressMsg = m;
         },
-        onDone: () => {
-          void (async () => {
-            try {
-              const cached = await submitOnce(); // content-hash cache hit -> token + losses
-              if (!cached.ready) throw new ApiError("ComputeError", "Fine-tune finished but the result was not cached.");
-              finish(cached);
-            } catch (e) {
-              fail(e);
-            }
-          })();
+        onDone: (data) => {
+          // The done event carries the minted token + losses directly — never
+          // re-submit (a mid-run weight edit would change `base`, miss the cache,
+          // and report a false failure for a SUCCESSFUL fine-tune).
+          const d = data as unknown as GeoFinetuneResult | undefined;
+          if (d && typeof d.weights_token === "string") {
+            finish({ ...d, ready: true });
+          } else {
+            fail(
+              new ApiError(
+                "ComputeError",
+                "Fine-tune finished but the completion event carried no result.",
+              ),
+            );
+          }
         },
         onError: (_type, message) => fail(new ApiError(_type, message)),
       });

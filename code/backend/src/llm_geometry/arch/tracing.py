@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import re
 import sys
-import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,7 +30,12 @@ import torch
 from torch import nn
 from torch.overrides import TorchFunctionMode
 
+from ..torchstate import TORCH_GLOBAL_LOCK
+
 _LAYER_RE = re.compile(r"(?:^|\.)(?:layers|h|blocks)\.(\d+)(?:\.|$)")
+# The decoder-block module scope itself (`model.layers.<k>` for Llama/Qwen,
+# `transformer.h.<k>` for GPT-2) — where the two residual-stream adds execute.
+_BLOCK_SCOPE_RE = re.compile(r"(?:^|\.)(?:layers|h|blocks)\.\d+$")
 
 _ACTIVATION_TYPES = (nn.SiLU, nn.GELU, nn.ReLU, nn.Tanh, nn.Sigmoid, nn.LeakyReLU, nn.ELU, nn.Mish)
 _ADD_NAMES = {"add", "add_", "__add__", "__iadd__", "__radd__"}
@@ -53,11 +57,34 @@ _LEAF_LABELS = {
     "norm": "final norm",
     "act_fn": "MLP activation",
     "rotary_emb": "rotary position table (cos/sin)",
+    # GPT-2 family (Conv1D projections, learned positions, no rope)
+    "wte": "token embedding",
+    "wpe": "position embedding",
+    "c_attn": "QKV projection (fused)",
+    "c_proj": "output projection",
+    "c_fc": "MLP up projection",
+    "ln_1": "pre-attention norm",
+    "ln_2": "pre-MLP norm",
+    "ln_f": "final norm",
+    "act": "MLP activation",
 }
 
+
+def _is_attention_scope(owner: str, owner_cls: str) -> bool:
+    """True when a functional softmax ran inside an attention module.
+
+    Matched on the owning module's *class* name (``LlamaAttention``,
+    ``GPT2Attention``, …) with the dotted-path spelling (``self_attn``, ``attn``)
+    kept as a fallback for families whose class names don't say "attention".
+    """
+    cls = owner_cls.lower()
+    return "attention" in cls or "attn" in cls or "attn" in owner or "attention" in owner
+
+
 # Tracing mutates process-global state (hooks, a monkeypatched rope function, the
-# model's attention-implementation flag) — serialize traced forwards.
-_TRACE_LOCK = threading.Lock()
+# model's attention-implementation flag) — serialize traced forwards, sharing the
+# lock with geo training/fine-tuning (which flips global determinism + RNG state).
+_TRACE_LOCK = TORCH_GLOBAL_LOCK
 
 
 @dataclass
@@ -170,6 +197,7 @@ class _Tracer:
         self.keepalive: list[torch.Tensor] = []  # pin outputs so id()s stay unique
         self._counters: dict[tuple[str, str], int] = {}
         self._activation_paths: set[str] = set()
+        self._module_classes: dict[str, str] = {}
         self._hooks: list[Any] = []
         self._rope_patches: list[tuple[Any, Any]] = []
         self._prev_attn_impl: str | None = None
@@ -226,6 +254,7 @@ class _Tracer:
     def _install_hooks(self) -> None:
         for name, module in self.model.named_modules():
             is_leaf = next(module.children(), None) is None
+            self._module_classes[name] = type(module).__name__
             if is_leaf and classify_module(module, self.lm_head_module) == "activation":
                 self._activation_paths.add(name)
 
@@ -301,7 +330,7 @@ class _Tracer:
                 name = getattr(func, "__name__", "")
                 if name in _SOFTMAX_NAMES:
                     owner = tracer.stack[-1] if tracer.stack else ""
-                    if "attn" in owner or "attention" in owner:
+                    if _is_attention_scope(owner, tracer._module_classes.get(owner, "")):
                         tracer._functional(
                             "attention_softmax",
                             "attention softmax",
@@ -316,8 +345,7 @@ class _Tracer:
                         and ts[0].shape == ts[1].shape
                         and ts[0].dim() == 3
                         and ts[0].shape[-1] == tracer.hidden_size
-                        and _LAYER_RE.search(owner + ".")
-                        and owner.rsplit(".", 2)[-2:-1] == ["layers"]
+                        and _BLOCK_SCOPE_RE.search(owner)
                     ):
                         tracer._functional(
                             "residual_add", "residual add", ts, _flatten_tensors(out)

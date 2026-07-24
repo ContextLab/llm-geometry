@@ -16,32 +16,18 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
-import numpy as np
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 from ..arch import build_graph, check_model_size, generate, trace_forward, weight_window
 from ..config import ARCH_DEFAULT_MAX_CONTEXT, ARCH_WEIGHTS_MAX_CELLS
+from .encoding import jsonable_6sig
 
 router = APIRouter(prefix="/arch", tags=["arch"])
 
 
-def _sig6(value: Any) -> Any:
-    """Contract-wide array encoding: numpy -> plain nested lists, every float rounded
-    to 6 significant digits (``%.6g``); bools/ints/strings pass through unchanged."""
-    if isinstance(value, (bool, np.bool_)):  # before int: bool is a subclass of int
-        return bool(value)
-    if isinstance(value, (float, np.floating)):
-        return float(f"{float(value):.6g}")
-    if isinstance(value, (int, np.integer)):
-        return int(value)
-    if isinstance(value, np.ndarray):
-        return _sig6(value.tolist())
-    if isinstance(value, dict):
-        return {k: _sig6(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_sig6(v) for v in value]
-    return value
+# Contract-wide array encoding — shared helper (red-team round 2 NIT-6).
+_sig6 = jsonable_6sig
 
 
 @lru_cache(maxsize=64)

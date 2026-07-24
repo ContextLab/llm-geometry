@@ -40,35 +40,14 @@ from ..geo.model import model_from_weight_set
 from ..geo.tokenizer import get_tokenizer
 from ..geo.train import canonical_cache_key, resolve_weight_set
 from ..geo.weights import EDITABLE_MATRICES
+from .encoding import jsonable_6sig
 
 router = APIRouter(prefix="/geo", tags=["geo"])
 
 
-# -- contract-wide array/number encoding -------------------------------------------------
+# -- contract-wide array/number encoding (shared helper; red-team round 2 NIT-6) ---------
 
-
-def _round6(x: float) -> float:
-    """Round to 6 significant digits (contract-wide numeric encoding)."""
-    return float(f"{x:.6g}")
-
-
-def _jsonable(value: Any) -> Any:
-    """Coerce to plain JSON: ndarrays -> nested lists, floats -> 6 significant digits."""
-    if isinstance(value, np.ndarray):
-        return _jsonable(value.tolist())
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, np.bool_):
-        return bool(value)
-    if isinstance(value, (float, np.floating)):
-        return _round6(float(value))
-    if isinstance(value, (int, np.integer)):
-        return int(value)
-    if isinstance(value, dict):
-        return {k: _jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(v) for v in value]
-    return value
+_jsonable = jsonable_6sig
 
 
 # -- GET /api/geo/spec -------------------------------------------------------------------

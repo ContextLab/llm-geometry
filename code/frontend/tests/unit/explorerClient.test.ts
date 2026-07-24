@@ -339,15 +339,19 @@ describe("explorer client — hardening (red-team round 1 fixes)", () => {
     expect((captured!.headers as Record<string, string> | undefined)?.["content-type"]).toBeUndefined();
   });
 
-  it("wraps a non-JSON error body as ApiError (no raw SyntaxError escapes)", async () => {
+  it("maps a non-JSON 5xx (proxy with backend down) to NetworkError", async () => {
     const c = createClient({
       fetchImpl: async () => new Response("Internal Server Error", { status: 500 }),
     });
     await expect(c.getGeoSpec()).rejects.toMatchObject({
       name: "ApiError",
-      type: "HttpError",
-      message: "HTTP 500",
+      type: "NetworkError",
     });
+  });
+
+  it("keeps non-5xx non-JSON errors as HttpError", async () => {
+    const c = createClient({ fetchImpl: async () => new Response("nope", { status: 418 }) });
+    await expect(c.getGeoSpec()).rejects.toMatchObject({ type: "HttpError", message: "HTTP 418" });
   });
 
   it("wraps a non-JSON 200 body as ApiError BadResponse", async () => {

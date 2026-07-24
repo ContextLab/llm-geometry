@@ -84,3 +84,13 @@ def test_logits_topk_are_real_probabilities(traced):
     assert len(topk["ids"]) == len(topk["texts"]) == len(topk["probs"]) == 10
     assert all(0 < p <= 1 for p in topk["probs"])
     assert topk["probs"] == sorted(topk["probs"], reverse=True)
+
+
+def test_gpt2_trace_covers_graph_nodes():
+    """GPT-2 smoke check: trace and graph share one node-id universe (SC-102)."""
+    trace = trace_forward("gpt2", PROMPT, max_context=MAX_CONTEXT)
+    graph = build_graph("gpt2")
+    assert trace["chat_template_used"] is False  # base gpt2 has no chat template
+    activation_ids = [a["node_id"] for a in trace["node_activations"]]
+    assert len(activation_ids) == len(set(activation_ids))  # one entry per node
+    assert set(activation_ids) == {n["id"] for n in graph["nodes"]}

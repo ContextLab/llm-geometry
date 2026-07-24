@@ -539,7 +539,13 @@ export function createClient(opts: ClientOptions = {}) {
         data = JSON.parse(text);
       } catch {
         // Non-JSON body (proxy error page, truncated stream): still a typed error,
-        // never a raw SyntaxError escaping to the UI (FR-107).
+        // never a raw SyntaxError escaping to the UI (FR-107). The backend's own
+        // errors ALWAYS carry the JSON envelope, so a non-JSON 5xx means the request
+        // never reached it (dev proxy turns connection-refused into a bare 500) —
+        // surface that as NetworkError so views show the "backend unreachable" copy.
+        if (!res.ok && [500, 502, 503, 504].includes(res.status)) {
+          throw new ApiError("NetworkError", "Could not reach the backend server");
+        }
         throw new ApiError(
           res.ok ? "BadResponse" : "HttpError",
           res.ok ? "Server returned invalid JSON" : `HTTP ${res.status}`,
