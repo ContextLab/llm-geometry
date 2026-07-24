@@ -1,7 +1,9 @@
 <script lang="ts">
   import * as d3 from "d3";
   import { onDestroy } from "svelte";
+  import { get } from "svelte/store";
   import { modelId, prefixText, temperature, nParticles, nSteps, responseText, refreshNonce } from "../lib/stores";
+  import { capLinkWidth, LINK_WIDTH_CAP, plural } from "../lib/vizMath";
   import { client, type SankeyData, type SankeyNode, type SankeyLink, type SankeyHighlight } from "../lib/dataClient";
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
@@ -17,6 +19,7 @@
   let highlight = $state<SankeyHighlight[]>([]); // the user's response path (separate cheap fetch)
   let highlightStrs: Record<string, string> = {};
   let svgEl: SVGSVGElement | undefined;
+  let stageEl: HTMLDivElement | undefined;
 
   const SEED = 0;
   let debounce: ReturnType<typeof setTimeout> | undefined;
@@ -27,6 +30,19 @@
   let maxPosNow = $state(0);
   let playing = $state(false);
   let playRaf = 0;
+  let resizeObs: ResizeObserver | undefined;
+  let lastW = 0;
+
+  // Transitional coherence (redteam-sankey S2): the swarm compute is slow (15–75 s) while
+  // the highlight refetch is ~instant, so a NEW highlight can land while the OLD swarm is
+  // still drawn. Each carries the params it was computed from; the highlight is only
+  // integrated (rows, axis extent, gold path, caption) when they MATCH the drawn swarm.
+  const keyOf = (m: string, pfx: string, temp: number, ns: number) => JSON.stringify([m, pfx, temp, ns]);
+  let dataKey = $state("");   // params of the swarm currently DRAWN
+  let hlKey = $state("");     // params the current highlight belongs to
+  let hlError = $state(false); // surface highlight-fetch failures instead of silently dropping gold (S6)
+  let extraOmitted = $state(0); // response-only rows hidden by the cap (S3)
+  const MAX_EXTRA_ROWS = 8;
 
   // The SWARM is prompt-conditioned and RESPONSE-INDEPENDENT, so it reloads only when the prompt
   // / particle settings change — NOT when the response is edited.
@@ -82,6 +98,9 @@
       if (my !== runId) return;
       data = await client.getSankey(m, { ...inputs, ...params, ...(force ? { force: true } : {}) });
       if (my !== runId) return;
+      dataKey = keyOf(m, pfx, temp, ns); // the caption/highlight now describe THIS swarm
+      stopPlay();
+      reveal = 9999; // fresh data ⇒ fresh full reveal (drop any frozen partial sweep)
       draw();
     } catch (e: any) {
       if (my === runId) error = `${e.type ?? "Error"}: ${e.message ?? e}`;
@@ -98,16 +117,27 @@
         if (my !== hlRunId) return;
         highlight = r.highlight;
         highlightStrs = r.token_strs;
+        hlKey = keyOf(m, pfx, temp, ns);
+        hlError = false;
       } catch {
         if (my !== hlRunId) return;
         highlight = [];
         highlightStrs = {};
+        hlKey = keyOf(m, pfx, temp, ns);
+        hlError = true; // shown as an inline "response path unavailable — retry" note (S6)
       }
     } else {
       highlight = [];
       highlightStrs = {};
+      hlKey = keyOf(m, pfx, temp, ns);
+      hlError = false;
     }
     if (data) draw(); // redraw the overlay once (the swarm itself didn't change)
+  }
+
+  function retryHighlight() {
+    hlError = false;
+    void loadHighlight(get(modelId), get(prefixText), get(responseText), get(temperature), get(nSteps));
   }
 
   // ▶ Play: sweep the reveal CONTINUOUSLY (rAF) so flows grow in and columns fade up smoothly,
@@ -116,21 +146,39 @@
     playing = false;
     if (playRaf) { cancelAnimationFrame(playRaf); playRaf = 0; }
   }
+  // ⏸ genuinely PAUSES (freezes the reveal where it is; ▶ resumes from there). The
+  // separate ⏹ button — and natural completion — restore the full reveal (S5).
   function togglePlay() {
-    if (playing) { stopPlay(); reveal = 9999; draw(); return; }
-    playing = true; reveal = 0; draw();
+    if (playing) { stopPlay(); draw(); return; } // pause: keep the current partial reveal
+    playing = true;
+    if (reveal >= maxPosNow) reveal = 0; // at rest / fully revealed → start a fresh sweep
+    draw();
     const perCol = 650; // ms to grow one column of flows
+    const base = reveal; // resume offset (0 for a fresh sweep)
     let start = -1;
     const step = (ts: number) => {
       if (start < 0) start = ts;
-      reveal = Math.min(maxPosNow, (ts - start) / perCol);
+      reveal = Math.min(maxPosNow, base + (ts - start) / perCol);
       draw();
-      if (reveal >= maxPosNow) { stopPlay(); return; }
+      if (reveal >= maxPosNow) { stopPlay(); reveal = 9999; draw(); return; } // completion → full reveal
       playRaf = requestAnimationFrame(step);
     };
     playRaf = requestAnimationFrame(step);
   }
+  function stopAndRestore() { stopPlay(); reveal = 9999; draw(); }
   onDestroy(stopPlay);
+
+  // Redraw when the container is resized (S4) — the SVG otherwise keeps its old viewBox
+  // and uniformly downscales until an unrelated redraw happens.
+  $effect(() => {
+    if (!stageEl) return;
+    resizeObs = new ResizeObserver(() => {
+      const w = svgEl?.clientWidth ?? 0;
+      if (w && Math.abs(w - lastW) > 1) draw();
+    });
+    resizeObs.observe(stageEl);
+    return () => resizeObs?.disconnect();
+  });
 
   // Export: SUB interpolated sub-frames per column so the GIF/MP4 morph is watchable.
   const SUB = 12;
@@ -148,17 +196,27 @@
     if (!svgEl || !data) return;
     const w = svgEl.clientWidth || 680;
     const h = 560;
+    lastW = w;
     const svg = d3.select(svgEl).attr("viewBox", `0 0 ${w} ${h}`);
     svg.selectAll("*").remove();
     const d = data;
     const label = (tok: number) => d.token_strs[String(tok)] ?? highlightStrs[String(tok)] ?? String(tok);
     const GOLD = "#ffd166";
 
+    // Integrate the highlight ONLY when it was computed from the same params as the drawn
+    // swarm (S2c) — a highlight belonging to newer params must not stretch this axis or
+    // trace a gold path over a stale chart.
+    const hl = hlKey === dataKey ? highlight : [];
+
     // rows = the swarm's fixed token order, plus any response tokens not already among them (so
-    // the gold trace always has a row to sit on, even for an unlikely response).
+    // the gold trace always has a row to sit on, even for an unlikely response). Degenerate
+    // responses can append dozens of rows — cap them and report the overflow (S3).
     const rows = [...(d.token_order ?? [])];
     const inRows = new Set(rows);
-    for (const hh of highlight) if (!inRows.has(hh.token)) { inRows.add(hh.token); rows.push(hh.token); }
+    const extras: number[] = [];
+    for (const hh of hl) if (!inRows.has(hh.token)) { inRows.add(hh.token); extras.push(hh.token); }
+    extraOmitted = Math.max(0, extras.length - MAX_EXTRA_ROWS);
+    rows.push(...extras.slice(0, MAX_EXTRA_ROWS));
     const nRows = rows.length;
     if (!nRows) {
       svg.append("text").attr("x", w / 2).attr("y", h / 2).attr("fill", "var(--text-dim)")
@@ -167,12 +225,12 @@
       maxPosNow = 0;
       return;
     }
-    const hlPos = highlight.length ? Math.max(...highlight.map((x) => x.pos)) : 0;
+    const hlPos = hl.length ? Math.max(...hl.map((x) => x.pos)) : 0;
     const maxPos = Math.max(d.max_pos ?? 0, hlPos, 1);
     maxPosNow = maxPos;
     const rankOf = new Map<number, number>(rows.map((t, i) => [t, i]));
-    const hlTokens = new Set(highlight.map((x) => x.token));
-    const hlCell = new Set(highlight.map((x) => `${x.pos}:${x.token}`));
+    const hlTokens = new Set(hl.map((x) => x.token));
+    const hlCell = new Set(hl.map((x) => `${x.pos}:${x.token}`));
 
     // node lookup by (pos, token); also the busiest cell per position (for opacity)
     const nodeAt = new Map<string, SankeyNode>();
@@ -243,7 +301,9 @@
       const mx = (x0 + x1) / 2;
       return `M${x0},${y0}C${mx},${y0} ${mx},${y1} ${x1},${y1}`;
     };
-    const linkW = (l: SankeyLink) => Math.max(1, (l.value / maxVal) * (rowH * 0.8));
+    // Absolute px cap so a low-diversity swarm (few rows ⇒ huge rowH) can't collapse into
+    // one giant ribbon blob (S1; repro: temp 0, seqlen 2, particles 1000).
+    const linkW = (l: SankeyLink) => capLinkWidth(l.value, maxVal, rowH);
     const linkSel = svg.append("g").attr("fill", "none").selectAll("path").data(linkData).join("path")
       .attr("d", linkPath as any)
       .attr("stroke", (l) => color(l.pos))
@@ -259,7 +319,7 @@
         let logp = 0, nseg = 0;
         set.forEach((ll) => { if (typeof ll.cond === "number" && ll.cond > 0) { logp += Math.log(ll.cond); nseg++; } });
         const pPct = nseg ? `${(Math.exp(logp) * 100).toPrecision(2)}%  ·  log p = ${logp.toFixed(2)}` : "";
-        linkSel.attr("stroke-opacity", (ll) => (set.has(ll) ? 0.95 : 0.04)).attr("stroke-width", (ll) => linkW(ll) * (set.has(ll) ? 1.4 : 1));
+        linkSel.attr("stroke-opacity", (ll) => (set.has(ll) ? 0.95 : 0.04)).attr("stroke-width", (ll) => Math.min(linkW(ll) * (set.has(ll) ? 1.4 : 1), LINK_WIDTH_CAP));
         showTip(event, `${tokens.join(" → ")}\nstep ${l.pos}→${l.pos + 1}: P=${(l.cond * 100).toFixed(1)}% · ${l.value} particles\ntrajectory ${pPct}`);
       })
       .on("mouseleave", () => { restoreLinks(); hideTip(); });
@@ -292,8 +352,8 @@
       .on("mouseleave", () => { rectSel.attr("opacity", cellAlpha); restoreLinks(); hideTip(); });
 
     // the user's response: a SINGLE gold trace through the fixed rows (built in with the columns)
-    if (highlight.length) {
-      const pts = highlight
+    if (hl.length) {
+      const pts = hl
         .filter((hh) => rankOf.has(hh.token) && revFactor(hh.pos) > 0)
         .map((hh) => ({ x: tx(hh.pos), y: yC(rankOf.get(hh.token)!), h: hh }));
       const hg = svg.append("g").attr("data-testid", "sankey-highlight");
@@ -317,14 +377,28 @@
       <p class="sub">A swarm of particles samples <b>actual responses to the prompt</b> — each starts from the context and samples its own continuation until it stops. <b>Token opacity = its share of the swarm; flow width = particle count.</b> Add a response to <b>highlight that exact path in gold</b>. Hover any node or flow for probabilities.</p>
     </div>
     <div class="tools">
-      {#if data}<button class="play" onclick={togglePlay} data-testid="sankey-play">{playing ? "⏸ Pause" : "▶ Play"}</button>{/if}
+      {#if data}
+        <div class="playrow">
+          <button class="play" onclick={togglePlay} data-testid="sankey-play">{playing ? "⏸ Pause" : reveal < maxPosNow ? "▶ Resume" : "▶ Play"}</button>
+          {#if playing || reveal < maxPosNow}
+            <button class="play stop" onclick={stopAndRestore} title="Stop and show the full diagram" data-testid="sankey-stop">⏹</button>
+          {/if}
+        </div>
+      {/if}
       <ExportBar name="sankey" svg={() => svgEl} anim={exportAnim} />
     </div>
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}
   {#if error}<div class="error" data-testid="viz-sankey-error">{error}</div>{/if}
-  <svg bind:this={svgEl} class="canvas" height="560" data-testid="sankey-svg"></svg>
-  {#if data}<p class="caption">{data.token_order.length} token rows · {data.links.length} transitions · {data.n_particles} particles · up to {$nSteps} steps{#if highlight.length} · <span class="gold">✦ {highlight.length}-token response highlighted</span>{/if}</p>{/if}
+  <div bind:this={stageEl} class="stage">
+    <svg bind:this={svgEl} class="canvas" class:stale={loading && !!data} height="560" data-testid="sankey-svg"></svg>
+    {#if loading && data}<div class="stale-badge" data-testid="sankey-stale">recomputing…</div>{/if}
+  </div>
+  <!-- The caption describes the swarm that is DRAWN (data.*), never the live control stores —
+       during a slow recompute the old chart + old caption stay coherent (S2a). The gold note
+       appears only when the highlight matches the drawn swarm's params. -->
+  {#if data}<p class="caption">{plural(data.token_order.length, "token row")} · {plural(data.links.length, "transition")} · {data.n_particles} particles · up to {data.n_steps} steps{#if highlight.length && hlKey === dataKey}{" · "}<span class="gold">✦ {highlight.length}-token response highlighted</span>{#if extraOmitted > 0}{" "}<span class="gold-dim">(+{extraOmitted} more response tokens not shown)</span>{/if}{/if}</p>{/if}
+  {#if hlError}<p class="caption hl-note" data-testid="sankey-hl-error">✦ response path unavailable — <button class="linky" onclick={retryHighlight}>retry</button></p>{/if}
 </section>
 
 <style>
@@ -332,12 +406,24 @@
   header { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
   header > div:first-child { min-width: 0; }
   .tools { display: flex; flex-direction: column; align-items: flex-end; gap: 0.4rem; flex-shrink: 0; }
+  .playrow { display: flex; gap: 0.3rem; }
   .play { background: var(--accent-grad); color: #0b0e14; border: none; border-radius: 8px; padding: 0.3rem 0.7rem; font-size: 0.8rem; font-weight: 600; cursor: pointer; white-space: nowrap; }
+  .play.stop { background: rgba(255,255,255,0.08); color: var(--text-dim); border: 1px solid var(--border); }
   .gold { color: #ffd166; }
+  .gold-dim { color: rgba(255,209,102,0.6); }
+  .hl-note { color: #ffd166; }
+  .linky { background: none; border: none; color: #ffd166; text-decoration: underline; cursor: pointer; font: inherit; padding: 0; }
   header h2 { margin: 0; font-size: 1.1rem; }
   .sub { margin: 0.2rem 0 0; color: var(--text-dim); font-size: 0.82rem; }
   .loading { padding: 0.3rem 0; }
   .error { background: rgba(255,122,144,0.12); color: var(--bad); border: 1px solid rgba(255,122,144,0.3); border-radius: 10px; padding: 0.6rem 0.8rem; font-family: var(--mono); font-size: 0.85rem; }
+  .stage { position: relative; }
   .canvas { width: 100%; display: block; background: rgba(0,0,0,0.15); border-radius: 12px; }
+  .canvas.stale { opacity: 0.45; filter: saturate(0.6); transition: opacity 0.2s ease; }
+  .stale-badge {
+    position: absolute; top: 10px; right: 12px; pointer-events: none;
+    background: rgba(0,0,0,0.55); border: 1px solid var(--border); border-radius: 999px;
+    color: var(--text-dim); font-size: 0.72rem; font-family: var(--mono); padding: 0.15rem 0.55rem;
+  }
   .caption { margin: 0; color: var(--text-dim); font-size: 0.76rem; }
 </style>

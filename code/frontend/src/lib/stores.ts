@@ -21,6 +21,14 @@ export const isPlaying = writable<boolean>(false);
 export const nParticles = writable<number>(1000);
 export const nSteps = writable<number>(10);
 
+// Vector-field fan-out: how many top-k next-token arrows per grid vertex when
+// temperature > 0 (the backend clamps to 1 at temperature 0).
+export const fanout = writable<number>(2);
+
+// Raw detail of the last model-resolve failure ("" = the selected model is fine).
+// Views use this to mark still-rendered content from the PREVIOUS model as stale.
+export const modelError = writable<string>("");
+
 // Manifold control: RBF cap width on the unit sphere (smaller = tighter, more localized domes).
 export const rbfWidth = writable<number>(0.18);
 // Manifold: overlay the surface flow field (from a likely token → its predicted next token).

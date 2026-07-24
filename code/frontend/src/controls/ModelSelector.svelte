@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { modelId, numLayers, layerFrom, layerTo } from "../lib/stores";
+  import { modelId, numLayers, layerFrom, layerTo, modelError } from "../lib/stores";
   import { client, type ModelReference } from "../lib/dataClient";
 
   let models = $state<ModelReference[]>([]);
   let custom = $state("");
   let status = $state<"idle" | "resolving" | "ok" | "error">("idle");
   let message = $state("");
+  let detail = $state(""); // raw resolver error (HF traceback etc.) — shown only via title
 
   onMount(async () => {
     try {
@@ -28,6 +29,8 @@
         if (cancelled) return;
         status = "ok";
         message = `${ref.display_name} · ${ref.capabilities.num_layers ?? "?"} layers`;
+        detail = "";
+        modelError.set(""); // the selected model is live again — views un-mark stale content
         const nl = ref.capabilities.num_layers ?? 0;
         numLayers.set(nl);
         // Default the readout layer to the FINAL layer (where next-token probabilities are
@@ -38,7 +41,13 @@
       .catch((e) => {
         if (cancelled) return;
         status = "error";
-        message = e.message ?? "could not resolve model";
+        // Concise plain-language first line; the raw detail (often a multi-page HF
+        // traceback) stays behind the title tooltip instead of flooding the sidebar.
+        detail = e?.message ?? "could not resolve model";
+        message = e?.type === "NetworkError"
+          ? "Could not reach the backend server"
+          : "Model not found or could not be loaded";
+        modelError.set(detail); // views dim their previous-model content as stale
       });
     return () => {
       cancelled = true;
@@ -73,11 +82,12 @@
     />
     <button onclick={applyCustom}>Load</button>
   </div>
-  <div class="msg" data-testid="model-message">{message}</div>
+  <div class="msg" class:err={status === "error"} title={detail || undefined} data-testid="model-message">{message}</div>
 </div>
 
 <style>
   .custom { display: flex; gap: 0.5rem; }
   .custom input { flex: 1; }
   .msg { font-size: 0.78rem; color: var(--text-dim); font-family: var(--mono); min-height: 1em; }
+  .msg.err { color: var(--bad); cursor: help; }
 </style>

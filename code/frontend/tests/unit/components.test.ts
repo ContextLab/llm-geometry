@@ -68,6 +68,66 @@ describe("MatrixHeatmap", () => {
     unmount(app);
     target.remove();
   });
+
+  it("cancels an emptied editor instead of committing 0 (Enter and blur)", () => {
+    const target = document.createElement("div");
+    document.body.appendChild(target);
+    const edits: Array<[number, number, number]> = [];
+    const app = mount(MatrixHeatmap, {
+      target,
+      props: {
+        values: [[1, 2], [3, 4]],
+        editable: true,
+        onCellEdit: (r: number, c: number, v: number) => edits.push([r, c, v]),
+      },
+    });
+    flushSync();
+    const canvas = target.querySelector("canvas")!;
+    const openEditor = (): HTMLInputElement => {
+      canvas.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 0, clientY: 0 }));
+      flushSync();
+      return el<HTMLInputElement>(target, '[data-testid="heatmap-cell-editor"]')!;
+    };
+    // Empty + Enter must cancel (Number("")/Number(null) === 0 must never be written).
+    let editor = openEditor();
+    editor.value = "";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    flushSync();
+    expect(edits).toEqual([]);
+    expect(el(target, '[data-testid="heatmap-cell-editor"]')).toBeNull();
+    // Empty + blur (click-away) must cancel too.
+    editor = openEditor();
+    editor.value = "";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    editor.dispatchEvent(new FocusEvent("blur"));
+    flushSync();
+    expect(edits).toEqual([]);
+    expect(el(target, '[data-testid="heatmap-cell-editor"]')).toBeNull();
+    // A real value still commits.
+    editor = openEditor();
+    editor.value = "2.5";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    flushSync();
+    expect(edits).toEqual([[0, 0, 2.5]]);
+    unmount(app);
+    target.remove();
+  });
+
+  it("renders single-column (1-D) matrices with a widened >=24px column", () => {
+    const target = document.createElement("div");
+    document.body.appendChild(target);
+    const values = Array.from({ length: 128 }, (_, i) => [i / 128 - 0.5]); // 128×1
+    const app = mount(MatrixHeatmap, { target, props: { values, maxCanvasPx: 280 } });
+    flushSync();
+    const host = el<HTMLElement>(target, ".heatmap")!;
+    // Square-cell sizing would give floor(280/128)→4px wide; single columns widen.
+    expect(parseInt(host.style.width, 10)).toBeGreaterThanOrEqual(24);
+    expect(parseInt(host.style.height, 10)).toBeLessThanOrEqual(128 * 36);
+    unmount(app);
+    target.remove();
+  });
 });
 
 function smallGraph(): { nodes: ArchNode[]; edges: ArchEdge[] } {

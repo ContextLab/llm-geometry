@@ -57,6 +57,17 @@
     }
   }
 
+  // Special tokens (e.g. <|im_end|>, <|endoftext|>) are template control markers,
+  // not model prose — render them as a subtle small pill (keeping the probability
+  // tooltip) instead of leaking the raw marker into the reply text (F5).
+  const SPECIAL_TOKEN_RE = /^<\|[^|]+\|>$/;
+  function isSpecial(text: string): boolean {
+    return SPECIAL_TOKEN_RE.test(text);
+  }
+  function specialLabel(text: string): string {
+    return text.slice(2, -2); // "<|im_end|>" -> "im_end"
+  }
+
   function tokenTip(t: ArchGeneratedToken): string {
     const alts = t.topk.texts
       .map((s, i) => `${JSON.stringify(s)} ${(t.topk.probs[i] * 100).toFixed(1)}%`)
@@ -110,11 +121,12 @@
     <div class="reply" data-testid="arch-reply">
       {#each result.tokens as t, i (i)}<span
           class="tok"
+          class:special={isSpecial(t.text)}
           role="note"
           aria-label={tokenTip(t)}
-          style:border-bottom-color={probColor(t.prob)}
+          style:border-bottom-color={isSpecial(t.text) ? undefined : probColor(t.prob)}
           onmousemove={(e) => showTip(e, tokenTip(t))}
-          onmouseleave={hideTip}>{t.text}</span>{/each}
+          onmouseleave={hideTip}>{isSpecial(t.text) ? specialLabel(t.text) : t.text}</span>{/each}
     </div>
     <div class="replymeta">
       {result.tokens.length} tokens · finish: {result.finish_reason} · hover a token for its
@@ -227,6 +239,22 @@
   }
   .tok:hover {
     background: rgba(110, 168, 254, 0.16);
+  }
+  .tok.special {
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    color: var(--text-dim);
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.06rem 0.42rem;
+    margin: 0 0.18rem;
+    vertical-align: middle;
+    white-space: nowrap;
+  }
+  .tok.special:hover {
+    border-color: var(--accent);
+    background: rgba(110, 168, 254, 0.1);
   }
   .replymeta {
     font-size: 0.7rem;

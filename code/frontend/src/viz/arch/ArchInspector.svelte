@@ -57,9 +57,16 @@
     ctl = c;
     loading = true;
     error = "";
+    // 1-D params (bias/norm, C == 1): the whole [N,1] tensor is ≤4096 cells, so the
+    // default overview would come back exact with N rows and render as an N-px-tall
+    // hairline (F3). Ask for a ≤128-row downsampled overview instead; zooming pages
+    // through exact 128-row windows (windowFor caps 1-D zooms at 128 rows).
+    const oneD = (selParam?.shape[1] ?? 1) <= 1;
     const params = z
       ? { model_id: m, param: path, r0: z.r0, r1: z.r0 + z.rows, c0: z.c0, c1: z.c0 + z.cols }
-      : { model_id: m, param: path };
+      : oneD
+        ? { model_id: m, param: path, max_cells: 128 }
+        : { model_id: m, param: path };
     client
       .getArchWeights(params, c.signal)
       .then((w) => {
@@ -140,6 +147,24 @@
   function fmt(v: number): string {
     return String(Number(v.toPrecision(4)));
   }
+
+  // GLOBAL index labels for the hover tooltip (F6): the served window starts at
+  // (r0, c0) of the full matrix, so window-local cell indices are misleading. Each
+  // display cell of a downsampled grid covers a range of true indices.
+  function idxLabels(prefix: string, lo: number, hi: number, n: number): string[] {
+    const span = (hi - lo) / Math.max(1, n);
+    return Array.from({ length: n }, (_, i) => {
+      const a = lo + Math.floor(i * span);
+      const b = Math.min(hi - 1, lo + Math.ceil((i + 1) * span) - 1);
+      return b > a ? `${prefix}s ${a}–${b}` : `${prefix} ${a}`;
+    });
+  }
+  const rowLabels = $derived(
+    weights ? idxLabels("row", weights.r0, weights.r1, weights.grid_shape[0]) : undefined,
+  );
+  const colLabels = $derived(
+    weights ? idxLabels("col", weights.c0, weights.c1, weights.grid_shape[1]) : undefined,
+  );
 </script>
 
 <aside class="inspector" data-testid="arch-inspector" aria-label="node inspector">
@@ -215,7 +240,7 @@
         onclick={onStageClick}
         onkeydown={(e) => (e.key === "Enter" || e.key === " ") && zoomAt(0.5, 0.5)}
       >
-        <MatrixHeatmap values={weights.values} maxCanvasPx={280} />
+        <MatrixHeatmap values={weights.values} {rowLabels} {colLabels} maxCanvasPx={280} />
       </div>
       <div class="zoomrow">
         {#if zoom}

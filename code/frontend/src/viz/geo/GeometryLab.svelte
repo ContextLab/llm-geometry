@@ -369,7 +369,7 @@
     </p>
 
     <div class="grid">
-      <div class="card"><WeightLab {label} /></div>
+      <div class="card"><WeightLab {label} checkpointId={spec?.checkpoint.checkpoint_id ?? null} /></div>
       <div class="card"><FinetunePanel /></div>
     </div>
     <div class="card"><AttentionView {trace} /></div>

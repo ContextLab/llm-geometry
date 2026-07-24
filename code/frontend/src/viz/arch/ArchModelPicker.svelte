@@ -19,6 +19,16 @@
   let status = $state<"idle" | "checking" | "ok" | "error">("idle");
   let message = $state("");
 
+  // The dropdown must ALWAYS offer the app's default model (users can return to it
+  // after switching away — F2) plus the currently active id, even when the curated
+  // /api/models list contains neither. Deduped against the curated entries.
+  const DEFAULT_MODEL_ID = "HuggingFaceTB/SmolLM2-135M-Instruct"; // archModelId's initial value (explorerStores.ts)
+  const extraOptions = $derived(
+    [DEFAULT_MODEL_ID, $archModelId].filter(
+      (id, i, arr) => arr.indexOf(id) === i && !models.some((m) => m.model_id === id),
+    ),
+  );
+
   onMount(async () => {
     try {
       models = (await client.listModels()).models;
@@ -56,23 +66,36 @@
     el.value = get(archModelId);
   }
 
+  // A non-empty externalError (a server-side rejection surfaced by the parent, e.g.
+  // ModelTooLargeError at graph time) must override the picker's own stale "ok"
+  // badge/message with error styling (F1) — until the user interacts again
+  // (status flips to "checking" on the next pick).
   const badge = $derived(
-    status === "checking" ? "resolving" : status === "error" ? "error" : "ok",
+    status === "checking" ? "resolving" : status === "error" || externalError ? "error" : "ok",
+  );
+  const badgeText = $derived(
+    status === "checking"
+      ? "checking"
+      : status === "error" || externalError
+        ? "error"
+        : status === "idle"
+          ? "ready"
+          : status,
   );
 </script>
 
 <div class="control" data-testid="arch-model-picker">
   <span class="label">
     Model
-    <span class="badge {badge}" data-testid="arch-model-status">{status === "idle" ? "ready" : status}</span>
+    <span class="badge {badge}" data-testid="arch-model-status">{badgeText}</span>
   </span>
   <select value={$archModelId} onchange={onSelectChange} data-testid="arch-model-select">
     {#each models as m (m.model_id)}
       <option value={m.model_id}>{m.display_name ?? m.model_id}</option>
     {/each}
-    {#if !models.some((m) => m.model_id === $archModelId)}
-      <option value={$archModelId}>{$archModelId}</option>
-    {/if}
+    {#each extraOptions as id (id)}
+      <option value={id}>{id}</option>
+    {/each}
   </select>
   <div class="custom">
     <input
@@ -84,8 +107,12 @@
     />
     <button onclick={() => void pick(custom)}>Load</button>
   </div>
-  {#if externalError || status === "error"}
-    <div class="err" data-testid="arch-error">{externalError || message}</div>
+  {#if status === "checking"}
+    <div class="msg">{message}</div>
+  {:else if status === "error"}
+    <div class="err" data-testid="arch-error">{message}</div>
+  {:else if externalError}
+    <div class="err" data-testid="arch-error">{externalError}</div>
   {:else}
     <div class="msg">{message}</div>
   {/if}

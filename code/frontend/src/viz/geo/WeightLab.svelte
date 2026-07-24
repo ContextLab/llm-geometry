@@ -16,8 +16,13 @@
   // attention all recompute against the edited model.
   interface Props {
     label: (id: number) => string; // token id -> text, for embedding row labels
+    // The canonical learned checkpoint's content-hash id (from /api/geo/spec).
+    // Weight tokens are content-hashes too, so a minted token EQUAL to this id means
+    // the edit chain reproduced the learned weights bit-for-bit (e.g. preset
+    // `learned`) — that state is shown and treated as "no edit" (G1).
+    checkpointId?: string | null;
   }
-  let { label }: Props = $props();
+  let { label, checkpointId = null }: Props = $props();
 
   const MATRICES: GeoMatrixName[] = ["embedding", "W_Q", "W_K", "W_V", "W_O"];
   const PRESETS: GeoPresetName[] = ["identity", "toeplitz_fuzzy", "random", "random_autocorr", "zero", "learned"];
@@ -32,6 +37,15 @@
   let runId = 0;
 
   const isEmbedding = $derived(matrix === "embedding");
+  // Content-based "edited" state: a non-null token whose hash matches the learned
+  // checkpoint is NOT an edit. Decision (G1): we normalize such tokens to null (the
+  // canonical learned state) rather than keep them — sessionStorage, the badge, and
+  // every geo fetch then agree on one representation of "learned".
+  const editedActive = $derived($geoWeightsToken !== null && $geoWeightsToken !== checkpointId);
+  $effect(() => {
+    // Self-heal tokens persisted before this rule (or minted below on a slow path).
+    if (checkpointId && $geoWeightsToken === checkpointId) geoWeightsToken.set(null);
+  });
   // Embedding (1003×3) renders transposed as a horizontally scrollable ribbon:
   // columns = tokens, rows = x/y/z. 12px cells keep the canvas under browser limits.
   const displayGrid = $derived.by(() => {
@@ -71,7 +85,10 @@
     error = "";
     try {
       const res = await client.postGeoWeights({ base: $geoWeightsToken ?? "learned", edits });
-      geoWeightsToken.set(res.weights_token); // stores persist it; every geo fetch now uses it
+      // Minted token == learned checkpoint hash ⇒ bit-identical weights ⇒ no-edit:
+      // store the canonical null instead (G1). Otherwise persist it; every geo fetch
+      // now uses it.
+      geoWeightsToken.set(res.weights_token === checkpointId ? null : res.weights_token);
     } catch (e) {
       error = friendly(e);
     } finally {
@@ -111,7 +128,7 @@
 <div class="panel-body" data-testid="geo-weight-panel">
   <div class="head">
     <h3>Weight lab</h3>
-    {#if $geoWeightsToken}
+    {#if editedActive}
       <span class="badge edited" title={`weights_token ${$geoWeightsToken}`}>edited weights active</span>
       <button class="ghost" data-testid="geo-reset" onclick={resetToLearned}>reset to learned</button>
     {:else}

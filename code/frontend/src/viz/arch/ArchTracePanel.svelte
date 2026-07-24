@@ -127,6 +127,13 @@
   function displayTok(s: string): string {
     return s.replace(/\n/g, "↵");
   }
+
+  // The trace contract is gaining an additive `truncated: bool` (long prompts are
+  // left-truncated to the last 64 tokens with no visible sign — F9). Read it
+  // defensively so the UI works both before and after the backend field lands.
+  const truncated = $derived(
+    (trace as (ArchTrace & { truncated?: boolean }) | null)?.truncated === true,
+  );
 </script>
 
 <div class="breakdown" data-testid="arch-breakdown">
@@ -170,6 +177,17 @@
           onmousemove={(e) => showTip(e, "the model's chat template wrapped your prompt")}
           onmouseleave={hideTip}
         >chat template</span>
+      {/if}
+      {#if truncated}
+        <span
+          class="tmpl trunc"
+          data-testid="arch-truncated-chip"
+          role="note"
+          aria-label="the prompt was longer than the trace window — only its last 64 tokens were traced"
+          onmousemove={(e) =>
+            showTip(e, "the prompt was longer than the trace window — only its last 64 tokens were traced")}
+          onmouseleave={hideTip}
+        >⋯ prompt truncated to the last 64 tokens</span>
       {/if}
     </div>
 
@@ -407,6 +425,11 @@
     border: 1px solid rgba(183, 148, 246, 0.35);
     border-radius: 999px;
     padding: 0.1rem 0.5rem;
+  }
+  .tmpl.trunc {
+    color: #ffb454;
+    background: rgba(255, 180, 84, 0.12);
+    border-color: rgba(255, 180, 84, 0.35);
   }
   .player {
     display: flex;

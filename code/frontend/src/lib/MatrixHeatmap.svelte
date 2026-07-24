@@ -42,14 +42,17 @@
   );
   const rows = $derived(grid.length);
   const cols = $derived(rows > 0 ? grid[0].length : 0);
-  // Uniform square cells, capped so the whole matrix fits within maxCanvasPx.
-  const cell = $derived(
+  // Uniform square cells, capped so the whole matrix fits within maxCanvasPx —
+  // except single-column (1-D param) matrices, whose column widens to ≥24px so a
+  // bias/norm vector reads as a strip instead of a 4px hairline.
+  const cellH = $derived(
     rows > 0 && cols > 0
       ? Math.max(4, Math.min(36, Math.floor(maxCanvasPx / Math.max(rows, cols))))
       : 0,
   );
-  const cssW = $derived(cols * cell);
-  const cssH = $derived(rows * cell);
+  const cellW = $derived(cols === 1 && rows > 1 ? Math.max(24, cellH) : cellH);
+  const cssW = $derived(cols * cellW);
+  const cssH = $derived(rows * cellH);
   const absMax = $derived.by(() => {
     let m = 0;
     for (const row of grid) for (const v of row) m = Math.max(m, Math.abs(v));
@@ -103,20 +106,20 @@
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
-    const gap = cell >= 8 ? 1 : 0; // hairline grid when cells are big enough
+    const gap = Math.min(cellW, cellH) >= 8 ? 1 : 0; // hairline grid when cells are big enough
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         ctx.fillStyle = cellColor(grid[r][c]);
-        ctx.fillRect(c * cell, r * cell, cell - gap, cell - gap);
+        ctx.fillRect(c * cellW, r * cellH, cellW - gap, cellH - gap);
       }
     }
   });
 
   function hitCell(e: MouseEvent): { row: number; col: number } | null {
-    if (!canvasEl || cell === 0) return null;
+    if (!canvasEl || cellW === 0 || cellH === 0) return null;
     const rect = canvasEl.getBoundingClientRect();
-    const col = Math.floor((e.clientX - rect.left) / cell);
-    const row = Math.floor((e.clientY - rect.top) / cell);
+    const col = Math.floor((e.clientX - rect.left) / cellW);
+    const row = Math.floor((e.clientY - rect.top) / cellH);
     if (row < 0 || row >= rows || col < 0 || col >= cols) return null;
     return { row, col };
   }
@@ -147,7 +150,16 @@
 
   function commitEdit() {
     if (!editor) return;
-    const v = Number(editorText);
+    // An emptied editor must CANCEL like Escape, never commit: Number("") and
+    // Number(null) are both 0, so committing blindly silently writes 0. (The input
+    // is type="number", so Svelte's bind coerces an emptied field to null at
+    // runtime despite the string typing.)
+    const text = String(editorText ?? "").trim();
+    if (text === "") {
+      editor = null;
+      return;
+    }
+    const v = Number(text);
     if (Number.isFinite(v)) onCellEdit?.(editor.row, editor.col, v);
     editor = null;
   }
@@ -196,8 +208,8 @@
       type="number"
       step="any"
       data-testid="heatmap-cell-editor"
-      style:left={`${Math.min(editor.col * cell, Math.max(0, cssW - 76))}px`}
-      style:top={`${editor.row * cell}px`}
+      style:left={`${Math.min(editor.col * cellW, Math.max(0, cssW - 76))}px`}
+      style:top={`${editor.row * cellH}px`}
       bind:value={editorText}
       use:autofocus
       onkeydown={onEditorKeydown}

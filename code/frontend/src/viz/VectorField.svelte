@@ -1,7 +1,9 @@
 <script lang="ts">
   import * as d3 from "d3";
+  import { untrack } from "svelte";
   import { get } from "svelte/store";
-  import { modelId, prefixText, temperature, layerFrom, layerTo, responseText, responseStep, responseTokenCount, refreshNonce } from "../lib/stores";
+  import { modelId, prefixText, temperature, layerFrom, layerTo, responseText, responseStep, responseTokenCount, refreshNonce, fanout, modelError } from "../lib/stores";
+  import { robustMax } from "../lib/vizMath";
   import { client, type VectorField, type VectorFieldAnimation } from "../lib/dataClient";
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
@@ -27,7 +29,6 @@
   const H = 520;
   const GRID_N = 24; // ~4× the previous resolution
   const REF = 400;
-  const FANOUT = 2;
   const SEED = 0;
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let runId = 0;
@@ -42,21 +43,25 @@
     const lf = $layerFrom;
     const lt = $layerTo;
     const resp = $responseText;
+    const fo = $fanout;
     const rn = $refreshNonce;
     const force = rn !== lastRefresh; // the Recompute button bypasses the cache
     lastRefresh = rn;
     if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => void load(m, pfx, temp, lf, lt, resp, force), force ? 0 : 320);
+    debounce = setTimeout(() => void load(m, pfx, temp, lf, lt, resp, fo, force), force ? 0 : 320);
     return () => {
       if (debounce) clearTimeout(debounce);
     };
   });
 
   // In animation mode, the response step just tweens the (already-fetched) key frames — no
-  // re-fetch — so playback is smooth.
+  // re-fetch — so playback is smooth. tweenTo() reads (and its rAF loop writes) `animTime`,
+  // so it MUST run untracked: otherwise every rAF write re-runs this effect and restarts
+  // the tween, which then never completes (redteam-vector F1). Depend ONLY on step + anim.
   $effect(() => {
     const step = $responseStep;
-    if (anim) tweenTo(Math.min(step, anim.n_frames - 1));
+    const a = anim;
+    if (a) untrack(() => tweenTo(Math.min(step, a.n_frames - 1)));
   });
 
   $effect(() => {
@@ -69,7 +74,7 @@
     return () => resizeObs?.disconnect();
   });
 
-  async function load(m: string, pfx: string, temp: number, lf: number, lt: number, resp: string, force = false) {
+  async function load(m: string, pfx: string, temp: number, lf: number, lt: number, resp: string, fo: number, force = false) {
     const my = ++runId;
     error = "";
     loading = true;
@@ -97,7 +102,7 @@
       }
       const params = {
         temperature: temp, layer_from: lf, layer_to: lt, grid_n: GRID_N,
-        fanout: FANOUT, reference_set_size: REF, seed: SEED,
+        fanout: fo, reference_set_size: REF, seed: SEED,
       };
       const inputs = { prefix_text: pfx, response_text: "", response_step: 0 };
       if (!force) {
@@ -216,9 +221,11 @@
     const svg = ensure().attr("viewBox", `0 0 ${w} ${H}`);
     svg.select("g.points").selectAll("*").remove(); // drift mode has no moving token dots
 
-    const maxp = Math.max(...d.probs, 1e-6);
-    const pcolor = d3.scaleSequential(d3.interpolatePlasma).domain([-0.15 * maxp, maxp]);
-    const rel = (p: number) => Math.min(1, p / maxp);
+    // Robust (95th-percentile) normalisation so one outlier arrow at high temperature
+    // can't wash out the other ~1000 (redteam-vector F3); values above clamp to full.
+    const norm = robustMax(d.probs);
+    const pcolor = d3.scaleSequential(d3.interpolatePlasma).domain([-0.15 * norm, norm]).clamp(true);
+    const rel = (p: number) => Math.min(1, p / norm);
     const rows = d.starts.map((s, i) => ({ s, e: d.ends[i], p: d.probs[i], i }));
 
     // Grid origins (one per fixed grid coordinate; dedup since fan-out shares origins).
@@ -325,18 +332,18 @@
     const dA = a.dirs[f0], dB = a.dirs[f1], qA = a.probs[f0], qB = a.probs[f1];
     const L = a.arrow_len;
     const tokStr = (id: number) => a.token_strs[String(id)] ?? "";
-    let maxp = 1e-6;
     const rows = a.grid.map((v, i) => {
       const p = mix(qA[i], qB[i]);
-      if (p > maxp) maxp = p;
       // interpolate the unit direction, then renormalise so the arrow keeps a fixed length
       let dx = mix(dA[i][0], dB[i][0]), dy = mix(dA[i][1], dB[i][1]);
       const n = Math.hypot(dx, dy) || 1;
       dx /= n; dy /= n;
       return { i, vx: v[0], vy: v[1], ex: v[0] + dx * L, ey: v[1] + dy * L, p };
     });
-    const pcolor = d3.scaleSequential(d3.interpolatePlasma).domain([-0.15 * maxp, maxp]);
-    const rel = (p: number) => Math.min(1, p / maxp);
+    // Robust normalisation (see drawField): a single outlier must not blank the field.
+    const norm = robustMax(rows.map((r) => r.p));
+    const pcolor = d3.scaleSequential(d3.interpolatePlasma).domain([-0.15 * norm, norm]).clamp(true);
+    const rel = (p: number) => Math.min(1, p / norm);
     const arrowTip = (r: any) =>
       `"${tokStr(a.from_tokens[nf][r.i])}" → "${tokStr(a.to_tokens[nf][r.i])}"\nlayer ${a.layer_to}/${a.num_layers} · ${(r.p * 100).toFixed(1)}%`;
 
@@ -404,10 +411,13 @@
     <ExportBar name="vector-field" svg={() => svgEl} anim={exportAnim} />
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}
-  {#if error}<div class="error" data-testid="viz-vector-error">{error}</div>{/if}
-  <div bind:this={stageEl} class="stage" style="height:{H}px">
+  {#if error}<div class="error" data-testid="viz-vector-error" title={error}>{error.split("\n")[0].slice(0, 200)}</div>{/if}
+  <div bind:this={stageEl} class="stage" class:stale={!!$modelError && !!(data || anim)} style="height:{H}px">
     <svg bind:this={svgEl} class="arrow-layer" data-testid="vector-svg"></svg>
   </div>
+  {#if $modelError && (data || anim)}
+    <p class="caption stale-note" data-testid="vector-stale-note">⚠ showing previous model — the selected model failed to load</p>
+  {/if}
   {#if anim}
     <p class="caption">
       {anim.reference_points} static grid arrows · {anim.n_frames} key frames (response steps) ·
@@ -415,7 +425,7 @@
     </p>
   {:else if data}
     <p class="caption">
-      {data.reference_points} grid arrows ·
+      {data.starts.length} grid arrows ·
       layer {data.layer_from}{#if data.layer_to !== data.layer_from}→{data.layer_to}{/if}/{data.num_layers} ·
       fan-out {data.fanout}
     </p>
@@ -431,6 +441,8 @@
   .loading { padding: 0.3rem 0; }
   .error { background: rgba(255,122,144,0.12); color: var(--bad); border: 1px solid rgba(255,122,144,0.3); border-radius: 10px; padding: 0.6rem 0.8rem; font-family: var(--mono); font-size: 0.85rem; }
   .stage { position: relative; width: 100%; background: rgba(0,0,0,0.22); border-radius: 12px; overflow: hidden; }
+  .stage.stale { opacity: 0.45; filter: saturate(0.55); transition: opacity 0.2s ease; }
   .arrow-layer { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
   .caption { margin: 0; color: var(--text-dim); font-size: 0.76rem; }
+  .stale-note { color: #ffd166; }
 </style>
