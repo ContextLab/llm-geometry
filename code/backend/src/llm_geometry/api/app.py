@@ -14,6 +14,8 @@ from fastapi.responses import JSONResponse
 from ..config import REPO_ROOT
 from ..errors import LLMGeometryError
 from .routes import router
+from .routes_arch import router as arch_router
+from .routes_geo import router as geo_router
 
 
 def create_app() -> FastAPI:
@@ -42,6 +44,8 @@ def create_app() -> FastAPI:
         )
 
     app.include_router(router, prefix="/api")
+    app.include_router(geo_router, prefix="/api")
+    app.include_router(arch_router, prefix="/api")
 
     # Serve the built frontend if present (production). Mounted last so /api wins.
     dist = REPO_ROOT / "code" / "frontend" / "dist"

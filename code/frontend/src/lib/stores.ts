@@ -27,7 +27,7 @@ export const rbfWidth = writable<number>(0.18);
 export const showSurface = writable<boolean>(false);
 
 // Which view is active in the main panel.
-export type View = "vector" | "sankey" | "manifold";
+export type View = "vector" | "sankey" | "manifold" | "architecture" | "geometry";
 export const view = writable<View>("vector");
 
 // Bumped by the "Recompute" button to force the active view to re-fetch (bypassing the cache).

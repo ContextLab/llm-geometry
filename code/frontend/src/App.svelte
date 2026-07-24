@@ -9,6 +9,8 @@
   import VectorField from "./viz/VectorField.svelte";
   import Sankey from "./viz/Sankey.svelte";
   import Manifold from "./viz/Manifold.svelte";
+  import ArchitectureExplorer from "./viz/arch/ArchitectureExplorer.svelte";
+  import GeometryLab from "./viz/geo/GeometryLab.svelte";
   import Tooltip from "./lib/Tooltip.svelte";
   import { view, refreshNonce, type View } from "./lib/stores";
 
@@ -16,7 +18,21 @@
     { id: "vector", label: "Vector field" },
     { id: "sankey", label: "Sankey" },
     { id: "manifold", label: "Manifold" },
+    { id: "architecture", label: "Architecture" },
+    { id: "geometry", label: "Geometry" },
   ];
+
+  const settingsLabels: Record<View, string> = {
+    vector: "Vector field",
+    sankey: "Sankey",
+    manifold: "Manifold",
+    architecture: "Architecture",
+    geometry: "Geometry",
+  };
+
+  // The two explorer tabs own their controls (per-view stores; see specs/002 plan §3b) —
+  // the shared model/prompt/temperature sidebar semantics don't apply to them.
+  const sharedControlsViews: View[] = ["vector", "sankey", "manifold"];
 </script>
 
 <div class="app">
@@ -36,19 +52,25 @@
         <h2>Controls</h2>
         <button class="recompute" data-testid="recompute" title="Force re-compute the current view" onclick={() => refreshNonce.update((n) => n + 1)}>↻ Recompute</button>
       </div>
-      <ModelSelector />
-      <PromptPrefix />
-      <Temperature />
+      {#if sharedControlsViews.includes($view)}
+        <ModelSelector />
+        <PromptPrefix />
+        <Temperature />
+      {/if}
       <!-- View-specific controls: the readout layer only shapes the vector field; the response
            animates the vector field + manifold and highlights a path on the Sankey; the particle
            swarm (count + sequence length) and RBF width are each their own view's. -->
       <div class="divider"></div>
-      <span class="group-label">{$view === "sankey" ? "Sankey" : $view === "manifold" ? "Manifold" : "Vector field"} settings</span>
+      <span class="group-label">{settingsLabels[$view]} settings</span>
       {#if $view === "vector"}<LayerSlider />{/if}
-      <ResponseAnimator />
+      {#if sharedControlsViews.includes($view)}<ResponseAnimator />{/if}
       {#if $view === "sankey"}<SwarmControls />{/if}
       {#if $view === "manifold"}<ManifoldControls />{/if}
-      <p class="hint">Cached results return instantly; the first computation streams progress. ▶ Play animates token-by-token. Each figure can be exported as a vector PDF/SVG, a high-res PNG, or an animated GIF/MP4.</p>
+      {#if sharedControlsViews.includes($view)}
+        <p class="hint">Cached results return instantly; the first computation streams progress. ▶ Play animates token-by-token. Each figure can be exported as a vector PDF/SVG, a high-res PNG, or an animated GIF/MP4.</p>
+      {:else}
+        <p class="hint">This view's controls live inside the panel to the right.</p>
+      {/if}
     </aside>
 
     <div class="main">
@@ -68,6 +90,10 @@
         <Sankey />
       {:else if $view === "manifold"}
         <Manifold />
+      {:else if $view === "architecture"}
+        <ArchitectureExplorer />
+      {:else if $view === "geometry"}
+        <GeometryLab />
       {/if}
     </div>
   </main>
