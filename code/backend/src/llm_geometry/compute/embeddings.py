@@ -72,7 +72,9 @@ def per_layer_embeddings(
     token_ids = reference_token_ids(lm, reference_set_size)
 
     if source == "static":
-        weight = lm.model.get_input_embeddings().weight.detach().float().cpu().numpy().astype(np.float32)
+        weight = (
+            lm.model.get_input_embeddings().weight.detach().float().cpu().numpy().astype(np.float32)
+        )
         vectors = weight[token_ids]
         if progress_cb is not None:
             progress_cb(1.0, f"static embeddings for {token_ids.shape[0]} tokens")

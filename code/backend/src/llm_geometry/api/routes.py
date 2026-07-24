@@ -114,7 +114,11 @@ def distribution(
         "distribution",
         model_id,
         {"temperature": temperature, "top_k": top_k},
-        {"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step},
+        {
+            "prefix_text": prefix_text,
+            "response_text": response_text,
+            "response_step": response_step,
+        },
     )
     meta = dict(payload["meta"])
     resp: dict[str, Any] = {**meta}
@@ -153,8 +157,14 @@ def reduction_2d(
     layer: int = 0,
     reference_set_size: int | None = None,
 ) -> dict[str, Any]:
-    params: dict[str, Any] = {"method": method, "seed": seed, "grid_n": grid_n,
-                              "with_grid": with_grid, "source": source, "layer": layer}
+    params: dict[str, Any] = {
+        "method": method,
+        "seed": seed,
+        "grid_n": grid_n,
+        "with_grid": with_grid,
+        "source": source,
+        "layer": layer,
+    }
     if reference_set_size is not None:
         params["reference_set_size"] = reference_set_size
     payload = get_or_compute_sync("reduction_2d", model_id, params)
@@ -189,11 +199,13 @@ def reduction_3d(
     payload = get_or_compute_sync("reduction_3d", model_id, params)
     meta = dict(payload["meta"])
     arrays = payload["arrays"]
-    return _jsonable({
-        **meta,
-        "coords": arrays["coords"].tolist(),
-        "token_ids": arrays["token_ids"].tolist(),
-    })
+    return _jsonable(
+        {
+            **meta,
+            "coords": arrays["coords"].tolist(),
+            "token_ids": arrays["token_ids"].tolist(),
+        }
+    )
 
 
 @router.get("/token_cloud")
@@ -207,11 +219,13 @@ def token_cloud_route(
     payload = get_or_compute_sync("token_cloud", model_id, {"seed": seed, "spread_mu": spread_mu})
     meta = dict(payload["meta"])
     a = payload["arrays"]
-    return _jsonable({
-        **meta,  # includes token_strs (printable decoded strings, aligned with token_ids)
-        "coords": a["warped"].tolist(),
-        "token_ids": a["token_ids"].tolist(),
-    })
+    return _jsonable(
+        {
+            **meta,  # includes token_strs (printable decoded strings, aligned with token_ids)
+            "coords": a["warped"].tolist(),
+            "token_ids": a["token_ids"].tolist(),
+        }
+    )
 
 
 @router.get("/vector_field")
@@ -230,23 +244,35 @@ def vector_field_route(
     force: bool = False,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {
-        "temperature": temperature, "layer_from": layer_from,
+        "temperature": temperature,
+        "layer_from": layer_from,
         "layer_to": layer_from if layer_to is None else layer_to,
-        "grid_n": grid_n, "fanout": fanout, "seed": seed,
+        "grid_n": grid_n,
+        "fanout": fanout,
+        "seed": seed,
     }
     if reference_set_size is not None:
         params["reference_set_size"] = reference_set_size
     payload = get_or_compute_sync(
-        "vector_field", model_id, params,
-        {"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step},
+        "vector_field",
+        model_id,
+        params,
+        {
+            "prefix_text": prefix_text,
+            "response_text": response_text,
+            "response_step": response_step,
+        },
         force=force,
     )
     meta = dict(payload["meta"])
     a = payload["arrays"]
     resp: dict[str, Any] = {
         **meta,
-        "starts": a["starts"].tolist(), "ends": a["ends"].tolist(), "probs": a["probs"].tolist(),
-        "start_tokens": a["start_tokens"].tolist(), "end_tokens": a["end_tokens"].tolist(),
+        "starts": a["starts"].tolist(),
+        "ends": a["ends"].tolist(),
+        "probs": a["probs"].tolist(),
+        "start_tokens": a["start_tokens"].tolist(),
+        "end_tokens": a["end_tokens"].tolist(),
     }
     if "trajectory" in a:
         resp["trajectory"] = a["trajectory"].tolist()
@@ -268,22 +294,35 @@ def vector_field_animation_route(
 ) -> dict[str, Any]:
     """All key frames of the response animation over one STATIC grid (only the per-vertex token
     assignment + arrow direction change — see compute.vector_field.vector_field_animation)."""
-    params: dict[str, Any] = {"temperature": temperature, "layer_to": layer_to, "grid_n": grid_n, "seed": seed}
+    params: dict[str, Any] = {
+        "temperature": temperature,
+        "layer_to": layer_to,
+        "grid_n": grid_n,
+        "seed": seed,
+    }
     if reference_set_size is not None:
         params["reference_set_size"] = reference_set_size
     payload = get_or_compute_sync(
-        "vector_field_animation", model_id, params,
-        {"prefix_text": prefix_text, "response_text": response_text}, force=force,
+        "vector_field_animation",
+        model_id,
+        params,
+        {"prefix_text": prefix_text, "response_text": response_text},
+        force=force,
     )
     meta = dict(payload["meta"])
     a = payload["arrays"]
-    return _jsonable({
-        **meta,
-        "grid": a["grid"].tolist(),
-        "from_tokens": a["from_tokens"].tolist(), "to_tokens": a["to_tokens"].tolist(),
-        "dirs": a["dirs"].tolist(), "probs": a["probs"].tolist(),
-        "trajectory": a["trajectory"].tolist(), "trajectory_probs": a["trajectory_probs"].tolist(),
-    })
+    return _jsonable(
+        {
+            **meta,
+            "grid": a["grid"].tolist(),
+            "from_tokens": a["from_tokens"].tolist(),
+            "to_tokens": a["to_tokens"].tolist(),
+            "dirs": a["dirs"].tolist(),
+            "probs": a["probs"].tolist(),
+            "trajectory": a["trajectory"].tolist(),
+            "trajectory_probs": a["trajectory_probs"].tolist(),
+        }
+    )
 
 
 @router.get("/sankey")
@@ -297,7 +336,8 @@ def sankey_route(
     force: bool = False,
 ) -> dict[str, Any]:
     payload = get_or_compute_sync(
-        "sankey", model_id,
+        "sankey",
+        model_id,
         {"temperature": temperature, "n_particles": n_particles, "n_steps": n_steps, "seed": seed},
         {"prefix_text": prefix_text},
         force=force,
@@ -315,11 +355,18 @@ def sankey_highlight_route(
     seed: int = DEFAULT_SEED,
 ) -> dict[str, Any]:
     """The user's response path over the prompt (teacher-forced) — a cheap overlay computed on
-    the fly (one forward pass), decoupled from the heavy swarm so editing the response is instant."""
+    the fly (one forward pass), decoupled from the heavy swarm so editing the response is instant.
+    """
     from ..compute.sankey import sankey_highlight
 
-    payload = sankey_highlight(model_id, prefix_text=prefix_text, response_text=response_text,
-                               temperature=temperature, n_steps=n_steps, seed=seed)
+    payload = sankey_highlight(
+        model_id,
+        prefix_text=prefix_text,
+        response_text=response_text,
+        temperature=temperature,
+        n_steps=n_steps,
+        seed=seed,
+    )
     return _jsonable(dict(payload["meta"]))
 
 
@@ -339,20 +386,32 @@ def manifold_route(
     if reference_set_size is not None:
         params["reference_set_size"] = reference_set_size
     payload = get_or_compute_sync(
-        "manifold", model_id, params,
-        {"prefix_text": prefix_text, "response_text": response_text, "response_step": response_step},
+        "manifold",
+        model_id,
+        params,
+        {
+            "prefix_text": prefix_text,
+            "response_text": response_text,
+            "response_step": response_step,
+        },
         force=force,
     )
     meta = dict(payload["meta"])
     a = payload["arrays"]
-    return _jsonable({
-        **meta,
-        "vertices": a["vertices"].tolist(), "faces": a["faces"].tolist(), "warp": a["warp"].tolist(),
-        "token_points": a["token_points"].tolist(), "token_emis": a["token_emis"].tolist(),
-        "token_ids": a["token_ids"].tolist(),
-        "traj_points": a["traj_points"].tolist(),  # response trajectory on the radius-2 sphere
-        "surface_src": a["surface_src"].tolist(), "surface_dst": a["surface_dst"].tolist(),
-    })
+    return _jsonable(
+        {
+            **meta,
+            "vertices": a["vertices"].tolist(),
+            "faces": a["faces"].tolist(),
+            "warp": a["warp"].tolist(),
+            "token_points": a["token_points"].tolist(),
+            "token_emis": a["token_emis"].tolist(),
+            "token_ids": a["token_ids"].tolist(),
+            "traj_points": a["traj_points"].tolist(),  # response trajectory on the radius-2 sphere
+            "surface_src": a["surface_src"].tolist(),
+            "surface_dst": a["surface_dst"].tolist(),
+        }
+    )
 
 
 @router.get("/manifold_animation")
@@ -372,18 +431,27 @@ def manifold_animation_route(
     if reference_set_size is not None:
         params["reference_set_size"] = reference_set_size
     payload = get_or_compute_sync(
-        "manifold_animation", model_id, params,
-        {"prefix_text": prefix_text, "response_text": response_text}, force=force,
+        "manifold_animation",
+        model_id,
+        params,
+        {"prefix_text": prefix_text, "response_text": response_text},
+        force=force,
     )
     meta = dict(payload["meta"])
     a = payload["arrays"]
-    return _jsonable({
-        **meta,
-        "faces": a["faces"].tolist(), "token_points": a["token_points"].tolist(),
-        "traj_points": a["traj_points"].tolist(),
-        "vertices": a["vertices"].tolist(), "warp": a["warp"].tolist(), "token_emis": a["token_emis"].tolist(),
-        "surface_src": a["surface_src"].tolist(), "surface_dst": a["surface_dst"].tolist(),
-    })
+    return _jsonable(
+        {
+            **meta,
+            "faces": a["faces"].tolist(),
+            "token_points": a["token_points"].tolist(),
+            "traj_points": a["traj_points"].tolist(),
+            "vertices": a["vertices"].tolist(),
+            "warp": a["warp"].tolist(),
+            "token_emis": a["token_emis"].tolist(),
+            "surface_src": a["surface_src"].tolist(),
+            "surface_dst": a["surface_dst"].tolist(),
+        }
+    )
 
 
 @router.get("/tokenize")

@@ -13,7 +13,9 @@ import numpy as np
 from ..errors import InvalidParamError
 
 
-def build_grid(coords: np.ndarray, token_ids: np.ndarray, n: int = 25) -> tuple[np.ndarray, np.ndarray]:
+def build_grid(
+    coords: np.ndarray, token_ids: np.ndarray, n: int = 25
+) -> tuple[np.ndarray, np.ndarray]:
     coords = np.asarray(coords, dtype=np.float64)
     token_ids = np.asarray(token_ids)
     if n < 2:

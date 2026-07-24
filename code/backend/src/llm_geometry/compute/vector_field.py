@@ -44,7 +44,9 @@ def _printable_mask(lm) -> torch.Tensor:
     return mask
 
 
-def _embed_layers_and_topk(lm, base_ids, tokens, layers, temperature, fan, pmask, progress_cb, lo, hi):
+def _embed_layers_and_topk(
+    lm, base_ids, tokens, layers, temperature, fan, pmask, progress_cb, lo, hi
+):
     """Per-token contextual hidden states at each requested layer + the top-`fan` PRINTABLE
     next tokens (the model's real prediction, conditioned on the context)."""
     n = len(tokens)
@@ -56,7 +58,9 @@ def _embed_layers_and_topk(lm, base_ids, tokens, layers, temperature, fan, pmask
     bs = max(1, int(EMBED_BATCH_SIZE))
     for s in range(0, n, bs):
         chunk = [int(x) for x in tokens[s : s + bs]]
-        ids = torch.tensor([list(base_ids) + [tok] for tok in chunk], dtype=torch.long, device=lm.device)
+        ids = torch.tensor(
+            [list(base_ids) + [tok] for tok in chunk], dtype=torch.long, device=lm.device
+        )
         with torch.no_grad():
             out = lm.model(input_ids=ids, output_hidden_states=True)
         for L in layers:
@@ -67,7 +71,10 @@ def _embed_layers_and_topk(lm, base_ids, tokens, layers, temperature, fan, pmask
         top_tokens[s : s + len(chunk)] = ti.cpu().numpy()
         top_probs[s : s + len(chunk)] = tp.cpu().numpy()
         if progress_cb:
-            progress_cb(lo + (hi - lo) * min(1.0, (s + len(chunk)) / n), f"reference points {s + len(chunk)}/{n}")
+            progress_cb(
+                lo + (hi - lo) * min(1.0, (s + len(chunk)) / n),
+                f"reference points {s + len(chunk)}/{n}",
+            )
     return embs, top_tokens, top_probs
 
 
@@ -78,12 +85,17 @@ def _embed_layer_only(lm, base_ids, tokens, layer, progress_cb, lo, hi):
     bs = max(1, int(EMBED_BATCH_SIZE))
     for s in range(0, n, bs):
         chunk = [int(x) for x in tokens[s : s + bs]]
-        ids = torch.tensor([list(base_ids) + [tok] for tok in chunk], dtype=torch.long, device=lm.device)
+        ids = torch.tensor(
+            [list(base_ids) + [tok] for tok in chunk], dtype=torch.long, device=lm.device
+        )
         with torch.no_grad():
             out = lm.model(input_ids=ids, output_hidden_states=True)
         embs[s : s + len(chunk)] = out.hidden_states[layer][:, -1, :].float().cpu().numpy()
         if progress_cb:
-            progress_cb(lo + (hi - lo) * min(1.0, (s + len(chunk)) / n), f"predicted tokens {s + len(chunk)}/{n}")
+            progress_cb(
+                lo + (hi - lo) * min(1.0, (s + len(chunk)) / n),
+                f"predicted tokens {s + len(chunk)}/{n}",
+            )
     return embs
 
 
@@ -158,7 +170,11 @@ def vector_field(
     pred_row = {p: i for i, p in enumerate(pred_list)}
     pred_embs = np.vstack([to_by_token[p] for p in pred_list])
 
-    traj = _trajectory_embeddings(lm, prefix_ids(lm, prefix_text), response_text, n_to) if response_text else None
+    traj = (
+        _trajectory_embeddings(lm, prefix_ids(lm, prefix_text), response_text, n_to)
+        if response_text
+        else None
+    )
     traj_embs = traj[0] if traj is not None else np.empty((0, lm.hidden_size), dtype=np.float64)
 
     if progress_cb:
@@ -177,8 +193,13 @@ def vector_field(
             pca.components_[i] *= -1.0
 
     n_ref, n_pred = emb_to.shape[0], pred_embs.shape[0]
-    raw = np.vstack([pca.transform(emb_to.astype(np.float64)), pca.transform(pred_embs),
-                     pca.transform(traj_embs) if traj is not None else np.empty((0, 2))])
+    raw = np.vstack(
+        [
+            pca.transform(emb_to.astype(np.float64)),
+            pca.transform(pred_embs),
+            pca.transform(traj_embs) if traj is not None else np.empty((0, 2)),
+        ]
+    )
     flat = flatten_density(raw, mu=spread_mu, seed=seed)
     flat_start = flat[:n_ref]
     flat_pred = flat[n_ref : n_ref + n_pred]
@@ -212,11 +233,20 @@ def vector_field(
             e_tokens.append(p_tok)
 
     meta = {
-        "model_id": lm.model_id, "revision": lm.revision, "grid_n": grid_n,
-        "layer_from": n_from, "layer_to": n_to, "num_layers": lm.num_layers,
-        "temperature": float(temperature), "fanout": fan, "prefix_text": prefix_text or "",
-        "count": len(starts), "reference_points": int(grid_vertices.shape[0]),
-        "response_step": int(response_step), "spread_mu": float(spread_mu), "seed": int(seed),
+        "model_id": lm.model_id,
+        "revision": lm.revision,
+        "grid_n": grid_n,
+        "layer_from": n_from,
+        "layer_to": n_to,
+        "num_layers": lm.num_layers,
+        "temperature": float(temperature),
+        "fanout": fan,
+        "prefix_text": prefix_text or "",
+        "count": len(starts),
+        "reference_points": int(grid_vertices.shape[0]),
+        "response_step": int(response_step),
+        "spread_mu": float(spread_mu),
+        "seed": int(seed),
         "start_token_strs": [lm.tokenizer.decode([t]) for t in s_tokens],
         "end_token_strs": [lm.tokenizer.decode([t]) for t in e_tokens],
     }
@@ -263,7 +293,11 @@ def vector_field_animation(
     pmask = _printable_mask(lm)
     prefix = prefix_ids(lm, prefix_text)
     printable_set = set(int(i) for i in printable_tokens(lm)[0].tolist())
-    resp_ids = [int(t) for t in (lm.tokenizer(response_text)["input_ids"] if response_text else []) if int(t) in printable_set]
+    resp_ids = [
+        int(t)
+        for t in (lm.tokenizer(response_text)["input_ids"] if response_text else [])
+        if int(t) in printable_set
+    ]
     n_frames = len(resp_ids) + 1
     R = int(ref_ids.shape[0])
 
@@ -274,7 +308,9 @@ def vector_field_animation(
         if progress_cb:
             progress_cb(0.05 + 0.7 * s / n_frames, f"key frame {s + 1}/{n_frames}")
         ctx = list(prefix) + resp_ids[:s]
-        embs, top_tokens, top_probs = _embed_layers_and_topk(lm, ctx, ref_ids, [n_to], temperature, 1, pmask, None, 0, 0)
+        embs, top_tokens, top_probs = _embed_layers_and_topk(
+            lm, ctx, ref_ids, [n_to], temperature, 1, pmask, None, 0, 0
+        )
         emb_to = embs[n_to]
         by_tok = {int(ref_ids[i]): emb_to[i] for i in range(R)}
         predicted = np.unique(top_tokens)
@@ -283,7 +319,9 @@ def vector_field_animation(
             miss = _embed_layer_only(lm, ctx, missing, n_to, None, 0, 0)
             for i, p in enumerate(missing):
                 by_tok[int(p)] = miss[i]
-        pred_emb = np.vstack([by_tok[int(top_tokens[i, 0])] for i in range(R)])  # (R, H) predicted-token emb per ref
+        pred_emb = np.vstack(
+            [by_tok[int(top_tokens[i, 0])] for i in range(R)]
+        )  # (R, H) predicted-token emb per ref
         per_frame.append((emb_to, pred_emb, top_probs[:, 0], top_tokens[:, 0]))
 
     traj = _trajectory_embeddings(lm, prefix, response_text, n_to) if response_text else None
@@ -303,7 +341,7 @@ def vector_field_animation(
 
     # The reference CLOUD moves with the context; we use it only to decide which token is
     # nearest each (fixed) grid vertex per frame and which way that vertex's arrow points.
-    ref_pos = [pca.transform(f[0].astype(np.float64)) for f in per_frame]   # list of (R, 2)
+    ref_pos = [pca.transform(f[0].astype(np.float64)) for f in per_frame]  # list of (R, 2)
     pred_pos = [pca.transform(f[1].astype(np.float64)) for f in per_frame]  # list of (R, 2)
 
     # ONE static grid over the union extent — these vertices never move.
@@ -312,7 +350,7 @@ def vector_field_animation(
     hi = np.percentile(allref, 99, axis=0)
     gn = max(2, int(grid_n))
     gx, gy = np.meshgrid(np.linspace(lo[0], hi[0], gn), np.linspace(lo[1], hi[1], gn))
-    grid = np.column_stack([gx.ravel(), gy.ravel()]).astype(np.float32)     # (G, 2) STATIC
+    grid = np.column_stack([gx.ravel(), gy.ravel()]).astype(np.float32)  # (G, 2) STATIC
     G = int(grid.shape[0])
     cell = min((hi[0] - lo[0]) / (gn - 1), (hi[1] - lo[1]) / (gn - 1))
     arrow_len = 0.85 * float(cell)
@@ -322,8 +360,8 @@ def vector_field_animation(
     dirs = np.empty((n_frames, G, 2), dtype=np.float32)
     gprob = np.empty((n_frames, G), dtype=np.float32)
     for s in range(n_frames):
-        _, nn = cKDTree(ref_pos[s]).query(grid, k=1)          # nearest ref token at each vertex
-        d = pred_pos[s][nn] - ref_pos[s][nn]                  # that token's ref→prediction flow
+        _, nn = cKDTree(ref_pos[s]).query(grid, k=1)  # nearest ref token at each vertex
+        d = pred_pos[s][nn] - ref_pos[s][nn]  # that token's ref→prediction flow
         norm = np.hypot(d[:, 0], d[:, 1])
         u = np.where(norm[:, None] > 1e-9, d / np.maximum(norm[:, None], 1e-9), 0.0)
         dirs[s] = u.astype(np.float32)
@@ -331,26 +369,38 @@ def vector_field_animation(
         to_tok[s] = per_frame[s][3][nn]
         gprob[s] = per_frame[s][2][nn]
 
-    traj_pos = pca.transform(traj[0]).astype(np.float32) if traj is not None else np.empty((0, 2), dtype=np.float32)
+    traj_pos = (
+        pca.transform(traj[0]).astype(np.float32)
+        if traj is not None
+        else np.empty((0, 2), dtype=np.float32)
+    )
 
     # token id → decoded string, for the union of every token that labels a vertex in any frame
-    involved = set(int(t) for t in ref_ids.tolist()) | set(int(t) for t in np.unique(to_tok).tolist())
+    involved = set(int(t) for t in ref_ids.tolist()) | set(
+        int(t) for t in np.unique(to_tok).tolist()
+    )
     token_strs = {str(t): lm.tokenizer.decode([t]) for t in involved}
 
     meta = {
-        "model_id": lm.model_id, "revision": lm.revision, "n_frames": int(n_frames),
-        "layer_to": int(n_to), "num_layers": lm.num_layers, "grid_n": gn,
-        "reference_points": G, "arrow_len": arrow_len,
-        "temperature": float(temperature), "prefix_text": prefix_text or "",
+        "model_id": lm.model_id,
+        "revision": lm.revision,
+        "n_frames": int(n_frames),
+        "layer_to": int(n_to),
+        "num_layers": lm.num_layers,
+        "grid_n": gn,
+        "reference_points": G,
+        "arrow_len": arrow_len,
+        "temperature": float(temperature),
+        "prefix_text": prefix_text or "",
         "token_strs": token_strs,  # id (as str) -> decoded token
         "trajectory_token_strs": (traj[2] if traj is not None else []),
     }
     arrays = {
-        "grid": grid,                       # (G, 2) static vertices
-        "from_tokens": from_tok,            # (F, G) nearest ref token id per vertex, per frame
-        "to_tokens": to_tok,                # (F, G) its predicted next token id
-        "dirs": dirs,                       # (F, G, 2) unit arrow direction per vertex
-        "probs": gprob,                     # (F, G) top-1 probability
+        "grid": grid,  # (G, 2) static vertices
+        "from_tokens": from_tok,  # (F, G) nearest ref token id per vertex, per frame
+        "to_tokens": to_tok,  # (F, G) its predicted next token id
+        "dirs": dirs,  # (F, G, 2) unit arrow direction per vertex
+        "probs": gprob,  # (F, G) top-1 probability
         "trajectory": traj_pos,
         "trajectory_probs": (traj[1] if traj is not None else np.empty((0,), dtype=np.float32)),
     }

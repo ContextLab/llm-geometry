@@ -61,7 +61,9 @@ class JobRegistry:
             self._active_by_key[cache_key] = job.job_id
             return job, True
 
-    def update(self, job_id: str, progress: float | None = None, message: str | None = None) -> None:
+    def update(
+        self, job_id: str, progress: float | None = None, message: str | None = None
+    ) -> None:
         with self._lock:
             job = self._by_id.get(job_id)
             if job is None:

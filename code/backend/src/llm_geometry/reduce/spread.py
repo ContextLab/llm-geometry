@@ -21,7 +21,9 @@ def _grid_target(n: int, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
     return grid[:n]
 
 
-def flatten_density(coords: np.ndarray, mu: float = 0.85, iters: int = 120, seed: int = 0) -> np.ndarray:
+def flatten_density(
+    coords: np.ndarray, mu: float = 0.85, iters: int = 120, seed: int = 0
+) -> np.ndarray:
     """Spread ``coords`` toward an even grid-like layout via sliced OT; blend by ``mu``."""
     coords = np.asarray(coords, dtype=np.float64)
     n = coords.shape[0]

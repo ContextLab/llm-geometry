@@ -72,7 +72,9 @@ def _surface_field(lm, prefix_list, src_token_ids, printable_ids):
     bs = 64
     for s in range(0, len(src_token_ids), bs):
         chunk = src_token_ids[s : s + bs]
-        ids = torch.tensor([list(prefix_list) + [int(tk)] for tk in chunk], dtype=torch.long, device=lm.device)
+        ids = torch.tensor(
+            [list(prefix_list) + [int(tk)] for tk in chunk], dtype=torch.long, device=lm.device
+        )
         with torch.no_grad():
             logits = lm.model(input_ids=ids).logits[:, -1, :].float()
         p = torch.softmax(logits.masked_fill(~pmask.unsqueeze(0), neg), dim=-1)
@@ -110,19 +112,28 @@ def manifold(
         token_ids = printable_reference_ids(lm, reference_set_size)
         id2s = dict(zip(all_ids.tolist(), all_strs))
         token_strs = [id2s[int(t)] for t in token_ids]
-    matrix = lm.model.get_input_embeddings().weight.detach().float().cpu().numpy().astype(np.float64)
+    matrix = (
+        lm.model.get_input_embeddings().weight.detach().float().cpu().numpy().astype(np.float64)
+    )
     emb = matrix[token_ids]
 
     printable_set = set(int(i) for i in all_ids.tolist())
-    resp_ids = [int(t) for t in (lm.tokenizer(response_text)["input_ids"] if response_text else []) if int(t) in printable_set]
+    resp_ids = [
+        int(t)
+        for t in (lm.tokenizer(response_text)["input_ids"] if response_text else [])
+        if int(t) in printable_set
+    ]
 
     # Emission distribution FIRST: the surface flow field needs the top emitters before we fit
     # the sphere, so each one's predicted next token can be placed in the SAME frame.
     if progress_cb:
         progress_cb(0.3, "computing emission distribution")
     probs_full = next_token_distribution(
-        model_id, prefix_text=prefix_text, temperature=temperature,
-        response_text=response_text, response_step=response_step,
+        model_id,
+        prefix_text=prefix_text,
+        temperature=temperature,
+        response_text=response_text,
+        response_step=response_step,
     )["arrays"]["probs"]
     emis = probs_full[token_ids].astype(np.float64)
     if emis.max() > 0:
@@ -138,7 +149,9 @@ def manifold(
     src_token_ids = [int(token_ids[i]) for i in src_order]
     if progress_cb:
         progress_cb(0.45, "tracing the surface flow field")
-    tgt_ids, tgt_probs = _surface_field(lm, _prefix_ids(lm, prefix_text), src_token_ids, printable_set)
+    tgt_ids, tgt_probs = _surface_field(
+        lm, _prefix_ids(lm, prefix_text), src_token_ids, printable_set
+    )
     uniq_tgt = sorted(set(tgt_ids))
     tgt_row = {tk: i for i, tk in enumerate(uniq_tgt)}
 
@@ -159,9 +172,15 @@ def manifold(
         off += len(resp_ids)
     else:
         traj_dirs = np.empty((0, 3), dtype=np.float64)
-    tgt_dirs = dirs_all[off : off + len(uniq_tgt)] if uniq_tgt else np.empty((0, 3), dtype=np.float64)
+    tgt_dirs = (
+        dirs_all[off : off + len(uniq_tgt)] if uniq_tgt else np.empty((0, 3), dtype=np.float64)
+    )
     surf_src = dirs[src_order] * 2.0
-    surf_dst = (np.array([tgt_dirs[tgt_row[tk]] for tk in tgt_ids]) * 2.0) if uniq_tgt else np.empty((0, 3))
+    surf_dst = (
+        (np.array([tgt_dirs[tgt_row[tk]] for tk in tgt_ids]) * 2.0)
+        if uniq_tgt
+        else np.empty((0, 3))
+    )
 
     if progress_cb:
         progress_cb(0.6, "warping the sphere toward likely tokens")
@@ -170,16 +189,17 @@ def manifold(
     if progress_cb:
         progress_cb(1.0, "done")
 
-    order = np.argsort(-emis)[:max(1, int(warp_top))]
+    order = np.argsort(-emis)[: max(1, int(warp_top))]
     top_list = np.argsort(-emis)[:25]
     meta = {
-        "model_id": lm.model_id, "revision": lm.revision, "prefix_text": prefix_text or "",
-        "temperature": float(temperature), "n_vertices": int(final_verts.shape[0]),
-        "n_faces": int(faces.shape[0]), "warp_top": int(len(order)),
-        "top_tokens": [
-            {"token_str": token_strs[int(i)], "prob": float(emis[i])}
-            for i in top_list
-        ],
+        "model_id": lm.model_id,
+        "revision": lm.revision,
+        "prefix_text": prefix_text or "",
+        "temperature": float(temperature),
+        "n_vertices": int(final_verts.shape[0]),
+        "n_faces": int(faces.shape[0]),
+        "warp_top": int(len(order)),
+        "top_tokens": [{"token_str": token_strs[int(i)], "prob": float(emis[i])} for i in top_list],
         "token_strs": token_strs,  # real decoded strings (printable), aligned with token markers
         "surface_src_strs": [token_strs[int(i)] for i in src_order],
         "surface_dst_strs": [lm.tokenizer.decode([t]) for t in tgt_ids],
@@ -231,10 +251,16 @@ def manifold_animation(
         token_ids = printable_reference_ids(lm, reference_set_size)
         id2s = dict(zip(all_ids.tolist(), all_strs))
         token_strs = [id2s[int(t)] for t in token_ids]
-    matrix = lm.model.get_input_embeddings().weight.detach().float().cpu().numpy().astype(np.float64)
+    matrix = (
+        lm.model.get_input_embeddings().weight.detach().float().cpu().numpy().astype(np.float64)
+    )
     emb = matrix[token_ids]
     printable_set = set(int(i) for i in all_ids.tolist())
-    resp_ids = [int(t) for t in (lm.tokenizer(response_text)["input_ids"] if response_text else []) if int(t) in printable_set]
+    resp_ids = [
+        int(t)
+        for t in (lm.tokenizer(response_text)["input_ids"] if response_text else [])
+        if int(t) in printable_set
+    ]
 
     from ..reduce.sphere import reduce_3d_sphere
     from .context import prefix_ids as _prefix_ids
@@ -250,10 +276,15 @@ def manifold_animation(
     emis_per, src_order_per, tgt_ids_per, tgt_prob_per = [], [], [], []
     for s in range(n_frames):
         if progress_cb:
-            progress_cb(0.05 + 0.45 * s / n_frames, f"frame {s + 1}/{n_frames}: emission + flow field")
+            progress_cb(
+                0.05 + 0.45 * s / n_frames, f"frame {s + 1}/{n_frames}: emission + flow field"
+            )
         probs = next_token_distribution(
-            model_id, prefix_text=prefix_text, temperature=temperature,
-            response_text=response_text, response_step=s,
+            model_id,
+            prefix_text=prefix_text,
+            temperature=temperature,
+            response_text=response_text,
+            response_step=s,
         )["arrays"]["probs"]
         emis = probs[token_ids].astype(np.float64)
         if emis.max() > 0:
@@ -283,7 +314,9 @@ def manifold_animation(
         off += len(resp_ids)
     else:
         traj_dirs = np.empty((0, 3), dtype=np.float64)
-    tgt_dirs = dirs_all[off : off + len(uniq_tgt)] if uniq_tgt else np.empty((0, 3), dtype=np.float64)
+    tgt_dirs = (
+        dirs_all[off : off + len(uniq_tgt)] if uniq_tgt else np.empty((0, 3), dtype=np.float64)
+    )
 
     # Pass 2 — warp the sphere per frame + assemble that frame's surface arrows.
     verts_per, warp_per, faces = [], [], None
@@ -297,29 +330,34 @@ def manifold_animation(
         order = src_order_per[s]
         tids = tgt_ids_per[s]
         surf_src_per.append((dirs[order] * 2.0).astype(np.float32))
-        surf_dst_per.append((np.array([tgt_dirs[tgt_row[t]] for t in tids]) * 2.0).astype(np.float32))
+        surf_dst_per.append(
+            (np.array([tgt_dirs[tgt_row[t]] for t in tids]) * 2.0).astype(np.float32)
+        )
         surf_srcstr_per.append([token_strs[int(i)] for i in order])
         surf_dststr_per.append([lm.tokenizer.decode([t]) for t in tids])
         surf_prob_per.append([round(float(p), 5) for p in tgt_prob_per[s]])
 
     meta = {
-        "model_id": lm.model_id, "revision": lm.revision, "n_frames": int(n_frames),
-        "n_vertices": int(verts_per[0].shape[0]), "prefix_text": prefix_text or "",
+        "model_id": lm.model_id,
+        "revision": lm.revision,
+        "n_frames": int(n_frames),
+        "n_vertices": int(verts_per[0].shape[0]),
+        "prefix_text": prefix_text or "",
         "token_strs": token_strs,
         "trajectory_token_strs": [lm.tokenizer.decode([t]) for t in resp_ids],
-        "surface_src_strs": surf_srcstr_per,   # (F)(K) per-frame source token strings
-        "surface_dst_strs": surf_dststr_per,   # (F)(K) per-frame predicted-next token strings
-        "surface_probs": surf_prob_per,        # (F)(K)
+        "surface_src_strs": surf_srcstr_per,  # (F)(K) per-frame source token strings
+        "surface_dst_strs": surf_dststr_per,  # (F)(K) per-frame predicted-next token strings
+        "surface_probs": surf_prob_per,  # (F)(K)
     }
     arrays = {
-        "faces": faces.astype(np.int64),                       # static
-        "token_points": (dirs * 2.0).astype(np.float32),       # static
-        "traj_points": (traj_dirs * 2.0).astype(np.float32),   # static
-        "vertices": np.stack(verts_per),                       # (F, V, 3) — morph these
-        "warp": np.stack(warp_per),                            # (F, V)
-        "token_emis": np.stack(emis_per).astype(np.float32),   # (F, R) — marker alpha/size
-        "surface_src": np.stack(surf_src_per),                 # (F, K, 3)
-        "surface_dst": np.stack(surf_dst_per),                 # (F, K, 3)
+        "faces": faces.astype(np.int64),  # static
+        "token_points": (dirs * 2.0).astype(np.float32),  # static
+        "traj_points": (traj_dirs * 2.0).astype(np.float32),  # static
+        "vertices": np.stack(verts_per),  # (F, V, 3) — morph these
+        "warp": np.stack(warp_per),  # (F, V)
+        "token_emis": np.stack(emis_per).astype(np.float32),  # (F, R) — marker alpha/size
+        "surface_src": np.stack(surf_src_per),  # (F, K, 3)
+        "surface_dst": np.stack(surf_dst_per),  # (F, K, 3)
     }
     if progress_cb:
         progress_cb(1.0, "done")

@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from ..errors import InvalidParamError
-from ..models.loader import LoadedModel, load_model
+from ..models.loader import load_model
 from .context import effective_context_ids
 
 

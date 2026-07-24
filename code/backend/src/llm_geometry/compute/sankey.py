@@ -64,8 +64,15 @@ def sankey_highlight(
     token_strs = {str(h["token"]): lm.tokenizer.decode([h["token"]]) for h in highlight}
     for h in highlight:
         h["token_str"] = token_strs[str(h["token"])]
-    return {"meta": {"model_id": lm.model_id, "revision": lm.revision, "highlight": highlight,
-                     "token_strs": token_strs}, "arrays": {}}
+    return {
+        "meta": {
+            "model_id": lm.model_id,
+            "revision": lm.revision,
+            "highlight": highlight,
+            "token_strs": token_strs,
+        },
+        "arrays": {},
+    }
 
 
 def sankey(
@@ -144,7 +151,9 @@ def sankey(
             if eos is not None and tok == eos:
                 alive[i] = False
         if progress_cb:
-            progress_cb((step + 1) / n_steps, f"swarm step {step + 1}/{n_steps} · {len(idxs)} particles")
+            progress_cb(
+                (step + 1) / n_steps, f"swarm step {step + 1}/{n_steps} · {len(idxs)} particles"
+            )
 
     # GLOBAL token rows: the SAME ordered set of tokens at EVERY position, so the y-axis order is
     # identical across columns and a token can be read horizontally across time. Pick the most-
@@ -164,7 +173,9 @@ def sankey(
 
     nodes = [
         {
-            "pos": p, "token": tok, "count": c,
+            "pos": p,
+            "token": tok,
+            "count": c,
             "prob": round(c / max(1, alive_at.get(p, n_particles)), 6),
         }
         for (p, tok), c in sorted(node_count.items())
@@ -172,7 +183,10 @@ def sankey(
     ]
     links = [
         {
-            "pos": p, "source_token": a, "target_token": b, "value": c,
+            "pos": p,
+            "source_token": a,
+            "target_token": b,
+            "value": c,
             "cond": round(c / max(1, node_count.get((p, a), 1)), 6),  # empirical P(target | source)
         }
         for (p, a, b), c in sorted(link_count.items())
@@ -183,10 +197,19 @@ def sankey(
     token_strs = {str(tok): lm.tokenizer.decode([tok]) for tok in tokens_seen}
 
     meta = {
-        "model_id": lm.model_id, "revision": lm.revision, "prefix_text": prefix_text or "",
-        "temperature": float(temperature), "n_particles": n_particles, "n_steps": n_steps,
-        "token_strs": token_strs, "nodes": nodes, "links": links, "per_position": per_position,
-        "token_order": [int(t) for t in order_tokens],  # fixed row order, top → bottom (every column)
+        "model_id": lm.model_id,
+        "revision": lm.revision,
+        "prefix_text": prefix_text or "",
+        "temperature": float(temperature),
+        "n_particles": n_particles,
+        "n_steps": n_steps,
+        "token_strs": token_strs,
+        "nodes": nodes,
+        "links": links,
+        "per_position": per_position,
+        "token_order": [
+            int(t) for t in order_tokens
+        ],  # fixed row order, top → bottom (every column)
         "max_pos": int(max_pos),
     }
     arrays = {"node_counts": np.array([n["count"] for n in nodes] or [0], dtype=np.int64)}

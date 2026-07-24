@@ -28,7 +28,12 @@ async def job_event_response(job_id: str) -> EventSourceResponse:
         while True:
             job = registry.get(job_id)
             if job is None:
-                yield {"event": "error", "data": json.dumps({"type": "NotFoundError", "message": "job no longer exists"})}
+                yield {
+                    "event": "error",
+                    "data": json.dumps(
+                        {"type": "NotFoundError", "message": "job no longer exists"}
+                    ),
+                }
                 return
             if job.version != last_version:
                 last_version = job.version
@@ -36,9 +41,17 @@ async def job_event_response(job_id: str) -> EventSourceResponse:
                     yield {"event": "done", "data": json.dumps({"cache_key": job.cache_key})}
                     return
                 if job.status == "error":
-                    yield {"event": "error", "data": json.dumps(job.error or {"type": "ComputeError", "message": "failed"})}
+                    yield {
+                        "event": "error",
+                        "data": json.dumps(
+                            job.error or {"type": "ComputeError", "message": "failed"}
+                        ),
+                    }
                     return
-                yield {"event": "progress", "data": json.dumps({"progress": job.progress, "message": job.message})}
+                yield {
+                    "event": "progress",
+                    "data": json.dumps({"progress": job.progress, "message": job.message}),
+                }
             await asyncio.sleep(_POLL_SECONDS)
 
     return EventSourceResponse(event_generator())

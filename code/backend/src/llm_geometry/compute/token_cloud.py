@@ -65,15 +65,18 @@ def token_cloud(
         progress_cb(1.0, "done")
 
     meta = {
-        "model_id": lm.model_id, "revision": lm.revision, "vocab_size": vocab,
-        "seed": int(seed), "spread_mu": float(spread_mu),
+        "model_id": lm.model_id,
+        "revision": lm.revision,
+        "vocab_size": vocab,
+        "seed": int(seed),
+        "spread_mu": float(spread_mu),
         "token_strs": token_strs,  # real decoded strings (printable), aligned with token_ids
     }
     arrays = {
-        "warped": warped.astype(np.float32),          # shipped to the browser
-        "token_ids": token_ids,                        # shipped to the browser
-        "raw": raw2.astype(np.float32),                # internal: arrow projection
-        "pca_mean": pca.mean_.astype(np.float32),      # internal: arrow projection
+        "warped": warped.astype(np.float32),  # shipped to the browser
+        "token_ids": token_ids,  # shipped to the browser
+        "raw": raw2.astype(np.float32),  # internal: arrow projection
+        "pca_mean": pca.mean_.astype(np.float32),  # internal: arrow projection
         "pca_components": components.astype(np.float32),  # internal: (2, H)
     }
     return {"meta": meta, "arrays": arrays}

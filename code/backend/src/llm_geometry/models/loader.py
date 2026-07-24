@@ -111,7 +111,7 @@ def resolve_model(model_id: str) -> dict[str, Any]:
 
 
 _loaded: "OrderedDict[str, LoadedModel]" = OrderedDict()
-_loaded_lock = threading.Lock()     # guards the _loaded dict (fast path)
+_loaded_lock = threading.Lock()  # guards the _loaded dict (fast path)
 _load_serialize = threading.Lock()  # serializes the heavy, non-thread-safe from_pretrained
 
 
@@ -153,7 +153,10 @@ def load_model(model_id: str) -> LoadedModel:
                 detail={"model_id": mid},
             ) from exc
 
-        torch.set_grad_enabled(False)
+        # Freeze THIS model's parameters instead of torch.set_grad_enabled(False):
+        # flipping the global switch here leaked into the whole process and broke any
+        # later real gradient work (e.g. geo training in the same test run).
+        model.requires_grad_(False)
         model.eval()
         device = "cpu"
         model.to(device)
@@ -162,7 +165,8 @@ def load_model(model_id: str) -> LoadedModel:
         # vocabulary AND per-layer hidden states.
         try:
             enc = tokenizer("hello world", return_tensors="pt")
-            out = model(**{k: v.to(device) for k, v in enc.items()}, output_hidden_states=True)
+            with torch.no_grad():
+                out = model(**{k: v.to(device) for k, v in enc.items()}, output_hidden_states=True)
             logits = out.logits
             hidden = out.hidden_states
             if logits is None or hidden is None or len(hidden) < 2:
