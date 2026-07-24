@@ -34,6 +34,17 @@ real models — the shared foundation all three visualizations will run on:
   a **Sankey** diagram (d3-sankey over a particle swarm), and a **manifold** (Three.js
   RBF-warped sphere). Backends live in `code/backend/src/llm_geometry/compute/`
   (`vector_field.py`, `sankey.py`, `manifold.py`); frontends in `code/frontend/src/viz/`.
+- **Feature 002 (issue #1) adds two explorer tabs** on the same machinery:
+  an **Architecture Explorer** (`llm_geometry/arch/` + `api/routes_arch.py` +
+  `viz/arch/`) — traced-forward-pass graphs of real HF models (functional ops are
+  first-class nodes; tied weights aliased; pre-download size gate), weight-window
+  serving, live traces, and real generation — and a **Geometry Lab**
+  (`llm_geometry/geo/` + `api/routes_geo.py` + `viz/geo/`) — a from-scratch
+  `d_model=3` GeoTransformer really trained on a committed public-domain corpus,
+  with next-next + attention-force vector fields on a Three.js sphere, editable
+  weights via content-hash `weights_token`s, and real fine-tuning. The frozen HTTP
+  contract is `specs/002-interactive-model-explorer/contracts/api.md`; CI lives in
+  `.github/workflows/ci.yml` (all real models — no mocks anywhere).
 
 Still template scaffolding (to be replaced/extended as the science lands):
 - `paper/main.tex` is the boilerplate "Template paper" (sin/cos demo figure).

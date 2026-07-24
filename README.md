@@ -24,8 +24,27 @@ selectable via the view switcher in the web app:
 3. **Manifold** — a 3D sphere warped (RBF) outward toward likely next tokens, rendered
    with Three.js (drag to rotate, scroll to zoom).
 
-Spec, plan, and tasks for the foundation live in
-[`specs/001-core-machinery/`](specs/001-core-machinery/).
+Two **interactive explorer tabs** (issue #1, feature 002) sit alongside them:
+
+4. **Architecture** — a real open-weights model (default SmolLM2-135M-Instruct;
+   any open HF id, size-gated) traced live: every op of the forward pass — including
+   parameterless steps like RoPE, attention softmax, and residual adds — is a
+   clickable node. Type a prompt to re-trace it (debounced, abortable), ▶ play the
+   trace through the diagram, zoom into any weight matrix's actual values, and
+   generate a reply with per-token probabilities.
+5. **Geometry** — a from-scratch *GeoTransformer* (`d_model=3`, 4 layers, 1 head,
+   1000-word vocab) trained on Alice in Wonderland, its 3-D token embeddings living
+   directly on a rendered sphere (no dimensionality reduction anywhere). Explore the
+   *next-next-token* vector field or the attention-force field
+   `Σ softmax(⟨Kz_j,Qz_i⟩)·Vz_j` (arXiv:2607.13295) per layer, edit W_Q/W_K/W_V/W_O
+   or the embeddings (presets or cell-by-cell; content-addressed weight tokens), and
+   fine-tune on your own text/file/HF dataset with real SGD — the canonical
+   checkpoint is never mutated.
+
+Specs live in [`specs/001-core-machinery/`](specs/001-core-machinery/) and
+[`specs/002-interactive-model-explorer/`](specs/002-interactive-model-explorer/)
+(the frozen API contract for the explorer tabs is
+[`specs/002-interactive-model-explorer/contracts/api.md`](specs/002-interactive-model-explorer/contracts/api.md)).
 
 ## Quickstart
 
