@@ -12,7 +12,7 @@ by the 001 machinery (and by another workstream this batch); the Geometry Lab on
 
 from __future__ import annotations
 
-from ..config import REPO_ROOT
+from pathlib import Path
 
 # --- Fixed architecture (frozen contract) -------------------------------------------
 D_MODEL = 3
@@ -34,10 +34,11 @@ PAD_TOKEN = "<pad>"
 SPECIAL_TOKENS: dict[str, int] = {"unk": UNK_ID, "eos": EOS_ID, "pad": PAD_ID}
 
 # --- Corpus (real public-domain text; FR-109 forbids mock text) ---------------------
-# Alice's Adventures in Wonderland, Project Gutenberg ebook #11. The raw file is
-# committed to the repo (public domain) so CI never re-downloads it.
+# Alice's Adventures in Wonderland, Project Gutenberg ebook #11. Shipped as PACKAGE
+# DATA (committed, public domain) so CI, pip installs, and containers never
+# re-download it.
 CORPUS_ID = "gutenberg-11-alice-in-wonderland"
-CORPUS_PATH = REPO_ROOT / "data" / "raw" / "alice-in-wonderland.txt"
+CORPUS_PATH = Path(__file__).resolve().parent / "data" / "alice-in-wonderland.txt"
 CORPUS_URLS = (
     "https://www.gutenberg.org/files/11/11-0.txt",
     "https://www.gutenberg.org/ebooks/11.txt.utf-8",

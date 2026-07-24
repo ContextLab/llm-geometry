@@ -24,7 +24,7 @@ def _default_cache_dir() -> Path:
     override = os.environ.get("LLM_GEOMETRY_CACHE_DIR")
     if override:
         return Path(override).expanduser().resolve()
-    return REPO_ROOT / "data" / "processed" / "cache"
+    return REPO_ROOT / ".cache" / "llm-geometry"
 
 
 # Derived cache of precomputed artifacts (git-ignored, regenerable — Constitution II/III).

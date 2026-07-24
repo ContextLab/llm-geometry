@@ -1,8 +1,8 @@
 """Real corpus acquisition for the Geometry Lab.
 
-Alice's Adventures in Wonderland (Project Gutenberg ebook #11). The raw file lives at
-``data/raw/alice-in-wonderland.txt`` and is committed to the repo (public domain), so
-normal runs and CI never touch the network. If the file is somehow absent it is
+Alice's Adventures in Wonderland (Project Gutenberg ebook #11). The raw file ships as
+package data (``llm_geometry/geo/data/alice-in-wonderland.txt``, public domain), so
+normal runs, pip installs, containers, and CI never touch the network. If the file is somehow absent it is
 downloaded once from Project Gutenberg and integrity-checked against the recorded
 sha256 — a mismatch is a hard error, never silently accepted (Constitution I).
 """

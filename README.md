@@ -1,62 +1,44 @@
 # llm-geometry
 
-Understanding large language models through **interactive geometric visualizations** of
-their embedding space. The project will ship three explorable web visualizations —
-transformer layers as **vector fields**, token sequences as **Sankey diagrams**, and
-reachable "thoughts" as a **manifold** — all built on a shared, precompute-and-cache
-foundation. See [`project_description.md`](project_description.md) for the science and UX.
+Understanding large language models through **interactive geometric visualizations**.
+Five explorable views over real open-weights models — no mocks, no canned data:
 
-## Status
-
-The **core machinery** (the shared backend + frontend foundation all three
-visualizations run on) is implemented: open-weights model loading with capability
-detection, real next-token distributions and per-layer embeddings, 2D (PCA/UMAP) and 3D
-(spherical) reductions with an *n×n* reference grid, an integrity-checked
-precompute-and-cache pipeline with single-flight dedup and SSE progress, a FastAPI
-service, and a Svelte web shell with the shared controls and a live preview.
-
-All **three visualizations** are now implemented on top of that foundation and
-selectable via the view switcher in the web app:
-1. **Vector field** — an *n×n* grid of reference tokens, each drawn as an arrow to its
-   most-likely next token in 2D-reduced (PCA) embedding space.
-2. **Sankey diagram** — a particle swarm samples next tokens across positions; flow
-   width is the particle count (d3-sankey).
-3. **Manifold** — a 3D sphere warped (RBF) outward toward likely next tokens, rendered
-   with Three.js (drag to rotate, scroll to zoom).
-
-Two **interactive explorer tabs** (issue #1, feature 002) sit alongside them:
-
-4. **Architecture** — a real open-weights model (default SmolLM2-135M-Instruct;
-   any open HF id, size-gated) traced live: every op of the forward pass — including
-   parameterless steps like RoPE, attention softmax, and residual adds — is a
-   clickable node. Type a prompt to re-trace it (debounced, abortable), ▶ play the
-   trace through the diagram, zoom into any weight matrix's actual values, and
-   generate a reply with per-token probabilities.
+1. **Vector field** — an *n×n* grid of reference tokens in 2D-reduced embedding
+   space, each casting arrows toward its likely next tokens (temperature fans the
+   arrows out; a typed response traces an animated trajectory).
+2. **Sankey** — a particle swarm samples next tokens position-by-position; flow width
+   is the particle count, with a teacher-forced gold path for your own response.
+3. **Manifold** — a unit sphere warped (RBF + ARAP) toward the true top next tokens,
+   with an optional surface flow field showing where each likely token leads next.
+4. **Architecture** — a real model (default SmolLM2-135M-Instruct; any open HF id,
+   size-gated before download) traced live: **every op of the forward pass** — RoPE,
+   attention softmax, residual adds included — is a clickable node. Re-trace your own
+   prompt, ▶ play the trace through the diagram, zoom into any weight matrix's actual
+   values, and generate replies with per-token probabilities.
 5. **Geometry** — a from-scratch *GeoTransformer* (`d_model=3`, 4 layers, 1 head,
-   1000-word vocab) trained on Alice in Wonderland, its 3-D token embeddings living
-   directly on a rendered sphere (no dimensionality reduction anywhere). Explore the
-   *next-next-token* vector field or the attention-force field
-   `Σ softmax(⟨Kz_j,Qz_i⟩)·Vz_j` (arXiv:2607.13295) per layer, edit W_Q/W_K/W_V/W_O
-   or the embeddings (presets or cell-by-cell; content-addressed weight tokens), and
-   fine-tune on your own text/file/HF dataset with real SGD — the canonical
-   checkpoint is never mutated.
+   1000-word vocab) really trained on Alice in Wonderland, its 3-D token embeddings
+   living directly on a rendered sphere. Explore the *next-next-token* field or the
+   attention-force field `Σ softmax(⟨Kz_j,Qz_i⟩)·Vz_j`
+   ([arXiv:2607.13295](https://arxiv.org/abs/2607.13295)) per layer, edit
+   W_Q/W_K/W_V/W_O or the embeddings (presets or cell-by-cell), and fine-tune on your
+   own text/file/HF dataset with real SGD.
 
-Specs live in [`specs/001-core-machinery/`](specs/001-core-machinery/) and
-[`specs/002-interactive-model-explorer/`](specs/002-interactive-model-explorer/)
-(the frozen API contract for the explorer tabs is
-[`specs/002-interactive-model-explorer/contracts/api.md`](specs/002-interactive-model-explorer/contracts/api.md)).
+See [`project_description.md`](project_description.md) for the science and UX vision,
+and [issue #1](https://github.com/ContextLab/llm-geometry/issues/1) for the build log
+(design decisions, red-team rounds, screenshots).
 
 ## Quickstart
 
-Requires Python ≥ 3.10 and Node ≥ 20 (or use the Docker image below). First run
-downloads a small open-weights model from HuggingFace and caches it.
+Requires Python ≥ 3.10 and Node ≥ 20 (or use conda/Docker below). First run downloads
+a small open-weights model from HuggingFace and caches it; the Geometry tab trains its
+tiny model once (~25 s) and caches the checkpoint.
 
 ```bash
 # Backend (FastAPI + PyTorch/transformers + reduction stack)
 cd code/backend
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[test]"
-uvicorn llm_geometry.api.app:app --port 8000     # JSON API on :8000
+uvicorn llm_geometry.api.app:app --port 8000      # JSON API on :8000
 
 # Frontend (Svelte + Vite) — in a second terminal
 cd code/frontend
@@ -64,71 +46,68 @@ npm install
 npm run dev                                       # http://localhost:5173 (proxies /api)
 ```
 
-Open <http://localhost:5173>, keep the default model (`gpt2`) or type any open-weights
-HuggingFace id, edit the prompt, and adjust temperature / layer to watch the cached
-data update.
+Or start both with one command (health-checked, stale-port guarded):
+
+```bash
+sh scripts/dev.sh          # start · sh scripts/dev.sh stop
+```
 
 ### Reproducible environments
 
-A `conda`/`mamba` environment pins **both** stacks (Python 3.11 + Node 20) in one
-isolated env:
+One `conda`/`mamba` env pins both stacks (Python 3.11 + Node 20):
 
 ```bash
-mamba env create -f environment.yml   # or: conda env create -f environment.yml
-conda activate llm-geometry
+mamba env create -f environment.yml && conda activate llm-geometry
 uvicorn llm_geometry.api.app:app --port 8000          # backend
 cd code/frontend && npm install && npm run dev        # frontend
 ```
 
-A `Dockerfile` is also provided (same dual stack) for hosts with a running Docker
-daemon:
+Or Docker (serves the API + built UI on :8000):
 
 ```bash
-docker build -t llm-geometry .
-docker run -it -p 8000:8000 llm-geometry              # serves API + built UI on :8000
+docker build -t llm-geometry . && docker run -it -p 8000:8000 llm-geometry
 ```
 
 ## Tests
 
-All tests use **real** models (no mocks):
+Everything runs against **real models** — real downloads, real training, real
+browsers; the project forbids mocks:
 
 ```bash
-cd code/backend && . .venv/bin/activate && pytest -q          # 39 tests, real tiny-gpt2/distilgpt2
-cd code/frontend && npm run test                              # vitest unit tests
-cd code/frontend && npx playwright install chromium && npm run test:e2e   # e2e + screenshots
+cd code/backend && . .venv/bin/activate
+ruff check src/ tests/ && black --check src/ && pytest -q      # 200+ real-model tests
+
+cd ../frontend
+npm run check && npm run test && npm run build                 # types · unit · build
+npx playwright install chromium && npm run test:e2e            # e2e vs the live stack
 ```
 
-End-to-end validation steps are in
-[`specs/001-core-machinery/quickstart.md`](specs/001-core-machinery/quickstart.md).
+The same gate runs in CI (`.github/workflows/ci.yml`) on every push plus a nightly
+schedule, with HuggingFace model and artifact caches.
 
 ## Repository layout
 
 ```
 code/
-├── backend/                 # Python package `llm_geometry`
+├── backend/                  # Python package `llm_geometry`
 │   ├── src/llm_geometry/     #   models · compute · reduce · cache · jobs · api
-│   └── tests/                #   unit · integration · contract (real-model)
-├── frontend/                # Svelte + TypeScript + Vite app (shell, controls, preview)
-└── notebooks/               # Jupyter notebooks (paper figures)
-data/
-├── raw/ · processed/        # inputs; processed/cache/ holds derived artifacts (git-ignored)
-paper/                       # LaTeX sources, figures, bibliography submodule
-specs/001-core-machinery/    # spec · plan · research · data-model · contracts · tasks
+│   │   ├── arch/             #   Architecture tab: traced graphs, weight windows, generation
+│   │   └── geo/              #   Geometry tab: GeoTransformer, training, fields (+ corpus data)
+│   └── tests/                #   unit · integration · contract (all real-model)
+└── frontend/                 # Svelte + TypeScript + Vite app
+    └── src/{viz,controls,lib}/   # five views · shared controls · typed API client
+docs/screenshots/             # verification screenshots referenced from issue threads
+notes/                        # session notes + agent red-team/fix reports
+scripts/dev.sh                # dev-stack launcher (both servers, health-checked)
+specs/                        # Spec Kit features: 001 core machinery · 002 explorer tabs
+.cache/llm-geometry/          # derived precompute artifacts (git-ignored, regenerable)
 ```
 
-Derived precompute artifacts under `data/processed/cache/` are git-ignored and
-regenerable from `(model + parameters)`.
-
-## Building the paper
-
-```bash
-sh setup.sh                  # one-time: pull the CDL-bibliography submodule
-cd paper && sh compile.sh    # build main.{tex→pdf} + supplement
-```
+The API contract for the explorer tabs is frozen at
+[`specs/002-interactive-model-explorer/contracts/api.md`](specs/002-interactive-model-explorer/contracts/api.md).
 
 ## Development
 
-This project uses **Spec-Driven Development** (Spec Kit). Features flow through
-specify → clarify → plan → tasks → analyze → implement. See [`CLAUDE.md`](CLAUDE.md) and
-the project constitution at
-[`.specify/memory/constitution.md`](.specify/memory/constitution.md).
+This project uses **Spec-Driven Development** (Spec Kit): specify → clarify → plan →
+tasks → analyze → implement. See [`CLAUDE.md`](CLAUDE.md) and the project constitution
+at [`.specify/memory/constitution.md`](.specify/memory/constitution.md).

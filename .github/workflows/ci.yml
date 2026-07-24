@@ -40,7 +40,7 @@ jobs:
       - name: Cache derived artifacts (tiny-model checkpoints, graphs)
         uses: actions/cache@v4
         with:
-          path: data/processed/cache
+          path: .cache/llm-geometry
           key: llmgeo-cache-${{ runner.os }}-${{ hashFiles('code/backend/src/llm_geometry/geo/config.py') }}
       - name: Install
         run: |
@@ -100,7 +100,7 @@ jobs:
       - name: Cache derived artifacts
         uses: actions/cache@v4
         with:
-          path: data/processed/cache
+          path: .cache/llm-geometry
           key: llmgeo-cache-${{ runner.os }}-${{ hashFiles('code/backend/src/llm_geometry/geo/config.py') }}
       - name: Backend venv (playwright's webServer activates .venv)
         working-directory: code/backend

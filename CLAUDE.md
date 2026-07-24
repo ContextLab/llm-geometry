@@ -46,9 +46,11 @@ real models — the shared foundation all three visualizations will run on:
   contract is `specs/002-interactive-model-explorer/contracts/api.md`; CI lives in
   `.github/workflows/ci.yml` (all real models — no mocks anywhere).
 
-Still template scaffolding (to be replaced/extended as the science lands):
-- `paper/main.tex` is the boilerplate "Template paper" (sin/cos demo figure).
-- `code/notebooks/demo.ipynb` only generates that trig demo figure.
+The original paper-template scaffolding (`paper/` + its bibliography submodule,
+`code/notebooks/`, `data/`, `setup.sh`) has been removed; the repo is the web app.
+The Geometry Lab's training corpus ships as backend package data
+(`llm_geometry/geo/data/`), and the derived precompute cache lives at
+`.cache/llm-geometry/` (git-ignored; override with `LLM_GEOMETRY_CACHE_DIR`).
 
 ## How work happens here: Spec-Driven Development (Spec Kit)
 
@@ -69,18 +71,16 @@ This project is initialized with **Spec Kit** (`.specify/`, integration = `claud
 
 ## Repository layout
 
-- `code/backend/` — Python package `llm_geometry` (`src/llm_geometry/{models,compute,reduce,cache,jobs,api}`) + `tests/{unit,integration,contract}`; `pyproject.toml`, `requirements.txt`, pinned `requirements.lock`.
-- `code/frontend/` — Svelte + TS + Vite app (`src/{controls,lib,preview,styles}`) + `tests/{unit,e2e}`.
-- `code/notebooks/` — Jupyter notebooks, one per paper figure (`demo.ipynb` = Figure 1).
-- `data/raw/`, `data/processed/` — inputs before/after processing; `data/processed/cache/` holds derived precompute artifacts (git-ignored, regenerable from model+params).
-- `paper/` — LaTeX sources (`main.tex`, `supplement.tex`), `figs/` (final PDFs) and `figs/source/` (panel sources — `trig.pdf` links to `source/sin.pdf`/`cos.pdf` and is meant to be re-linked in Illustrator), `admin/` (cover letters, forms), and the `CDL-bibliography` git submodule.
+- `code/backend/` — Python package `llm_geometry` (`src/llm_geometry/{models,compute,reduce,cache,jobs,api,arch,geo}`) + `tests/{unit,integration,contract}`; `pyproject.toml`, `requirements.txt`, pinned `requirements.lock`. The geo training corpus is package data (`geo/data/`).
+- `code/frontend/` — Svelte + TS + Vite app (`src/{viz,controls,lib,preview,styles}`) + `tests/{unit,e2e}`.
+- `docs/screenshots/` — verification screenshots referenced from issue threads.
+- `notes/` — session notes and agent red-team/fix reports (`notes/agent-reports/`).
+- `scripts/dev.sh` — health-checked dev-stack launcher for both servers.
+- `.cache/llm-geometry/` — derived precompute artifacts (git-ignored, regenerable from model+params; `LLM_GEOMETRY_CACHE_DIR` overrides).
 
 ## Commands
 
 ```bash
-# One-time setup: pull the CDL-bibliography submodule
-sh setup.sh
-
 # Backend (FastAPI + PyTorch/transformers + reductions)
 cd code/backend && python -m venv .venv && . .venv/bin/activate && pip install -e ".[test]"
 uvicorn llm_geometry.api.app:app --port 8000          # JSON API on :8000
@@ -97,14 +97,17 @@ mamba env create -f environment.yml && conda activate llm-geometry
 # Or a container (requires a running Docker daemon)
 docker build -t llm-geometry . && docker run -it -p 8000:8000 llm-geometry
 
-# Build the paper (run from paper/; needs a LaTeX toolchain)
-cd paper && sh compile.sh      # main.{tex→pdf} + supplement, then cleans aux files
+# Or start both dev servers with one health-checked command
+sh scripts/dev.sh              # sh scripts/dev.sh stop
 ```
 
-Note: `data/processed/cache/` holds derived precompute artifacts — git-ignored and
-regenerable from `(model + params)`; delete it freely to force a rebuild.
+Note: `.cache/llm-geometry/` holds derived precompute artifacts — git-ignored and
+regenerable from `(model + params)`; delete it freely to force a rebuild
+(`LLM_GEOMETRY_CACHE_DIR` overrides the location).
 
-Note: the existing `Dockerfile` pins an old scientific-Python stack (Python 3.7, conda). The visualization framework will need its own dependency setup (open-weights model inference, dimensionality reduction, Open3D, a web stack) — extend the environment deliberately and keep `Dockerfile`/requirements in sync with what the code actually imports.
+Note: the `Dockerfile` builds the real dual stack (python:3.11-slim + Node 20,
+`pip install -e code/backend[test]`, `npm run build`, uvicorn on :8000) — keep it
+and the requirements files in sync with what the code actually imports.
 
 <!-- SPECKIT START -->
 Active feature: **001-core-machinery** — Core Project Machinery (the shared

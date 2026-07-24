@@ -36,6 +36,11 @@ test = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# The Geometry Lab's training corpus ships with the package (public domain), so pip
+# installs / containers / CI never re-download it.
+llm_geometry = ["geo/data/*.txt"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
