@@ -24,6 +24,12 @@ class Job:
     message: str = ""
     error: Optional[dict[str, Any]] = None
     version: int = 0  # bumps on every change; lets SSE detect updates
+    # Feature 002 (additive, backward-compatible — contracts/api.md): an optional
+    # phase label carried on SSE progress events ("train" | "finetune" | …) and an
+    # optional result payload merged into the terminal `done` event data (e.g.
+    # {"checkpoint_id": …} for /api/geo/train).
+    phase: Optional[str] = None
+    result: Optional[dict[str, Any]] = None
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -34,6 +40,8 @@ class Job:
             "message": self.message,
             "error": self.error,
             "version": self.version,
+            "phase": self.phase,
+            "result": self.result,
         }
 
 
@@ -47,16 +55,17 @@ class JobRegistry:
         with self._lock:
             return self._by_id.get(job_id)
 
-    def get_or_create(self, cache_key: str) -> tuple[Job, bool]:
+    def get_or_create(self, cache_key: str, phase: str | None = None) -> tuple[Job, bool]:
         """Return ``(job, created)``. If an active job already exists for this cache
-        key, return it with ``created=False`` (single-flight)."""
+        key, return it with ``created=False`` (single-flight). ``phase`` labels a
+        newly created job's SSE progress events (feature 002; optional)."""
         with self._lock:
             existing_id = self._active_by_key.get(cache_key)
             if existing_id is not None:
                 job = self._by_id.get(existing_id)
                 if job is not None and job.status in ("queued", "running"):
                     return job, False
-            job = Job(job_id=uuid.uuid4().hex, cache_key=cache_key)
+            job = Job(job_id=uuid.uuid4().hex, cache_key=cache_key, phase=phase)
             self._by_id[job.job_id] = job
             self._active_by_key[cache_key] = job.job_id
             return job, True
@@ -75,13 +84,17 @@ class JobRegistry:
                 job.message = message
             job.version += 1
 
-    def finish(self, job_id: str) -> None:
+    def finish(self, job_id: str, result: dict[str, Any] | None = None) -> None:
+        """Mark done; ``result`` (optional) is merged into the SSE ``done`` event data
+        (feature 002 — e.g. the minted checkpoint_id / weights_token)."""
         with self._lock:
             job = self._by_id.get(job_id)
             if job is None:
                 return
             job.status = "done"
             job.progress = 1.0
+            if result is not None:
+                job.result = dict(result)
             job.version += 1
             if self._active_by_key.get(job.cache_key) == job_id:
                 del self._active_by_key[job.cache_key]

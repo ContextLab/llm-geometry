@@ -38,7 +38,12 @@ async def job_event_response(job_id: str) -> EventSourceResponse:
             if job.version != last_version:
                 last_version = job.version
                 if job.status == "done":
-                    yield {"event": "done", "data": json.dumps({"cache_key": job.cache_key})}
+                    # Feature 002 (additive): a job's result payload (e.g. the minted
+                    # checkpoint_id / weights_token) rides along on the done event.
+                    done_data: dict = {"cache_key": job.cache_key}
+                    if job.result:
+                        done_data.update(job.result)
+                    yield {"event": "done", "data": json.dumps(done_data)}
                     return
                 if job.status == "error":
                     yield {
@@ -48,9 +53,12 @@ async def job_event_response(job_id: str) -> EventSourceResponse:
                         ),
                     }
                     return
+                progress_data: dict = {"progress": job.progress, "message": job.message}
+                if job.phase:  # optional phase label (feature 002, contracts/api.md)
+                    progress_data["phase"] = job.phase
                 yield {
                     "event": "progress",
-                    "data": json.dumps({"progress": job.progress, "message": job.message}),
+                    "data": json.dumps(progress_data),
                 }
             await asyncio.sleep(_POLL_SECONDS)
 

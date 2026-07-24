@@ -158,3 +158,4 @@ code/frontend/playwright-report/
 code/frontend/tests/e2e/__screenshots__/
 .playwright-mcp/
 /live-*.png
+.devservers/
