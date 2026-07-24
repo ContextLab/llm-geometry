@@ -184,13 +184,24 @@ def finetune(
                 ignore_index=PAD_ID,
             )
             loss.backward()
+            # The norm-free d_model=3 model can explode on one bad batch (observed as a
+            # nan loss on CI's Linux BLAS while the same seed was stable on macOS) —
+            # clip, and fail LOUD if divergence happens anyway (never ship a nan).
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             with torch.no_grad():  # preserve the S² embedding invariant
                 norms = model.embedding.norm(dim=1, keepdim=True).clamp_min(1e-12)
                 model.embedding.div_(norms)
+            if not torch.isfinite(loss):
+                raise ComputeError(
+                    f"fine-tuning diverged (non-finite loss at step {step + 1}); "
+                    "try fewer steps or a lower learning rate"
+                )
             if progress_cb is not None and (step + 1) % 10 == 0:
                 progress_cb((step + 1) / steps, f"step {step + 1}/{steps} · loss {loss:.2f}")
         loss_after = eval_loss(model, windows)
+        if not (np.isfinite(loss_before) and np.isfinite(loss_after)):
+            raise ComputeError("fine-tuning produced a non-finite loss; refusing to save")
 
     new_ws = model.get_weight_set()
     new_token = save_weight_set(new_ws, source="finetuned", store=store)

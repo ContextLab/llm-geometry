@@ -93,3 +93,19 @@ https://github.com/ContextLab/llm-geometry/issues/1#issuecomment-5071465097
 - 2026-07-24 11:3x Plan red-teamed (2 rounds), revised, posted to issue #1
   (comment 5071465097).
 - 2026-07-24 11:4x Branch + spec + frozen contract written.
+
+## Round 2 (user follow-up): deep red team + cleanup + Pages plan
+- [x] 5 per-tab Playwright red-teams (250+ screenshots): manifold CRITICAL
+      (bulges targeted arbitrary tokens) + vector MAJOR (animation never played)
+      + arch HIGH (false success on size-gate) + 30 more findings. ALL FIXED
+      (f1355cb, d9a5fff); manifold fix verified live ("Paris 30.2%").
+- [x] Repo audit + cleanup (717d23a): paper//data//notebooks//setup.sh//submodule
+      removed; corpus -> llm_geometry/geo/data (package data); cache ->
+      .cache/llm-geometry; README/CLAUDE.md/code README rewritten.
+- [x] PR #2 created (002 -> main). Merge after CI green (user pre-authorized).
+- [ ] Feature 003 (static GitHub Pages build) — plan in scratchpad
+      static-site-plan.md; research in notes/agent-reports/static-site-research.md.
+      Key facts: ONNX exports expose NO attentions/hidden states (precompute
+      traces); HF CDN allows CORS Range reads of safetensors (exact windows,
+      bf16>>16 decode); geo model ports to ~300 lines TS (<1s finetune);
+      vite base /llm-geometry/; deploy-pages@v5 flow.

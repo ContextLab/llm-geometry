@@ -172,6 +172,9 @@ def train_geo_model(
                 ce = _ce_loss(model, batch)
                 loss = ce + repulsion_weight * _uniformity_loss(model, gen)
                 loss.backward()
+                # Safety net against platform-dependent gradient explosions (the same
+                # trajectory diverged on CI's Linux BLAS while stable on macOS).
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 opt.step()
                 with torch.no_grad():  # keep the embeddings on S² (FR-103)
                     norms = model.embedding.norm(dim=1, keepdim=True).clamp_min(1e-12)
