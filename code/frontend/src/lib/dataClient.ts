@@ -488,6 +488,9 @@ export interface ArchGeneratedToken {
   text: string;
   prob: number;
   topk: { ids: number[]; texts: string[]; probs: number[] };
+  // Optional honesty annotation (static build): set when the quantized decode's
+  // greedy pick disagrees with the full-precision re-scoring pass's argmax.
+  note?: string;
 }
 
 export interface ArchGenerateResult {
@@ -871,8 +874,10 @@ export function createClient(opts: ClientOptions = {}) {
 
 export type Client = ReturnType<typeof createClient>;
 
-// Default client used by the app (same-origin; Vite proxies /api in dev).
-export const client = createClient();
+// Default client used by the app: the backend client (same-origin; Vite proxies
+// /api in dev), or the static Pages client when built with VITE_DATA_MODE=static.
+// The pick lives in clientProvider.ts; the type is identical either way.
+export { client, DATA_MODE } from "./clientProvider";
 
 // ---------------------------------------------------------------------------
 // Trailing-edge debounce for interactive controls (FR-108 cancel-and-restart):

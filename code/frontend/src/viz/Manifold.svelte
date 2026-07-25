@@ -8,6 +8,8 @@
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
   import ExportBar from "../controls/ExportBar.svelte";
+  import StaticNotice from "../lib/StaticNotice.svelte";
+  import { isStaticMiss } from "../lib/staticUx";
 
   // Visualization 3 — reachable "thoughts" as a sphere warped (RBF) toward likely next
   // tokens (project_description.md §3).
@@ -15,6 +17,9 @@
   let progress = $state(0);
   let progressMsg = $state("");
   let error = $state("");
+  // Static build only (FR-203): the data layer's "not precomputed" refusal, shown as a
+  // designed note while the previous manifold stays on screen — never a blank panel.
+  let staticMiss = $state("");
   let data = $state<ManifoldData | null>(null);
   let manim = $state<ManifoldAnimation | null>(null); // precomputed key frames (response present)
   let animTime = 0; // continuous key-frame index; tweened toward responseStep
@@ -54,7 +59,11 @@
   let resizeObs: ResizeObserver | undefined;
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let runId = 0;
-  let lastRefresh = 0;
+  // null until the first effect run: a remount must RECORD the current nonce, not
+  // diff against 0 — with a global nonce, initializing to 0 re-forced every view
+  // remount after any Recompute click (red-team static F1; also wasteful in
+  // backend mode).
+  let lastRefresh: number | null = null;
 
   const LOW = new THREE.Color("#2a3a6e");
   const HIGH = new THREE.Color("#b794f6");
@@ -587,7 +596,7 @@
     const resp = $responseText;
     const width = $rbfWidth;
     const rn = $refreshNonce;
-    const force = rn !== lastRefresh;
+    const force = lastRefresh !== null && rn !== lastRefresh;
     lastRefresh = rn;
     if (debounce) clearTimeout(debounce);
     // 600 ms: every distinct width value is its own cached ARAP precompute, so slow
@@ -615,6 +624,7 @@
   async function load(m: string, pfx: string, temp: number, resp: string, width: number, force = false) {
     const my = ++runId;
     error = "";
+    staticMiss = "";
     loading = true;
     progress = 0;
     progressMsg = force ? "recomputing…" : "starting…";
@@ -647,7 +657,10 @@
         buildMesh(data, 0);
       }
     } catch (e: any) {
-      if (my === runId) error = `${e.type ?? "Error"}: ${e.message ?? e}`;
+      if (my === runId) {
+        if (isStaticMiss(e)) staticMiss = e.message;
+        else error = `${e.type ?? "Error"}: ${e.message ?? e}`;
+      }
     } finally {
       if (my === runId) loading = false;
     }
@@ -681,6 +694,7 @@
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}
   {#if error}<div class="error" data-testid="viz-manifold-error">{error}</div>{/if}
+  {#if staticMiss}<StaticNotice message={staticMiss} testid="viz-manifold-static-note" />{/if}
   <div bind:this={containerEl} class="canvas" data-testid="manifold-canvas"></div>
   {#if data}
     <p class="caption">

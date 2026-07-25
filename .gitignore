@@ -153,3 +153,4 @@ code/frontend/tests/e2e/__screenshots__/
 .playwright-mcp/
 /live-*.png
 .devservers/
+code/frontend/public/static-data/

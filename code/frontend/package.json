@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview --port 5173",
+    "preview:static": "VITE_DATA_MODE=static PAGES_BASE=/llm-geometry/ vite build && PAGES_BASE=/llm-geometry/ vite preview --port 4173 --strictPort",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -28,6 +29,7 @@
     "vitest": "^2.1.0"
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
     "d3": "^7.9.0",
     "d3-sankey": "^0.12.3",
     "gifenc": "^1.0.3",

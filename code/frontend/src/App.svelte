@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import ModelSelector from "./controls/ModelSelector.svelte";
   import PromptPrefix from "./controls/PromptPrefix.svelte";
   import ResponseAnimator from "./controls/ResponseAnimator.svelte";
@@ -12,6 +13,9 @@
   import ArchitectureExplorer from "./viz/arch/ArchitectureExplorer.svelte";
   import GeometryLab from "./viz/geo/GeometryLab.svelte";
   import Tooltip from "./lib/Tooltip.svelte";
+  import StaticBadge from "./lib/StaticBadge.svelte";
+  import StaticPresetPicker from "./lib/StaticPresetPicker.svelte";
+  import { STATIC_MODE, applyStaticDefaults } from "./lib/staticUx";
   import { view, refreshNonce, type View } from "./lib/stores";
 
   const tabs: { id: View; label: string }[] = [
@@ -33,6 +37,15 @@
   // The two explorer tabs own their controls (per-view stores; see specs/002 plan §3b) —
   // the shared model/prompt/temperature sidebar semantics don't apply to them.
   const sharedControlsViews: View[] = ["vector", "sankey", "manifold"];
+
+  // Static boot (feature 003): before the 001 views fire their first fetch, point the
+  // shared stores at preset 1 / the recorded preset model so the default state is an
+  // exact precomputed hit (instant render — no miss-note flash). Backend builds skip
+  // this entirely (STATIC_MODE is compile-time false).
+  let staticBooting = $state(STATIC_MODE);
+  onMount(() => {
+    if (STATIC_MODE) void applyStaticDefaults().finally(() => (staticBooting = false));
+  });
 </script>
 
 <div class="app">
@@ -44,15 +57,23 @@
         <p>Explore the geometry of a transformer's embedding space.</p>
       </div>
     </div>
+    {#if STATIC_MODE}<StaticBadge />{/if}
   </header>
 
   <main class="layout">
     <aside class="controls panel" data-testid="controls">
       <div class="controls-head">
         <h2>Controls</h2>
-        <button class="recompute" data-testid="recompute" title="Force re-compute the current view" onclick={() => refreshNonce.update((n) => n + 1)}>↻ Recompute</button>
+        {#if !STATIC_MODE}
+          <!-- Static builds serve precomputed artifacts: a force-recompute can never
+               succeed there, so the button hides instead of lying (red-team static F1). -->
+          <button class="recompute" data-testid="recompute" title="Force re-compute the current view" onclick={() => refreshNonce.update((n) => n + 1)}>↻ Recompute</button>
+        {/if}
       </div>
       {#if sharedControlsViews.includes($view)}
+        {#if STATIC_MODE && ($view === "vector" || $view === "sankey" || $view === "manifold")}
+          <StaticPresetPicker view={$view} />
+        {/if}
         <ModelSelector />
         <PromptPrefix />
         <Temperature />
@@ -84,7 +105,10 @@
         {/each}
       </nav>
 
-      {#if $view === "vector"}
+      {#if staticBooting}
+        <!-- one short beat while index.json + preset states load (static builds only) -->
+        <div class="panel static-boot" data-testid="static-boot">loading the precomputed demo state…</div>
+      {:else if $view === "vector"}
         <VectorField />
       {:else if $view === "sankey"}
         <Sankey />
@@ -103,7 +127,8 @@
 
 <style>
   .app { max-width: 1180px; margin: 0 auto; padding: 1.6rem; }
-  .masthead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.4rem; }
+  .masthead { display: flex; align-items: center; justify-content: space-between; gap: 0.9rem; margin-bottom: 1.4rem; flex-wrap: wrap; }
+  .static-boot { padding: 2.2rem 1.6rem; color: var(--text-dim); font-size: 0.84rem; font-family: var(--mono); }
   .brand { display: flex; align-items: center; gap: 0.9rem; }
   .logo { width: 38px; height: 38px; border-radius: 11px; background: var(--accent-grad); box-shadow: 0 0 22px rgba(110,168,254,0.5); }
   h1 { margin: 0; font-size: 1.4rem; letter-spacing: -0.01em; }

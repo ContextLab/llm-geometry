@@ -1,5 +1,6 @@
 // Shared helpers for the Architecture Explorer (src/viz/arch/**).
 import { ApiError, client, type ArchGraph, type ArchNode, type ArchNodeKind } from "../../lib/dataClient";
+import { STATIC_MODE } from "../../lib/staticUx";
 
 // ---------------------------------------------------------------------------
 // Graph cache — /api/arch/graph is expensive on a cold model (download + traced
@@ -38,7 +39,12 @@ export function plainError(e: unknown): string {
       case "UnsupportedModelError":
         return `That model can't be explored here — ${e.message} Pick an open-weights causal language model instead.`;
       case "NetworkError":
-        return "The backend isn't reachable. Start it (sh scripts/dev.sh) and retry.";
+        // The static build has no backend — its network dependency is huggingface.co
+        // (weight range-reads, model downloads). Never tell a Pages visitor to run
+        // a dev script (red-team static finding #2).
+        return STATIC_MODE
+          ? "The network request failed — huggingface.co may be unreachable. Check your connection and retry."
+          : "The backend isn't reachable. Start it (sh scripts/dev.sh) and retry.";
       default:
         return e.message;
     }

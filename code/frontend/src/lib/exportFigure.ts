@@ -68,14 +68,15 @@ export function exportCanvasPNG(canvas: HTMLCanvasElement, filename: string) {
 }
 
 // Copy a (WebGL) canvas into a 2D canvas so its pixels can be read for GIF frames.
-export function webglToCanvas(gl: HTMLCanvasElement): HTMLCanvasElement {
+// `scale` > 1 upsamples (PNG export); frame-capture callers keep the default 1.
+export function webglToCanvas(gl: HTMLCanvasElement, scale = 1): HTMLCanvasElement {
   const cv = document.createElement("canvas");
-  cv.width = gl.width;
-  cv.height = gl.height;
+  cv.width = gl.width * scale;
+  cv.height = gl.height * scale;
   const ctx = cv.getContext("2d")!;
   ctx.fillStyle = BG;
   ctx.fillRect(0, 0, cv.width, cv.height);
-  ctx.drawImage(gl, 0, 0);
+  ctx.drawImage(gl, 0, 0, cv.width, cv.height);
   return cv;
 }
 

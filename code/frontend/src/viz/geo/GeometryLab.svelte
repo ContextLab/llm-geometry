@@ -43,7 +43,9 @@
   let spec = $state<GeoSpec | null>(null);
 
   let field = $state<GeoVectorFieldData | null>(null);
-  let fieldLoading = $state(false);
+  // Starts true: between "ready" and the first field landing the sphere would
+  // otherwise sit unlabeled-empty for a beat (red-team static finding #4).
+  let fieldLoading = $state(true);
   let fieldError = $state("");
   let trace = $state<GeoTrace | null>(null);
   let traceError = $state("");

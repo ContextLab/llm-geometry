@@ -8,6 +8,8 @@
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
   import ExportBar from "../controls/ExportBar.svelte";
+  import StaticNotice from "../lib/StaticNotice.svelte";
+  import { isStaticMiss } from "../lib/staticUx";
 
   // Visualization 2 — particle-swarm next-token sampling across positions, as a Sankey
   // diagram (project_description.md §2).
@@ -15,6 +17,10 @@
   let progress = $state(0);
   let progressMsg = $state("");
   let error = $state("");
+  // Static build only (FR-203): the data layer's "not precomputed" refusals, shown as
+  // designed notes while the previous swarm stays on screen — never a blank panel.
+  let staticMiss = $state("");   // the swarm itself missed the presets
+  let hlStaticMiss = $state(""); // only the response highlight missed
   let data = $state<SankeyData | null>(null);
   let highlight = $state<SankeyHighlight[]>([]); // the user's response path (separate cheap fetch)
   let highlightStrs: Record<string, string> = {};
@@ -25,7 +31,11 @@
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let runId = 0;
   let hlRunId = 0;
-  let lastRefresh = 0;
+  // null until the first effect run: a remount must RECORD the current nonce, not
+  // diff against 0 — with a global nonce, initializing to 0 re-forced every view
+  // remount after any Recompute click (red-team static F1; also wasteful in
+  // backend mode).
+  let lastRefresh: number | null = null;
   let reveal = $state(9999); // CONTINUOUS column index revealed (9999 = all); ▶ Play sweeps it
   let maxPosNow = $state(0);
   let playing = $state(false);
@@ -53,7 +63,7 @@
     const np = $nParticles;
     const ns = $nSteps;
     const rn = $refreshNonce;
-    const force = rn !== lastRefresh;
+    const force = lastRefresh !== null && rn !== lastRefresh;
     lastRefresh = rn;
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(() => void load(m, pfx, temp, np, ns, force), force ? 0 : 350);
@@ -81,6 +91,7 @@
   async function load(m: string, pfx: string, temp: number, np: number, ns: number, force = false) {
     const my = ++runId;
     error = "";
+    staticMiss = "";
     loading = true;
     progress = 0;
     progressMsg = force ? "recomputing…" : "starting…";
@@ -103,7 +114,10 @@
       reveal = 9999; // fresh data ⇒ fresh full reveal (drop any frozen partial sweep)
       draw();
     } catch (e: any) {
-      if (my === runId) error = `${e.type ?? "Error"}: ${e.message ?? e}`;
+      if (my === runId) {
+        if (isStaticMiss(e)) staticMiss = e.message;
+        else error = `${e.type ?? "Error"}: ${e.message ?? e}`;
+      }
     } finally {
       if (my === runId) loading = false;
     }
@@ -119,18 +133,28 @@
         highlightStrs = r.token_strs;
         hlKey = keyOf(m, pfx, temp, ns);
         hlError = false;
-      } catch {
+        hlStaticMiss = "";
+      } catch (e) {
         if (my !== hlRunId) return;
         highlight = [];
         highlightStrs = {};
         hlKey = keyOf(m, pfx, temp, ns);
-        hlError = true; // shown as an inline "response path unavailable — retry" note (S6)
+        if (isStaticMiss(e)) {
+          // Static build: this response wasn't precomputed — a designed note (a retry
+          // could never succeed here), while the swarm itself stays rendered.
+          hlStaticMiss = e.message;
+          hlError = false;
+        } else {
+          hlError = true; // shown as an inline "response path unavailable — retry" note (S6)
+          hlStaticMiss = "";
+        }
       }
     } else {
       highlight = [];
       highlightStrs = {};
       hlKey = keyOf(m, pfx, temp, ns);
       hlError = false;
+      hlStaticMiss = "";
     }
     if (data) draw(); // redraw the overlay once (the swarm itself didn't change)
   }
@@ -390,6 +414,7 @@
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}
   {#if error}<div class="error" data-testid="viz-sankey-error">{error}</div>{/if}
+  {#if staticMiss}<StaticNotice message={staticMiss} testid="viz-sankey-static-note" />{/if}
   <div bind:this={stageEl} class="stage">
     <svg bind:this={svgEl} class="canvas" class:stale={loading && !!data} height="560" data-testid="sankey-svg"></svg>
     {#if loading && data}<div class="stale-badge" data-testid="sankey-stale">recomputing…</div>{/if}
@@ -399,6 +424,7 @@
        appears only when the highlight matches the drawn swarm's params. -->
   {#if data}<p class="caption">{plural(data.token_order.length, "token row")} · {plural(data.links.length, "transition")} · {data.n_particles} particles · up to {data.n_steps} steps{#if highlight.length && hlKey === dataKey}{" · "}<span class="gold">✦ {highlight.length}-token response highlighted</span>{#if extraOmitted > 0}{" "}<span class="gold-dim">(+{extraOmitted} more response tokens not shown)</span>{/if}{/if}</p>{/if}
   {#if hlError}<p class="caption hl-note" data-testid="sankey-hl-error">✦ response path unavailable — <button class="linky" onclick={retryHighlight}>retry</button></p>{/if}
+  {#if hlStaticMiss}<StaticNotice compact message={hlStaticMiss} testid="sankey-hl-static-note" />{/if}
 </section>
 
 <style>

@@ -1,0 +1,40 @@
+# Red-team: STATIC build — Geometry + Architecture tabs
+
+Date: 2026-07-24 · Target: `http://localhost:4173/llm-geometry/` (vite preview of `dist/`, real Pages base path, **no backend**) · Branch `003-static-pages-site` @ ceae863 · Method: throwaway Playwright scripts in `/private/tmp/rts-geoarch/` (screenshots in `shots/`), console + failed-request capture on every run, plus independent node-side verification against `public/static-data/geo/{golden,checkpoint}.json` and HTTP Range reads of the pinned safetensors.
+
+## Findings
+
+### 1. MAJOR — T=0 chat displays self-contradictory token probabilities
+At temperature 0 (greedy), reply tokens are **not the argmax of the top-5 distribution shown on hover**, and are not shown as the designed `p = 100%`. gpt2, prompt "The capital of France is", 8 tokens: 3/8 violate argmax — token 1 `" now"` shows `p = 4.8%` while its own top-5 lists `" a" 6.6%` and `" the" 6.0%` above it; token 2 `" the" 8.0%` vs `" a" 8.5%`; token 8 `" food" 2.1%` vs `" oil" 2.6%`. The code's own invariant (`transformersRuntime.ts:233-235`: at T=0 chosen id === topIds[0] ⇒ prob 1.0) is silently falling into its "can't happen" branch. Cause: the reply comes from transformers.js incremental KV-cache decode, the displayed distributions from a second teacher-forced full pass — the two q8/wasm paths diverge enough to flip near-ties (displayed probs also drift run-to-run: token-1 top-5 was `" a" 7.4% / " the" 5.7%` in one session, `6.6% / 6.0%` in the next). Reply text itself is deterministic (see verified list). Repro: Architecture → gpt2 → temperature 0 → Generate → hover tokens. Evidence: `shots/07-reply-hover.png`, `shots/07b-t0-probe.png`, 07b output.
+
+### 2. MAJOR — Offline/HF failure shows a dishonest backend-centric error in the backend-less build
+Kill the network mid-zoom in the weight inspector → red error: **"The backend isn't reachable. Start it (sh scripts/dev.sh) and retry."** (`src/viz/arch/archShared.ts:41`, `plainError` NetworkError branch). This build has no backend; the failed dependency is `huggingface.co` (safetensors Range read). A Pages visitor is told to run a dev script that cannot help — misleading cause *and* remedy (FR-203/FR-204 spirit: designed state exists, copy lies). Retry after reconnect recovers correctly. Repro: gpt2 → `transformer.wte` → zoom → `context.setOffline(true)` → pan. Evidence: `shots/06-offline-error.png`.
+
+### 3. MAJOR — Edited/fine-tuned weights silently vanish on reload
+After a real fine-tune, `sessionStorage["llm-geometry:geo-weights-token"]` = `89c4b23e…` and badge = "edited weights active". Reload → token is silently dropped (null), badge = "learned checkpoint", **no notice**. The static engine keeps minted weight sets in-memory only (`geoEngine/index.ts` header: persistence "is the staticClient's concern … if needed" — never implemented), so the restored token can't resolve and `healEvictedToken()` (`GeometryLab.svelte:231-240`) discards it. The backend build persists this across reloads (002 acceptance 2.3); the static build degrades **silently** — exactly the no-silent-no-op class FR-203 forbids. The self-heal itself is correct behavior for a *bogus* token (verified below); the missing piece is either persisting weight sets (checkpoint export/import) or a visible "your edits didn't survive the reload in the static demo" notice. Evidence: 03 output, `shots/03-finetune-done.png` vs `shots/03-after-reload.png`.
+
+### 4. MINOR — Brief unlabeled empty state right after geo boot
+`geo-view[data-ready=1]` fires (~430 ms) before the first field/trace finish: for ~1–2 s the sphere renders with no points/arrows and the predictions panel says "type a prompt to trace the model…" although the prompt is filled. It resolves itself; the "computing field…" hint wasn't visible in the first frame. Evidence: `shots/01-geo-ready.png` vs `shots/01-geo-layer1.png`.
+
+### 5. NIT — Preset-JSON fetch/abort churn on fast tab switches
+Touring all 5 tabs quickly logs `ERR_ABORTED` for `static-data/presets/{sankey,manifold}/*.json` (stale fetches cancelled, then re-fetched). Zero 404s; cosmetic console noise only.
+
+### 6. NIT — ONNX browser-cache write fails in this environment
+`Unable to add response to browser cache … Cache.put` (headless env) ⇒ the ~120 MB gpt2 ONNX re-downloads each session. Console warning only; generation still works.
+
+## Verified correct (evidence-backed)
+
+- **Geometry live engine**: ready in 427 ms, sphere + token cloud + field render; hover tooltip returns real vocab (`"be" · token 36`). Modes/layers/temperature/top_m/antisymmetrize all visibly re-render (screenshot series `01-*.png`).
+- **Math vs backend goldens (rendered values, not internals)**: top-10 next-token panel for golden case-0 prompt = **10/10 exact** (21.2/9.5/7.2/6.2/5.5/5.4/4.3/3.2/2.6/2.6 %); force badge `max normal residual 0.144` = max of golden `sequence_forces.normal_residual`; antisym ⇒ `tangent: exact` = golden `tangent_exact`; W_V·L0 cell editor `-0.16341` = checkpoint value; identity-preset cells = golden `resolved`; minted token `8f56919b…` **equals the backend's golden `weights_token` content hash**.
+- **Weight lab honesty**: seeds restricted to {0,1,2,7}; DOM-injected seed 13 → designed rejection naming the real reason + available seeds (no silent fake, prior state kept, `shots/02-rogue-seed.png`); cell edit mints token; reset works; applying the `learned` preset shows the *learned* badge, not "edited".
+- **Fine-tune**: real worker SGD with progress; paste `loss 5.89 → 4.62`, .txt upload `5.67 → 4.24`; field/trace visibly move (`03-finetune-done.png`); HF-dataset tab disabled + designed STATIC DEMO note; **bogus token self-heal** (injected `ffff…` → clean learned state, no error loop, canvas fine).
+- **Geometry stress**: rapid typing OK; all-unk prompt = 4 marked `<unk>` chips + honest trace; 60-word prompt → "⋯ truncated at 50" chip, meta "50 tokens"; 15× geometry↔manifold switches → zero WebGL context losses; 375 px viewport → no horizontal scroll, all controls reachable.
+- **Architecture graph/meta**: renders from precomputed JSON for all 3 catalog models; masthead numbers match `graph.json.meta` exactly (gpt2 12L/768/12h/50,257/124.4M; SmolLM2 30L/576/9h·3KV/49,152/134.5M; Qwen 24L/896/14h·2KV/151,936/494.0M); free-HF-id input replaced by designed note.
+- **Traces**: all 6 example prompts load (strip + attention heatmap + top-10); rendered top-10 = **exact match to `traces/N.json` for all 6**; free typed prompt → info-styled (blue, not red) StaticNotice naming every available example, previous trace stays, dropdown falls to placeholder, **no fabricated trace ever appears** (top-10 provably frozen).
+- **Weight inspector**: overview labeled "overview (whole tensor, downsampled)"; zoom = `rows 7702–7765 · cols 148–211 of 50257 × 768 · exact values` via Range reads of the **pinned revision** (`bytes=0-7`, header, one coalesced 194 KB window); 3/3 hovered cells **byte-exact** vs independent Range reads of `model.safetensors` (0.0420313, 0.0479443, −0.0410587); post-offline Retry recovers.
+- **Generation**: real in-browser reply in 28 s (incl. download); busy state + "sampling from the real model…"; badge idle "in-browser · model loads on first use" → **"in-browser · wasm · q8"** after first use (headless has no WebGPU adapter — honest fallback); per-token hover shows p + top-5; **T=0 re-run byte-identical** (greedy determinism).
+- **Deploy surface**: 67/67 manifest assets HTTP 200 under `/llm-geometry/`; deep links (`some/deep/link`, `architecture`, `geometry/weights`) serve the app shell; `GET /` → 302; zero local 404s across a full 5-tab tour.
+
+## Verdict
+
+**No BLOCKER, no fabricated data anywhere.** The static Geometry Lab is genuinely equivalent to the backend (every rendered spot-check matched goldens exactly, down to content-hash weight tokens), and the Architecture tab's precomputed/live split is honestly labeled and byte-verifiable. Three MAJORs to fix before calling FR-203 fully met: the T=0 chat probability contradiction (#1), the backend-flavored offline error copy (#2), and the silent loss of user edits on reload (#3).

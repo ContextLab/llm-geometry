@@ -8,6 +8,8 @@
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
   import ExportBar from "../controls/ExportBar.svelte";
+  import StaticNotice from "../lib/StaticNotice.svelte";
+  import { isStaticMiss } from "../lib/staticUx";
 
   // Visualization 1 (project_description.md §1) — a macOS "Drift"-style flow field. A regular
   // grid of fixed origins; each origin's arrow points (uniform length) from its nearest
@@ -19,6 +21,10 @@
   let progress = $state(0);
   let progressMsg = $state("");
   let error = $state("");
+  // Static build only: the data layer's "not precomputed" refusal (FR-203). Shown as a
+  // designed note (not an error) while the previously-rendered field stays on screen —
+  // picking a preset or reverting the input clears it. Never a blank panel.
+  let staticMiss = $state("");
   let data = $state<VectorField | null>(null);
   let anim = $state<VectorFieldAnimation | null>(null); // multi-key-frame data when a response is set
   let animTime = $state(0); // continuous key-frame index (interpolated); tweens between steps
@@ -34,7 +40,11 @@
   let runId = 0;
   let resizeObs: ResizeObserver | undefined;
   let lastW = 0;
-  let lastRefresh = 0;
+  // null until the first effect run: a remount must RECORD the current nonce, not
+  // diff against 0 — with a global nonce, initializing to 0 re-forced every view
+  // remount after any Recompute click (red-team static F1; also wasteful in
+  // backend mode).
+  let lastRefresh: number | null = null;
 
   $effect(() => {
     const m = $modelId;
@@ -45,7 +55,7 @@
     const resp = $responseText;
     const fo = $fanout;
     const rn = $refreshNonce;
-    const force = rn !== lastRefresh; // the Recompute button bypasses the cache
+    const force = lastRefresh !== null && rn !== lastRefresh; // the Recompute button bypasses the cache
     lastRefresh = rn;
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(() => void load(m, pfx, temp, lf, lt, resp, fo, force), force ? 0 : 320);
@@ -77,6 +87,7 @@
   async function load(m: string, pfx: string, temp: number, lf: number, lt: number, resp: string, fo: number, force = false) {
     const my = ++runId;
     error = "";
+    staticMiss = "";
     loading = true;
     progress = 0;
     progressMsg = force ? "recomputing…" : "starting…";
@@ -117,7 +128,10 @@
       anim = null;
       render();
     } catch (e: any) {
-      if (my === runId) error = `${e.type ?? "Error"}: ${e.message ?? e}`;
+      if (my === runId) {
+        if (isStaticMiss(e)) staticMiss = e.message;
+        else error = `${e.type ?? "Error"}: ${e.message ?? e}`;
+      }
     } finally {
       if (my === runId) loading = false;
     }
@@ -412,6 +426,7 @@
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}
   {#if error}<div class="error" data-testid="viz-vector-error" title={error}>{error.split("\n")[0].slice(0, 200)}</div>{/if}
+  {#if staticMiss}<StaticNotice message={staticMiss} testid="viz-vector-static-note" />{/if}
   <div bind:this={stageEl} class="stage" class:stale={!!$modelError && !!(data || anim)} style="height:{H}px">
     <svg bind:this={svgEl} class="arrow-layer" data-testid="vector-svg"></svg>
   </div>

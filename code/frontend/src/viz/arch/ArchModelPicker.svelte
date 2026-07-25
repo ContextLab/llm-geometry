@@ -4,6 +4,8 @@
   import { archModelId } from "../../lib/explorerStores";
   import { client, type ModelReference } from "../../lib/dataClient";
   import { plainError } from "./archShared";
+  import StaticNotice from "../../lib/StaticNotice.svelte";
+  import { STATIC_MODE } from "../../lib/staticUx";
 
   // Candidate models are resolved (existence + capability check) BEFORE the store
   // updates, so a rejected pick leaves the active model untouched (FR-107). Size
@@ -22,9 +24,12 @@
   // The dropdown must ALWAYS offer the app's default model (users can return to it
   // after switching away — F2) plus the currently active id, even when the curated
   // /api/models list contains neither. Deduped against the curated entries.
+  // STATIC build: the list IS the complete catalog (only precomputed models can be
+  // explored), so don't offer the backend default when this build doesn't carry it —
+  // only the transiently-active id until the boot steer lands.
   const DEFAULT_MODEL_ID = "HuggingFaceTB/SmolLM2-135M-Instruct"; // archModelId's initial value (explorerStores.ts)
   const extraOptions = $derived(
-    [DEFAULT_MODEL_ID, $archModelId].filter(
+    (STATIC_MODE ? [$archModelId] : [DEFAULT_MODEL_ID, $archModelId]).filter(
       (id, i, arr) => arr.indexOf(id) === i && !models.some((m) => m.model_id === id),
     ),
   );
@@ -97,16 +102,26 @@
       <option value={id}>{id}</option>
     {/each}
   </select>
-  <div class="custom">
-    <input
-      type="text"
-      placeholder="…or any open-weights HF id"
-      bind:value={custom}
-      onkeydown={(e) => e.key === "Enter" && void pick(custom)}
-      data-testid="arch-model-custom"
+  {#if STATIC_MODE}
+    <!-- FR-203: arbitrary HF ids need the backend — a designed affordance replaces the
+         free input instead of letting every typed id fail. -->
+    <StaticNotice
+      compact
+      testid="arch-model-static-note"
+      message="Free-form HF model ids aren't available in the static demo — the models above ship with precomputed graphs, traces, and weight tiles."
     />
-    <button onclick={() => void pick(custom)}>Load</button>
-  </div>
+  {:else}
+    <div class="custom">
+      <input
+        type="text"
+        placeholder="…or any open-weights HF id"
+        bind:value={custom}
+        onkeydown={(e) => e.key === "Enter" && void pick(custom)}
+        data-testid="arch-model-custom"
+      />
+      <button onclick={() => void pick(custom)}>Load</button>
+    </div>
+  {/if}
   {#if status === "checking"}
     <div class="msg">{message}</div>
   {:else if status === "error"}
