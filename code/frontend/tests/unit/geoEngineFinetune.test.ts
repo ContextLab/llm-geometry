@@ -9,6 +9,12 @@
  *   - loss_after lands within 15% of the backend's for the same text/steps/lr,
  *   - the minted token is the content hash of the resulting weights
  *     (self-consistent + deterministic + cache-hit on identical requests).
+ *
+ * Golden-driven assertions run once PER SOURCE (see geoGoldenAssets.ts), each
+ * against an engine built from THAT source's own checkpoint + vocab: training
+ * is platform-divergent at the bit level, so a golden fine-tune trajectory is
+ * only meaningful against its own run's checkpoint. Golden-independent tests
+ * run once against the committed (platform-stable) fixtures source.
  */
 
 import { beforeAll, describe, expect, it } from "vitest";
@@ -16,15 +22,10 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { GeoEngine, weightsToken } from "../../src/lib/geoEngine";
 import { evalLoss, makeWindows, runFinetune } from "../../src/lib/geoEngine/finetune";
 import { CONTEXT_WINDOW, EOS_ID, GeoModel, PAD_ID } from "../../src/lib/geoEngine/model";
-import { loadAsset, loadMergedGolden, type GoldenFile } from "./geoGoldenAssets";
+import { goldenSources } from "./geoGoldenAssets";
 
-let engine: GeoEngine;
-let golden: GoldenFile;
-
-beforeAll(() => {
-  golden = loadMergedGolden();
-  engine = GeoEngine.fromAssets(loadAsset("checkpoint.json"), loadAsset("vocab.json"));
-});
+const sources = goldenSources();
+const fixtureSrc = sources.find((s) => s.name === "fixtures")!;
 
 describe("makeWindows (geo/train.py semantics)", () => {
   it("pads short streams to a single window", () => {
@@ -45,65 +46,86 @@ describe("makeWindows (geo/train.py semantics)", () => {
   });
 });
 
-describe("geoEngine finetune", () => {
-  it("matches the backend's loss trajectory properties on every golden run", () => {
-    expect(golden.finetune.length).toBeGreaterThan(0);
-    for (const goldenCase of golden.finetune) {
-      const { text, steps, lr } = goldenCase.body as { text: string; steps: number; lr: number };
-      const goldenResult = goldenCase.result;
-      const label = `finetune(steps=${steps}, lr=${lr})`;
+// Golden-driven: once per source, each against ITS OWN source's engine (the
+// checkpoint that actually produced that source's golden losses).
+for (const src of sources) {
+  const golden = src.golden;
 
-      const progress: [number, string][] = [];
-      const t0 = performance.now();
-      const result = engine.finetune({
-        text,
-        steps,
-        lr,
-        onProgress: (fraction, message) => progress.push([fraction, message]),
-      });
-      console.log(
-        `[geoEngine perf] finetune ${steps} steps (incl. before/after evals): ${(performance.now() - t0).toFixed(0)}ms`,
-      );
+  describe(`geoEngine finetune golden [${src.name}]`, () => {
+    let engine: GeoEngine;
 
-      expect(result.ready, label).toBe(true);
-      expect(result.weights_token, label).toMatch(/^[0-9a-f]{32}$/);
+    beforeAll(() => {
+      engine = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    });
 
-      // loss_before is RNG-free (pure evaluation of the base weights on the same
-      // windows) — it must match the backend tightly.
-      const lb = result.loss_before!;
-      expect(
-        Math.abs(lb - goldenResult.loss_before) / goldenResult.loss_before,
-        `${label}: loss_before`,
-      ).toBeLessThan(1e-4);
+    it("matches the backend's loss trajectory properties on every golden run", () => {
+      expect(golden.finetune.length).toBeGreaterThan(0);
+      for (const goldenCase of golden.finetune) {
+        const { text, steps, lr } = goldenCase.body as { text: string; steps: number; lr: number };
+        const goldenResult = goldenCase.result;
+        const label = `finetune(steps=${steps}, lr=${lr})`;
 
-      // Real learning happened, and the final loss lands near the backend's
-      // (RNG-divergent batch order => 15% band, per the port contract).
-      expect(result.loss_after!, label).toBeLessThan(result.loss_before!);
-      expect(
-        Math.abs(result.loss_after! - goldenResult.loss_after) / goldenResult.loss_after,
-        `${label}: loss_after vs backend ${goldenResult.loss_after}`,
-      ).toBeLessThan(0.15);
+        const progress: [number, string][] = [];
+        const t0 = performance.now();
+        const result = engine.finetune({
+          text,
+          steps,
+          lr,
+          onProgress: (fraction, message) => progress.push([fraction, message]),
+        });
+        console.log(
+          `[geoEngine perf] finetune ${steps} steps (incl. before/after evals): ${(performance.now() - t0).toFixed(0)}ms`,
+        );
 
-      // Progress streamed every 10 steps with backend-shaped messages.
-      expect(progress.length, label).toBe(Math.floor(steps / 10));
-      expect(progress[0][1]).toMatch(/^step 10\/\d+ · loss \d/);
+        expect(result.ready, label).toBe(true);
+        expect(result.weights_token, label).toMatch(/^[0-9a-f]{32}$/);
 
-      // The minted token resolves: tracing with it works and its distribution
-      // is a real probability distribution.
-      const trace = engine.trace("alice was beginning", result.weights_token);
-      const sum = trace.probs.reduce((a, b) => a + b, 0);
-      expect(Math.abs(sum - 1), label).toBeLessThan(1e-6);
+        // loss_before is RNG-free (pure evaluation of the base weights on the same
+        // windows) — it must match the backend tightly.
+        const lb = result.loss_before!;
+        expect(
+          Math.abs(lb - goldenResult.loss_before) / goldenResult.loss_before,
+          `${label}: loss_before`,
+        ).toBeLessThan(1e-4);
 
-      // Determinism + content-hash caching: an identical request returns the
-      // identical token (served from the engine's content-derived cache).
-      const again = engine.finetune({ text, steps, lr });
-      expect(again.weights_token, label).toBe(result.weights_token);
-      expect(again.loss_after, label).toBe(result.loss_after);
-    }
+        // Real learning happened, and the final loss lands near the backend's
+        // (RNG-divergent batch order => 15% band, per the port contract).
+        expect(result.loss_after!, label).toBeLessThan(result.loss_before!);
+        expect(
+          Math.abs(result.loss_after! - goldenResult.loss_after) / goldenResult.loss_after,
+          `${label}: loss_after vs backend ${goldenResult.loss_after}`,
+        ).toBeLessThan(0.15);
+
+        // Progress streamed every 10 steps with backend-shaped messages.
+        expect(progress.length, label).toBe(Math.floor(steps / 10));
+        expect(progress[0][1]).toMatch(/^step 10\/\d+ · loss \d/);
+
+        // The minted token resolves: tracing with it works and its distribution
+        // is a real probability distribution.
+        const trace = engine.trace("alice was beginning", result.weights_token);
+        const sum = trace.probs.reduce((a, b) => a + b, 0);
+        expect(Math.abs(sum - 1), label).toBeLessThan(1e-6);
+
+        // Determinism + content-hash caching: an identical request returns the
+        // identical token (served from the engine's content-derived cache).
+        const again = engine.finetune({ text, steps, lr });
+        expect(again.weights_token, label).toBe(result.weights_token);
+        expect(again.loss_after, label).toBe(result.loss_after);
+      }
+    });
+  });
+}
+
+// Golden-independent: once, against the fixtures engine (platform-stable).
+describe("geoEngine finetune behavior [fixtures]", () => {
+  let engine: GeoEngine;
+
+  beforeAll(() => {
+    engine = GeoEngine.fromAssets(fixtureSrc.checkpoint, fixtureSrc.vocab);
   });
 
   it("runFinetune mints self-consistent content-hash tokens", () => {
-    const goldenCase = golden.finetune[0];
+    const goldenCase = fixtureSrc.golden.finetune[0];
     const tokenIds = engine.tokenizer.encodeStream(goldenCase.body.text as string);
     const result = runFinetune({
       baseWeights: engine.canonical,
@@ -128,7 +150,7 @@ describe("geoEngine finetune", () => {
   });
 
   it("keeps the S^2 embedding invariant through training", () => {
-    const goldenCase = golden.finetune[0];
+    const goldenCase = fixtureSrc.golden.finetune[0];
     const tokenIds = engine.tokenizer.encodeStream(goldenCase.body.text as string);
     const { weights } = runFinetune({
       baseWeights: engine.canonical,

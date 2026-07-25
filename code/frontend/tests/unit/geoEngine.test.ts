@@ -3,9 +3,16 @@
  *
  * Golden data comes from BOTH available real-backend exports (see
  * geoGoldenAssets.ts): the static-site export in public/static-data/geo/ and
- * the committed fixtures in tests/fixtures/geo/. Numeric comparisons use the
- * spec's <=1e-5 tolerance (see RTOL/ATOL); tokens, token ids, and
- * weights_token strings are compared EXACTLY.
+ * the committed fixtures in tests/fixtures/geo/. Because training is
+ * platform-divergent at the bit level, every golden-driven suite runs once PER
+ * SOURCE against an engine built from THAT source's own checkpoint + vocab —
+ * goldens are never evaluated against the other source's engine. Numeric
+ * comparisons use the spec's <=1e-5 tolerance (see RTOL/ATOL); tokens, token
+ * ids, and weights_token strings are compared EXACTLY.
+ *
+ * Golden-independent behavior tests (rejections, detokenization rules,
+ * performance, persistence round-trips) run ONCE against the fixtures engine —
+ * the committed, platform-stable source.
  */
 
 import { beforeAll, describe, expect, it } from "vitest";
@@ -22,108 +29,13 @@ import {
   expectClose,
   expectMatrixClose,
   expectVecClose,
-  loadAsset,
-  loadMergedGolden,
-  type GoldenFile,
+  goldenSources,
 } from "./geoGoldenAssets";
 
-let engine: GeoEngine;
-let golden: GoldenFile;
+const sources = goldenSources();
+const fixtureSrc = sources.find((s) => s.name === "fixtures")!;
 
-beforeAll(() => {
-  golden = loadMergedGolden();
-  engine = GeoEngine.fromAssets(loadAsset("checkpoint.json"), loadAsset("vocab.json"));
-});
-
-// --- spec --------------------------------------------------------------------------
-
-describe("geoEngine spec", () => {
-  it("reproduces the backend checkpoint_id exactly (hash port is bit-exact)", () => {
-    const spec = engine.spec();
-    expect(spec.checkpoint.status).toBe("ready");
-    expect(spec.checkpoint.checkpoint_id).toBe(golden.spec.checkpoint.checkpoint_id);
-  });
-
-  it("reports the frozen model spec", () => {
-    const spec = engine.spec();
-    expect(spec.model).toEqual(golden.spec.model);
-    expect(spec.special_tokens).toEqual(golden.spec.special_tokens);
-  });
-});
-
-// --- tokenizer ---------------------------------------------------------------------
-
-describe("geoEngine tokenizer", () => {
-  it("is id-exact on every golden prompt (incl. unks, curly quotes, truncation)", () => {
-    expect(golden.tokenize.length).toBeGreaterThan(0);
-    for (const { text, response } of golden.tokenize) {
-      const actual = engine.tokenize(text);
-      expect(actual.tokens, JSON.stringify(text)).toEqual(response.tokens);
-      expect(actual.n_unk, JSON.stringify(text)).toBe(response.n_unk);
-      expect(actual.truncated, JSON.stringify(text)).toBe(response.truncated);
-    }
-  });
-
-  it("applies the backend's detokenization spacing rules", () => {
-    // Expected string produced by the real backend tokenizer (note "( loudly":
-    // the backend checks its no-space-after rule against the last APPENDED
-    // string, which carries a leading space — the port reproduces that exactly).
-    const enc = engine.tokenizer.encode('the queen said : " off with her head ! " ( loudly )');
-    expect(engine.tokenizer.decode(enc.ids)).toBe('the queen said: " off with her head! " ( loudly)');
-  });
-});
-
-// --- trace -------------------------------------------------------------------------
-
-describe("geoEngine trace", () => {
-  it("matches golden traces to <=1e-5 (probs + per-layer q/k/v/attention/hidden)", () => {
-    expect(golden.trace.length).toBeGreaterThan(0);
-    for (const { prompt, response } of golden.trace) {
-      const actual = engine.trace(prompt);
-      expect(actual.tokens, prompt).toEqual(response.tokens);
-      expectMatrixClose(actual.embeddings, response.embeddings, `${prompt}: embeddings`);
-      expect(actual.layers.length).toBe(response.layers.length);
-      for (let l = 0; l < response.layers.length; l++) {
-        const a = actual.layers[l];
-        const g = response.layers[l];
-        expect(a.layer).toBe(g.layer);
-        for (const key of [
-          "attention",
-          "q",
-          "k",
-          "v",
-          "hidden_in",
-          "attn_out",
-          "mlp_out",
-          "hidden_out",
-        ] as const) {
-          expectMatrixClose(a[key], g[key], `${prompt}: layers[${l}].${key}`);
-        }
-      }
-      expectVecClose(actual.probs, response.probs, `${prompt}: probs`);
-      expect(actual.next_token.id, `${prompt}: next_token`).toBe(response.next_token.id);
-      expect(actual.next_token.text).toBe(response.next_token.text);
-      // top-k: the same ids must carry the same probabilities (order can only
-      // differ on sub-tolerance ties; the argmax itself is asserted exact above).
-      for (let i = 0; i < response.logits_topk.ids.length; i++) {
-        const id = response.logits_topk.ids[i];
-        expectClose(actual.probs[id], response.logits_topk.probs[i], `${prompt}: topk prob of ${id}`);
-      }
-      expect(actual.logits_topk.ids[0]).toBe(response.logits_topk.ids[0]);
-    }
-  });
-
-  it("rejects an empty prompt like the backend (400)", () => {
-    expect(() => engine.trace("   ")).toThrowError(GeoEngineError);
-    try {
-      engine.trace("");
-    } catch (err) {
-      expect((err as GeoEngineError).type).toBe("InvalidParamError");
-    }
-  });
-});
-
-// --- vector fields -----------------------------------------------------------------
+// --- shared helpers ----------------------------------------------------------------
 
 interface GoldenArrow {
   origin_index: number;
@@ -170,7 +82,11 @@ function targetIndexFromVec(points: number[][], origin: number, vec: number[]): 
 }
 
 /** Engine-side logits for `origin` appended to the prompt at the given layer. */
-function logitsForOrigin(params: Record<string, any>, origin: number): Float64Array {
+function logitsForOrigin(
+  engine: GeoEngine,
+  params: Record<string, any>,
+  origin: number,
+): Float64Array {
   const model = new GeoModel(engine.canonical);
   const promptIds = engine.tokenize(params.prompt as string).tokens.map((t) => t.id);
   const layerIdx = params.layer === "full" ? 3 : (params.layer as number);
@@ -179,70 +95,222 @@ function logitsForOrigin(params: Record<string, any>, origin: number): Float64Ar
   return model.readoutOne(acts.layers[layerIdx].hiddenOut, (seq.length - 1) * 3);
 }
 
-describe("geoEngine vector_field", () => {
-  it("matches golden fields (both modes) to <=1e-5", () => {
-    expect(golden.vector_field.length).toBeGreaterThan(0);
-    for (const { params, response } of golden.vector_field) {
-      const label = JSON.stringify(params);
-      const actual = engine.vectorField(params as GeoVectorFieldParams) as GeoVectorFieldData;
-      expect(actual.mode, label).toBe(response.mode);
-      expect(actual.layer, label).toBe(response.layer);
-      expect(actual.tangent_exact, label).toBe(response.tangent_exact);
-      expect(actual.token_ids, label).toEqual(response.token_ids);
-      expectMatrixClose(actual.points, response.points, `${label}: points`);
+// --- golden-driven suites: once per source, each against ITS OWN engine ------------
+//
+// The two sources are trained on different platforms (macOS fixtures vs the
+// CI/Linux static export), and training is bit-level platform-sensitive, so a
+// golden set only matches the checkpoint from its own run. Pairing them here is
+// the point of these loops.
 
-      const temp0NextNext = response.mode === "next_next" && Number(params.temperature ?? 0) === 0;
-      let tieBreaks = 0;
-      const actualGroups = groupByOrigin(actual.arrows);
-      const goldenGroups = groupByOrigin(response.arrows as GoldenArrow[]);
-      expect(actualGroups.size, `${label}: arrow origins`).toBe(goldenGroups.size);
-      for (const [origin, goldenList] of goldenGroups) {
-        const actualList = actualGroups.get(origin);
-        expect(actualList, `${label}: arrows for origin ${origin}`).toBeDefined();
-        expect(actualList!.length, `${label}: arrow count for origin ${origin}`).toBe(
-          goldenList.length,
-        );
-        for (let i = 0; i < goldenList.length; i++) {
-          try {
-            expectClose(
-              actualList![i].weight,
-              goldenList[i].weight,
-              `${label}: origin ${origin} arrow ${i} weight`,
+for (const src of sources) {
+  const golden = src.golden;
+
+  describe(`geoEngine golden [${src.name}]`, () => {
+    let engine: GeoEngine;
+
+    beforeAll(() => {
+      engine = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    });
+
+    // --- spec ----------------------------------------------------------------------
+
+    describe("spec", () => {
+      it("reproduces its own source's checkpoint_id exactly (hash port is bit-exact)", () => {
+        const spec = engine.spec();
+        expect(spec.checkpoint.status).toBe("ready");
+        expect(spec.checkpoint.checkpoint_id).toBe(golden.spec.checkpoint.checkpoint_id);
+      });
+
+      it("reports the frozen model spec", () => {
+        const spec = engine.spec();
+        expect(spec.model).toEqual(golden.spec.model);
+        expect(spec.special_tokens).toEqual(golden.spec.special_tokens);
+      });
+    });
+
+    // --- tokenizer -----------------------------------------------------------------
+
+    describe("tokenizer", () => {
+      // The static export ships no tokenize goldens by design (its trace.tokens
+      // are id-exact instead), so this runs only where the source provides them
+      // — and the fixtures source must ALWAYS provide them.
+      it.runIf(golden.tokenize.length > 0 || src.name === "fixtures")(
+        "is id-exact on every golden prompt (incl. unks, curly quotes, truncation)",
+        () => {
+          expect(golden.tokenize.length).toBeGreaterThan(0);
+          for (const { text, response } of golden.tokenize) {
+            const actual = engine.tokenize(text);
+            expect(actual.tokens, JSON.stringify(text)).toEqual(response.tokens);
+            expect(actual.n_unk, JSON.stringify(text)).toBe(response.n_unk);
+            expect(actual.truncated, JSON.stringify(text)).toBe(response.truncated);
+          }
+        },
+      );
+    });
+
+    // --- trace ---------------------------------------------------------------------
+
+    describe("trace", () => {
+      it("matches golden traces to <=1e-5 (probs + per-layer q/k/v/attention/hidden)", () => {
+        expect(golden.trace.length).toBeGreaterThan(0);
+        for (const { prompt, response } of golden.trace) {
+          const actual = engine.trace(prompt);
+          expect(actual.tokens, prompt).toEqual(response.tokens);
+          expectMatrixClose(actual.embeddings, response.embeddings, `${prompt}: embeddings`);
+          expect(actual.layers.length).toBe(response.layers.length);
+          for (let l = 0; l < response.layers.length; l++) {
+            const a = actual.layers[l];
+            const g = response.layers[l];
+            expect(a.layer).toBe(g.layer);
+            for (const key of [
+              "attention",
+              "q",
+              "k",
+              "v",
+              "hidden_in",
+              "attn_out",
+              "mlp_out",
+              "hidden_out",
+            ] as const) {
+              expectMatrixClose(a[key], g[key], `${prompt}: layers[${l}].${key}`);
+            }
+          }
+          expectVecClose(actual.probs, response.probs, `${prompt}: probs`);
+          expect(actual.next_token.id, `${prompt}: next_token`).toBe(response.next_token.id);
+          expect(actual.next_token.text).toBe(response.next_token.text);
+          // top-k: the same ids must carry the same probabilities (order can only
+          // differ on sub-tolerance ties; the argmax itself is asserted exact above).
+          for (let i = 0; i < response.logits_topk.ids.length; i++) {
+            const id = response.logits_topk.ids[i];
+            expectClose(actual.probs[id], response.logits_topk.probs[i], `${prompt}: topk prob of ${id}`);
+          }
+          expect(actual.logits_topk.ids[0]).toBe(response.logits_topk.ids[0]);
+        }
+      });
+    });
+
+    // --- vector fields -------------------------------------------------------------
+
+    describe("vector_field", () => {
+      it("matches golden fields (both modes) to <=1e-5", () => {
+        expect(golden.vector_field.length).toBeGreaterThan(0);
+        for (const { params, response } of golden.vector_field) {
+          const label = JSON.stringify(params);
+          const actual = engine.vectorField(params as GeoVectorFieldParams) as GeoVectorFieldData;
+          expect(actual.mode, label).toBe(response.mode);
+          expect(actual.layer, label).toBe(response.layer);
+          expect(actual.tangent_exact, label).toBe(response.tangent_exact);
+          expect(actual.token_ids, label).toEqual(response.token_ids);
+          expectMatrixClose(actual.points, response.points, `${label}: points`);
+
+          const temp0NextNext = response.mode === "next_next" && Number(params.temperature ?? 0) === 0;
+          let tieBreaks = 0;
+          const actualGroups = groupByOrigin(actual.arrows);
+          const goldenGroups = groupByOrigin(response.arrows as GoldenArrow[]);
+          expect(actualGroups.size, `${label}: arrow origins`).toBe(goldenGroups.size);
+          for (const [origin, goldenList] of goldenGroups) {
+            const actualList = actualGroups.get(origin);
+            expect(actualList, `${label}: arrows for origin ${origin}`).toBeDefined();
+            expect(actualList!.length, `${label}: arrow count for origin ${origin}`).toBe(
+              goldenList.length,
             );
-            expectVecClose(
-              actualList![i].vec,
-              goldenList[i].vec,
-              `${label}: origin ${origin} arrow ${i} vec`,
-            );
-          } catch (err) {
-            if (!temp0NextNext) throw err;
-            // Sub-float32 argmax tie? Verify with the engine's own logits.
-            const goldenTarget = targetIndexFromVec(response.points, origin, goldenList[i].vec);
-            const myTarget = targetIndexFromVec(response.points, origin, actualList![i].vec);
-            const logits = logitsForOrigin(params, origin);
-            const margin = Math.abs(logits[myTarget] - logits[goldenTarget]);
-            if (margin > TIE_LOGIT_MARGIN) throw err;
-            tieBreaks++;
+            for (let i = 0; i < goldenList.length; i++) {
+              try {
+                expectClose(
+                  actualList![i].weight,
+                  goldenList[i].weight,
+                  `${label}: origin ${origin} arrow ${i} weight`,
+                );
+                expectVecClose(
+                  actualList![i].vec,
+                  goldenList[i].vec,
+                  `${label}: origin ${origin} arrow ${i} vec`,
+                );
+              } catch (err) {
+                if (!temp0NextNext) throw err;
+                // Sub-float32 argmax tie? Verify with the engine's own logits.
+                const goldenTarget = targetIndexFromVec(response.points, origin, goldenList[i].vec);
+                const myTarget = targetIndexFromVec(response.points, origin, actualList![i].vec);
+                const logits = logitsForOrigin(engine, params, origin);
+                const margin = Math.abs(logits[myTarget] - logits[goldenTarget]);
+                if (margin > TIE_LOGIT_MARGIN) throw err;
+                tieBreaks++;
+              }
+            }
+          }
+          if (tieBreaks > 0) {
+            console.log(`[geoEngine] ${label}: ${tieBreaks} sub-float32 argmax tie(s) tolerated`);
+            expect(tieBreaks).toBeLessThan(8); // ties must stay rare or something is wrong
+          }
+
+          if (response.sequence_forces === null) {
+            expect(actual.sequence_forces, label).toBeNull();
+          } else {
+            expect(actual.sequence_forces!.length, label).toBe(response.sequence_forces.length);
+            for (let i = 0; i < response.sequence_forces.length; i++) {
+              const a = actual.sequence_forces![i];
+              const g = response.sequence_forces[i];
+              expect(a.position).toBe(g.position);
+              expectVecClose(a.vec, g.vec, `${label}: sequence_forces[${i}].vec`);
+              expectClose(a.normal_residual, g.normal_residual, `${label}: sequence_forces[${i}].normal_residual`);
+            }
           }
         }
-      }
-      if (tieBreaks > 0) {
-        console.log(`[geoEngine] ${label}: ${tieBreaks} sub-float32 argmax tie(s) tolerated`);
-        expect(tieBreaks).toBeLessThan(8); // ties must stay rare or something is wrong
-      }
+      });
+    });
 
-      if (response.sequence_forces === null) {
-        expect(actual.sequence_forces, label).toBeNull();
-      } else {
-        expect(actual.sequence_forces!.length, label).toBe(response.sequence_forces.length);
-        for (let i = 0; i < response.sequence_forces.length; i++) {
-          const a = actual.sequence_forces![i];
-          const g = response.sequence_forces[i];
-          expect(a.position).toBe(g.position);
-          expectVecClose(a.vec, g.vec, `${label}: sequence_forces[${i}].vec`);
-          expectClose(a.normal_residual, g.normal_residual, `${label}: sequence_forces[${i}].normal_residual`);
+    // --- weights: minting (exact tokens), then reads --------------------------------
+
+    describe("weights", () => {
+      it("mints EXACTLY the backend's weights_token for every golden edit set", () => {
+        expect(golden.weights_post.length).toBeGreaterThan(0);
+        for (const { body, response } of golden.weights_post) {
+          const actual = engine.postWeights(body as never);
+          expect(actual.weights_token, JSON.stringify(body)).toBe(response.weights_token);
+          if (response.edited !== undefined) {
+            expect(actual.edited, JSON.stringify(body)).toEqual(response.edited);
+          }
         }
-      }
+      });
+
+      it("serves golden weight windows (values 6-sig-rounded; source exact)", () => {
+        for (const { params, response } of golden.weights_get) {
+          const actual = engine.getWeights(params as GeoWeightsParams);
+          expect(actual.shape, JSON.stringify(params)).toEqual(response.shape);
+          expect(actual.source, JSON.stringify(params)).toBe(response.source);
+          expectMatrixClose(actual.values, response.values, `${JSON.stringify(params)}: values`);
+        }
+      });
+    });
+  });
+}
+
+// --- golden-independent behavior: once, against the fixtures engine ----------------
+//
+// These tests need AN engine but no golden vectors, so they run once against the
+// committed fixtures source (platform-stable) rather than per source.
+
+describe("geoEngine behavior [fixtures]", () => {
+  let engine: GeoEngine;
+
+  beforeAll(() => {
+    engine = GeoEngine.fromAssets(fixtureSrc.checkpoint, fixtureSrc.vocab);
+  });
+
+  it("applies the backend's detokenization spacing rules", () => {
+    // Expected string produced by the real backend tokenizer (note "( loudly":
+    // the backend checks its no-space-after rule against the last APPENDED
+    // string, which carries a leading space — the port reproduces that exactly).
+    const enc = engine.tokenizer.encode('the queen said : " off with her head ! " ( loudly )');
+    expect(engine.tokenizer.decode(enc.ids)).toBe('the queen said: " off with her head! " ( loudly)');
+  });
+
+  it("rejects an empty prompt like the backend (400)", () => {
+    expect(() => engine.trace("   ")).toThrowError(GeoEngineError);
+    try {
+      engine.trace("");
+    } catch (err) {
+      expect((err as GeoEngineError).type).toBe("InvalidParamError");
     }
   });
 
@@ -250,30 +318,6 @@ describe("geoEngine vector_field", () => {
     expect(() => engine.vectorField({ mode: "force", layer: "full", prompt: "" })).toThrowError(
       /full/,
     );
-  });
-});
-
-// --- weights: minting (exact tokens), then reads ------------------------------------
-
-describe("geoEngine weights", () => {
-  it("mints EXACTLY the backend's weights_token for every golden edit set", () => {
-    expect(golden.weights_post.length).toBeGreaterThan(0);
-    for (const { body, response } of golden.weights_post) {
-      const actual = engine.postWeights(body as never);
-      expect(actual.weights_token, JSON.stringify(body)).toBe(response.weights_token);
-      if (response.edited !== undefined) {
-        expect(actual.edited, JSON.stringify(body)).toEqual(response.edited);
-      }
-    }
-  });
-
-  it("serves golden weight windows (values 6-sig-rounded; source exact)", () => {
-    for (const { params, response } of golden.weights_get) {
-      const actual = engine.getWeights(params as GeoWeightsParams);
-      expect(actual.shape, JSON.stringify(params)).toEqual(response.shape);
-      expect(actual.source, JSON.stringify(params)).toBe(response.source);
-      expectMatrixClose(actual.values, response.values, `${JSON.stringify(params)}: values`);
-    }
   });
 
   it("rejects the zero preset on the embedding (unit-norm invariant)", () => {
@@ -332,13 +376,11 @@ describe("geoEngine weights", () => {
       expect((err as GeoEngineError).type).toBe("InvalidWeightEditError");
     }
   });
-});
 
-// --- performance (informational; generous ceilings so CI never flakes) -------------
+  // --- performance (informational; generous ceilings so CI never flakes) -----------
 
-describe("geoEngine performance", () => {
   it("traces and full-vocab fields complete quickly", () => {
-    const prompt = golden.trace[0].prompt;
+    const prompt = fixtureSrc.golden.trace[0].prompt;
     let t0 = performance.now();
     engine.trace(prompt);
     const traceMs = performance.now() - t0;
@@ -359,15 +401,16 @@ describe("geoEngine performance", () => {
   });
 });
 
-describe("minted-set persistence hooks (static reload survival)", () => {
+describe("minted-set persistence hooks (static reload survival) [fixtures]", () => {
   it("export -> import round-trips a minted set with token-hash validation", () => {
+    const engine = GeoEngine.fromAssets(fixtureSrc.checkpoint, fixtureSrc.vocab);
     const minted = engine.postWeights({
       base: "learned",
       edits: [{ layer: 0, matrix: "W_V", preset: "identity" }],
     });
     const payload = engine.exportWeightSet(minted.weights_token);
     // A fresh engine (same assets) must accept the import and serve identical values.
-    const engine2 = GeoEngine.fromAssets(loadAsset("checkpoint.json"), loadAsset("vocab.json"));
+    const engine2 = GeoEngine.fromAssets(fixtureSrc.checkpoint, fixtureSrc.vocab);
     expect(engine2.importWeightSet(minted.weights_token, payload)).toBe(true);
     const w = engine2.getWeights({ matrix: "W_V", layer: 0, weights_token: minted.weights_token });
     expect(w.source).toBe("preset:identity");
@@ -376,7 +419,7 @@ describe("minted-set persistence hooks (static reload survival)", () => {
     const bad = { ...payload, weights: { ...payload.weights } };
     const firstKey = Object.keys(bad.weights)[0];
     bad.weights[firstKey] = bad.weights[firstKey].slice(0, -4) + "AAA=";
-    const engine3 = GeoEngine.fromAssets(loadAsset("checkpoint.json"), loadAsset("vocab.json"));
+    const engine3 = GeoEngine.fromAssets(fixtureSrc.checkpoint, fixtureSrc.vocab);
     expect(engine3.importWeightSet(minted.weights_token, bad)).toBe(false);
   });
 });
