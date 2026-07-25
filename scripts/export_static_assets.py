@@ -573,7 +573,10 @@ def preset_specs(model_id: str, quick: bool) -> dict[str, list[dict[str, Any]]]:
                     "temperature": 0.0,
                     "layer_from": 23,
                     "layer_to": 23,
-                    "fanout": 2,
+                    # fanout 1: the backend clamps fan-out at temperature 0, so a
+                    # recorded 2 only creates a control-vs-caption contradiction
+                    # (red-team static F3).
+                    "fanout": 1,
                     "response_text": "",
                 },
                 "kind": "static",
@@ -862,6 +865,24 @@ def build_index(
         # files are real assets and must be listed.
         if p.is_file() and str(p.relative_to(out)) != "index.json":
             files[str(p.relative_to(out))] = p.stat().st_size
+
+    # A partial `--only` run must MERGE the untouched sections' metadata from the
+    # existing manifest — clobbering them empties the static model catalog while
+    # the section files are still on disk (broke the static build once).
+    prior: dict[str, Any] = {}
+    prior_path = out / "index.json"
+    if prior_path.exists():
+        try:
+            prior = json.loads(prior_path.read_text())
+        except Exception:
+            prior = {}
+    if not geo_meta and prior.get("geo"):
+        geo_meta = prior["geo"]
+    if not arch_meta and prior.get("arch_models"):
+        arch_meta = prior["arch_models"]
+    if not preset_labels and prior.get("presets"):
+        preset_labels = prior["presets"]
+
     write_json(
         out / "index.json",
         {

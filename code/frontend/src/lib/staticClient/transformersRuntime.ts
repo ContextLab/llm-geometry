@@ -227,18 +227,31 @@ async function generateImpl(
     const logits = logitsData.subarray(pos * vocab, (pos + 1) * vocab);
     const id = newIds[i];
     const topIds = topkByLogits(logits, Math.min(TOPK, vocab));
+    // The reply comes from the quantized incremental decode; the displayed
+    // distributions come from this full teacher-forced re-scoring pass. Near-ties
+    // can rank differently between the two — annotate instead of contradicting
+    // (red-team static finding #1): greedy sampling prob is 1.0 BY DEFINITION of
+    // the decode that chose it, and a mismatch gets an explicit note.
+    const rescoreMismatch = temperature === 0 && id !== topIds[0];
     tokens.push({
       id,
       text: tokenizer.decode([id]),
       // Chosen-token prob under the SAMPLING distribution (1.0 when greedy),
       // exactly like the backend's generate loop.
-      prob: temperature === 0 ? (id === topIds[0] ? 1.0 : softmaxProb(logits, id, 1)) : softmaxProb(logits, id, temperature),
+      prob: temperature === 0 ? 1.0 : softmaxProb(logits, id, temperature),
       topk: {
         ids: topIds,
         texts: topIds.map((t) => tokenizer.decode([t])),
         // Alternatives always report the model's plain softmax (backend rule).
         probs: topIds.map((t) => softmaxProb(logits, t, 1)),
       },
+      ...(rescoreMismatch
+        ? {
+            note:
+              "greedy pick under the quantized in-browser decode; the full-precision " +
+              "re-scoring pass ranks a near-tied alternative first",
+          }
+        : {}),
     });
     if (eos.has(id)) {
       finishReason = "eos";

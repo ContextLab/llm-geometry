@@ -31,7 +31,11 @@
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let runId = 0;
   let hlRunId = 0;
-  let lastRefresh = 0;
+  // null until the first effect run: a remount must RECORD the current nonce, not
+  // diff against 0 — with a global nonce, initializing to 0 re-forced every view
+  // remount after any Recompute click (red-team static F1; also wasteful in
+  // backend mode).
+  let lastRefresh: number | null = null;
   let reveal = $state(9999); // CONTINUOUS column index revealed (9999 = all); ▶ Play sweeps it
   let maxPosNow = $state(0);
   let playing = $state(false);
@@ -59,7 +63,7 @@
     const np = $nParticles;
     const ns = $nSteps;
     const rn = $refreshNonce;
-    const force = rn !== lastRefresh;
+    const force = lastRefresh !== null && rn !== lastRefresh;
     lastRefresh = rn;
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(() => void load(m, pfx, temp, np, ns, force), force ? 0 : 350);

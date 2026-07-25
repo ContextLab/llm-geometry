@@ -74,7 +74,8 @@
     const alts = t.topk.texts
       .map((s, i) => `${JSON.stringify(s)} ${(t.topk.probs[i] * 100).toFixed(1)}%`)
       .join(" · ");
-    return `p = ${(t.prob * 100).toFixed(1)}% · top-5: ${alts}`;
+    const note = t.note ? ` · ⚠ ${t.note}` : "";
+    return `p = ${(t.prob * 100).toFixed(1)}% · top-5: ${alts}${note}`;
   }
 
   // Surprise coloring: confident tokens underline cool (--accent), unlikely draws warm

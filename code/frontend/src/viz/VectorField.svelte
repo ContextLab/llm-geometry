@@ -40,7 +40,11 @@
   let runId = 0;
   let resizeObs: ResizeObserver | undefined;
   let lastW = 0;
-  let lastRefresh = 0;
+  // null until the first effect run: a remount must RECORD the current nonce, not
+  // diff against 0 — with a global nonce, initializing to 0 re-forced every view
+  // remount after any Recompute click (red-team static F1; also wasteful in
+  // backend mode).
+  let lastRefresh: number | null = null;
 
   $effect(() => {
     const m = $modelId;
@@ -51,7 +55,7 @@
     const resp = $responseText;
     const fo = $fanout;
     const rn = $refreshNonce;
-    const force = rn !== lastRefresh; // the Recompute button bypasses the cache
+    const force = lastRefresh !== null && rn !== lastRefresh; // the Recompute button bypasses the cache
     lastRefresh = rn;
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(() => void load(m, pfx, temp, lf, lt, resp, fo, force), force ? 0 : 320);

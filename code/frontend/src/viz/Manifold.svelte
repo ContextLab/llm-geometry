@@ -59,7 +59,11 @@
   let resizeObs: ResizeObserver | undefined;
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let runId = 0;
-  let lastRefresh = 0;
+  // null until the first effect run: a remount must RECORD the current nonce, not
+  // diff against 0 — with a global nonce, initializing to 0 re-forced every view
+  // remount after any Recompute click (red-team static F1; also wasteful in
+  // backend mode).
+  let lastRefresh: number | null = null;
 
   const LOW = new THREE.Color("#2a3a6e");
   const HIGH = new THREE.Color("#b794f6");
@@ -592,7 +596,7 @@
     const resp = $responseText;
     const width = $rbfWidth;
     const rn = $refreshNonce;
-    const force = rn !== lastRefresh;
+    const force = lastRefresh !== null && rn !== lastRefresh;
     lastRefresh = rn;
     if (debounce) clearTimeout(debounce);
     // 600 ms: every distinct width value is its own cached ARAP precompute, so slow

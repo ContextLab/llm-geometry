@@ -32,6 +32,30 @@ import type {
   GeoWeightsPostResult,
 } from "../dataClient";
 import { GeoEngineError, computeError, invalidParam, notFound } from "./errors";
+
+/** Serialized minted weight set for external persistence (sessionStorage). */
+export interface ExportedWeightSet {
+  weights: Record<string, string>; // tensor name -> base64 of float32-LE bytes
+  sources: Record<string, string>;
+  setSource: string;
+}
+
+function b64FromF32(arr: Float32Array): string {
+  const bytes = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
+  let s = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    s += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(s);
+}
+
+function f32FromB64(b64: string): Float32Array {
+  const s = atob(b64);
+  const bytes = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i);
+  return new Float32Array(bytes.buffer);
+}
 import { forceField, nextNextField } from "./fields";
 import { runFinetune, type ProgressCb } from "./finetune";
 import {
@@ -240,6 +264,42 @@ export class GeoEngine {
       shape: [rows, cols],
       source: this.matrixSource(params.weights_token ?? null, srcLayer, matrix) as GeoWeightsData["source"],
     };
+  }
+
+  // --- minted-set persistence (red-team static finding #3) -------------------------
+  // The engine's store is in-memory; the static client persists minted sets across
+  // reloads via these hooks. Import validates the content hash so a corrupted or
+  // stale payload can never impersonate a token.
+
+  exportWeightSet(token: string): ExportedWeightSet {
+    const ws = this.weightSets.get(token);
+    if (!ws) throw notFound(`weights_token '${token}' is unknown (nothing to export)`);
+    const weights: Record<string, string> = {};
+    for (const [name, arr] of Object.entries(ws)) weights[name] = b64FromF32(arr);
+    return {
+      weights,
+      sources: { ...(this.sourceMaps.get(token) ?? {}) },
+      setSource: this.setSources.get(token) ?? "edited",
+    };
+  }
+
+  importWeightSet(token: string, payload: ExportedWeightSet): boolean {
+    if (this.weightSets.has(token)) return true;
+    const ws: WeightSet = {};
+    try {
+      for (const [name, b64] of Object.entries(payload.weights)) ws[name] = f32FromB64(b64);
+    } catch {
+      return false;
+    }
+    if (weightsToken(ws) !== token) return false; // hash mismatch — refuse
+    this.weightSets.set(token, ws);
+    this.sourceMaps.set(token, { ...payload.sources });
+    this.setSources.set(token, payload.setSource);
+    return true;
+  }
+
+  listMintedTokens(): string[] {
+    return [...this.weightSets.keys()];
   }
 
   // --- POST /api/geo/weights -------------------------------------------------------

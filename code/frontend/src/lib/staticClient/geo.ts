@@ -20,7 +20,7 @@ import type {
   GeoWeightsPostBody,
   GeoWeightsPostResult,
 } from "../dataClient";
-import { GeoEngine, runFinetune, type WeightSet } from "../geoEngine";
+import { GeoEngine, runFinetune, type ExportedWeightSet, type WeightSet } from "../geoEngine";
 import type { FinetuneWorkerRequest, FinetuneWorkerResponse } from "../geoEngine";
 import type { StaticAssets } from "./assets";
 import { computeError, invalidParamError, staticModeError, toApiError } from "./errors";
@@ -29,6 +29,53 @@ import type { LocalJobRegistry, ProgressFn } from "./jobs";
 // Contract-documented defaults (specs/002 contracts/api.md): steps ≤ 500
 // default 100, lr default 1e-2. Kept literal here to avoid importing geoEngine
 // internals (model.ts) — geoEngine.test.ts pins the same values.
+// Minted weight sets persist across reloads (red-team static finding #3: the
+// engine's store is in-memory, so a sessionStorage token would otherwise silently
+// self-heal back to "learned" after a reload — the backend build persists edits).
+const MINTED_SETS_KEY = "llm-geometry:static-weight-sets";
+const MINTED_SETS_CAP = 8; // LRU; each entry is ~50 KB of JSON
+
+function loadPersistedSets(): Record<string, ExportedWeightSet> {
+  try {
+    const raw = sessionStorage.getItem(MINTED_SETS_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, ExportedWeightSet>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function persistMintedSet(engine: GeoEngine, token: string): void {
+  try {
+    const all = loadPersistedSets();
+    delete all[token]; // re-insert -> most recent
+    all[token] = engine.exportWeightSet(token);
+    const keys = Object.keys(all);
+    for (let i = 0; i < keys.length - MINTED_SETS_CAP; i++) delete all[keys[i]];
+    sessionStorage.setItem(MINTED_SETS_KEY, JSON.stringify(all));
+  } catch {
+    // Quota/serialization failure: the edit still works this session; the
+    // evicted-token self-heal covers the next reload.
+  }
+}
+
+function restorePersistedSets(engine: GeoEngine): void {
+  const all = loadPersistedSets();
+  let changed = false;
+  for (const [token, payload] of Object.entries(all)) {
+    if (!engine.importWeightSet(token, payload)) {
+      delete all[token]; // hash mismatch / corrupted — drop it
+      changed = true;
+    }
+  }
+  if (changed) {
+    try {
+      sessionStorage.setItem(MINTED_SETS_KEY, JSON.stringify(all));
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+
 const FINETUNE_DEFAULT_STEPS = 100;
 const FINETUNE_MAX_STEPS = 500;
 const FINETUNE_DEFAULT_LR = 0.01;
@@ -82,6 +129,7 @@ export class GeoSection {
               `checkpoint content hash ${engine.canonicalToken}`,
           );
         }
+        restorePersistedSets(engine); // reload keeps minted edits/fine-tunes
         return engine;
       })().catch((e) => {
         this.enginePromise = null;
@@ -133,7 +181,11 @@ export class GeoSection {
   }
 
   postGeoWeights(body: GeoWeightsPostBody): Promise<GeoWeightsPostResult> {
-    return this.run((e) => e.postWeights(body));
+    return this.run((e) => {
+      const result = e.postWeights(body);
+      persistMintedSet(e, result.weights_token);
+      return result;
+    });
   }
 
   /**
@@ -176,6 +228,7 @@ export class GeoSection {
         report,
       );
       const token = engine.registerFinetunedWeights(result.weights);
+      persistMintedSet(engine, token);
       const payload = {
         weights_token: token,
         loss_before: result.lossBefore,

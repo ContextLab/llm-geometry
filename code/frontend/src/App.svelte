@@ -64,7 +64,11 @@
     <aside class="controls panel" data-testid="controls">
       <div class="controls-head">
         <h2>Controls</h2>
-        <button class="recompute" data-testid="recompute" title="Force re-compute the current view" onclick={() => refreshNonce.update((n) => n + 1)}>↻ Recompute</button>
+        {#if !STATIC_MODE}
+          <!-- Static builds serve precomputed artifacts: a force-recompute can never
+               succeed there, so the button hides instead of lying (red-team static F1). -->
+          <button class="recompute" data-testid="recompute" title="Force re-compute the current view" onclick={() => refreshNonce.update((n) => n + 1)}>↻ Recompute</button>
+        {/if}
       </div>
       {#if sharedControlsViews.includes($view)}
         {#if STATIC_MODE && ($view === "vector" || $view === "sankey" || $view === "manifold")}

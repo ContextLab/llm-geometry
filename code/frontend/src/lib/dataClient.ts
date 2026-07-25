@@ -488,6 +488,9 @@ export interface ArchGeneratedToken {
   text: string;
   prob: number;
   topk: { ids: number[]; texts: string[]; probs: number[] };
+  // Optional honesty annotation (static build): set when the quantized decode's
+  // greedy pick disagrees with the full-precision re-scoring pass's argmax.
+  note?: string;
 }
 
 export interface ArchGenerateResult {

@@ -63,7 +63,9 @@
     <button disabled={busy} onclick={() => run("PNG", () => canvasPNG(svg()!, fname("png"), 2))} title="High-res PNG">PNG</button>
   {/if}
   {#if webglCanvas}
-    <button disabled={busy} onclick={() => run("PNG", () => exportCanvasPNG(webglCanvas()!, fname("png")))} title="High-res PNG">PNG</button>
+    <!-- Composite onto the app background at 2×: a bare WebGL toBlob is transparent
+         (renders white outside the app) and 1× (red-team static F2). -->
+    <button disabled={busy} onclick={() => run("PNG", () => exportCanvasPNG(webglToCanvas(webglCanvas()!, 2), fname("png")))} title="High-res PNG">PNG</button>
   {/if}
   {#if anim}
     <button disabled={busy} onclick={() => run("GIF", gif)} title="Animated GIF" data-testid="export-gif">GIF</button>

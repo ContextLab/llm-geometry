@@ -358,3 +358,25 @@ describe("geoEngine performance", () => {
     expect(fieldMs).toBeLessThan(10000);
   });
 });
+
+describe("minted-set persistence hooks (static reload survival)", () => {
+  it("export -> import round-trips a minted set with token-hash validation", () => {
+    const minted = engine.postWeights({
+      base: "learned",
+      edits: [{ layer: 0, matrix: "W_V", preset: "identity" }],
+    });
+    const payload = engine.exportWeightSet(minted.weights_token);
+    // A fresh engine (same assets) must accept the import and serve identical values.
+    const engine2 = GeoEngine.fromAssets(loadAsset("checkpoint.json"), loadAsset("vocab.json"));
+    expect(engine2.importWeightSet(minted.weights_token, payload)).toBe(true);
+    const w = engine2.getWeights({ matrix: "W_V", layer: 0, weights_token: minted.weights_token });
+    expect(w.source).toBe("preset:identity");
+    expect(w.values[0][0]).toBe(1);
+    // Corruption is refused: flip a byte and the hash check fails.
+    const bad = { ...payload, weights: { ...payload.weights } };
+    const firstKey = Object.keys(bad.weights)[0];
+    bad.weights[firstKey] = bad.weights[firstKey].slice(0, -4) + "AAA=";
+    const engine3 = GeoEngine.fromAssets(loadAsset("checkpoint.json"), loadAsset("vocab.json"));
+    expect(engine3.importWeightSet(minted.weights_token, bad)).toBe(false);
+  });
+});
