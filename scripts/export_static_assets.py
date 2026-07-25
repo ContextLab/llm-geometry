@@ -506,6 +506,13 @@ def _vector_static(
 def preset_specs(model_id: str, quick: bool) -> dict[str, list[dict[str, Any]]]:
     """The labeled preset configs per 001 view (preset 1 = the view's default state)."""
     if quick:
+        # Quick mode trims COUNTS (1 preset per view, fewer particles/steps — those are
+        # state-carried, so the UI requests them once the preset state is applied) but
+        # MUST keep the request constants the views hard-code (VectorField GRID_N/REF,
+        # Manifold MARKERS): a preset recorded with different grid_n/reference_set_size
+        # can never be matched by a real view request (staticClient serves only exact
+        # param-dict hits), which would make quick exports invisible to the UI and to
+        # the static e2e suite (003-D).
         return {
             "vector": [
                 {
@@ -519,8 +526,6 @@ def preset_specs(model_id: str, quick: bool) -> dict[str, list[dict[str, Any]]]:
                         "response_text": "",
                     },
                     "kind": "static",
-                    "grid_n": 6,
-                    "ref": 64,
                 },
             ],
             "sankey": [
@@ -544,7 +549,6 @@ def preset_specs(model_id: str, quick: bool) -> dict[str, list[dict[str, Any]]]:
                         "width": 0.18,
                         "response_text": "",
                     },
-                    "markers": 300,
                 },
             ],
         }

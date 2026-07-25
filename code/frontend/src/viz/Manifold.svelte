@@ -8,6 +8,8 @@
   import { showTip, hideTip } from "../lib/tooltip";
   import Progress from "../lib/Progress.svelte";
   import ExportBar from "../controls/ExportBar.svelte";
+  import StaticNotice from "../lib/StaticNotice.svelte";
+  import { isStaticMiss } from "../lib/staticUx";
 
   // Visualization 3 — reachable "thoughts" as a sphere warped (RBF) toward likely next
   // tokens (project_description.md §3).
@@ -15,6 +17,9 @@
   let progress = $state(0);
   let progressMsg = $state("");
   let error = $state("");
+  // Static build only (FR-203): the data layer's "not precomputed" refusal, shown as a
+  // designed note while the previous manifold stays on screen — never a blank panel.
+  let staticMiss = $state("");
   let data = $state<ManifoldData | null>(null);
   let manim = $state<ManifoldAnimation | null>(null); // precomputed key frames (response present)
   let animTime = 0; // continuous key-frame index; tweened toward responseStep
@@ -615,6 +620,7 @@
   async function load(m: string, pfx: string, temp: number, resp: string, width: number, force = false) {
     const my = ++runId;
     error = "";
+    staticMiss = "";
     loading = true;
     progress = 0;
     progressMsg = force ? "recomputing…" : "starting…";
@@ -647,7 +653,10 @@
         buildMesh(data, 0);
       }
     } catch (e: any) {
-      if (my === runId) error = `${e.type ?? "Error"}: ${e.message ?? e}`;
+      if (my === runId) {
+        if (isStaticMiss(e)) staticMiss = e.message;
+        else error = `${e.type ?? "Error"}: ${e.message ?? e}`;
+      }
     } finally {
       if (my === runId) loading = false;
     }
@@ -681,6 +690,7 @@
   </header>
   {#if loading}<div class="loading"><Progress {progress} message={progressMsg} /></div>{/if}
   {#if error}<div class="error" data-testid="viz-manifold-error">{error}</div>{/if}
+  {#if staticMiss}<StaticNotice message={staticMiss} testid="viz-manifold-static-note" />{/if}
   <div bind:this={containerEl} class="canvas" data-testid="manifold-canvas"></div>
   {#if data}
     <p class="caption">

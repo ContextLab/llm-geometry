@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
   import MatrixHeatmap from "../../lib/MatrixHeatmap.svelte";
+  import StaticNotice from "../../lib/StaticNotice.svelte";
   import type { ArchGraph, ArchNode, ArchTrace } from "../../lib/dataClient";
   import { showTip, hideTip } from "../../lib/tooltip";
 
@@ -13,10 +14,22 @@
     graph: ArchGraph | null;
     loading?: boolean;
     error?: string;
+    /** Static build (feature 003): "this prompt isn't among the precomputed example
+     * traces" — rendered as a designed affordance (not an error) while any previous
+     * trace stays visible underneath (FR-203). */
+    staticNote?: string;
     onHighlight?: (nodeId: string | null) => void;
     onRetry?: () => void;
   }
-  let { trace, graph, loading = false, error = "", onHighlight, onRetry }: Props = $props();
+  let {
+    trace,
+    graph,
+    loading = false,
+    error = "",
+    staticNote = "",
+    onHighlight,
+    onRetry,
+  }: Props = $props();
 
   onDestroy(() => {
     hideTip();
@@ -142,6 +155,10 @@
     <span class="bd-sub">the real forward pass on your prompt — tokenize → {order.length || "…"} traced ops → next-token distribution</span>
     {#if loading && trace}<span class="tracing-chip">re-tracing…</span>{/if}
   </div>
+
+  {#if staticNote}
+    <StaticNotice message={staticNote} testid="arch-static-note" />
+  {/if}
 
   {#if error}
     <div class="err" data-testid="arch-error">

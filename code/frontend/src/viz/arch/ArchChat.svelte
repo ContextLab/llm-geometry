@@ -11,6 +11,8 @@
   import { client, type ArchGenerateResult, type ArchGeneratedToken } from "../../lib/dataClient";
   import { showTip, hideTip } from "../../lib/tooltip";
   import { plainError } from "./archShared";
+  import StaticRuntimeBadge from "../../lib/StaticRuntimeBadge.svelte";
+  import { STATIC_MODE } from "../../lib/staticUx";
 
   // Single-turn chat (contract v1): POST /api/arch/generate with the current prompt +
   // optional system prompt; the reply renders token-by-token with per-token probability
@@ -87,6 +89,11 @@
 </script>
 
 <div class="chat">
+  {#if STATIC_MODE}
+    <!-- Static build: generation is fully live via transformers.js — this badge reports
+         the real device/dtype ladder (webgpu·q4f16 → wasm·q8) as it loads. -->
+    <StaticRuntimeBadge />
+  {/if}
   <div class="knobs">
     <label class="knob">
       <span class="klabel">temperature <b>{$archTemperature.toFixed(2)}</b></span>

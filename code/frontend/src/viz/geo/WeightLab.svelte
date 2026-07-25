@@ -8,6 +8,7 @@
   } from "../../lib/dataClient";
   import { geoWeightsToken } from "../../lib/explorerStores";
   import MatrixHeatmap from "../../lib/MatrixHeatmap.svelte";
+  import { STATIC_MODE } from "../../lib/staticUx";
 
   // Weight Lab (spec acceptance 2.3): inspect any of the tiny model's matrices, apply
   // presets or edit 3×3 cells directly; every edit round-trips through POST
@@ -26,10 +27,16 @@
 
   const MATRICES: GeoMatrixName[] = ["embedding", "W_Q", "W_K", "W_V", "W_O"];
   const PRESETS: GeoPresetName[] = ["identity", "toeplitz_fuzzy", "random", "random_autocorr", "zero", "learned"];
+  // STATIC build: numpy's seeded MT19937 stream isn't reproducible in float64 JS, so
+  // the TS engine ships REAL backend-computed fixture matrices for exactly these seeds
+  // (src/lib/geoEngine/presetFixtures.json `seeds`; requesting any other seed raises
+  // InvalidWeightEditError). The free seed integer becomes this honest dropdown.
+  const FIXTURE_SEEDS = [0, 1, 2, 7];
 
   let matrix = $state<GeoMatrixName>("W_V");
   let layer = $state(0);
   let preset = $state<GeoPresetName>("identity");
+  let seed = $state(0); // used only for the seeded presets in the static build
   let data = $state<GeoWeightsData | null>(null);
   let loading = $state(false);
   let posting = $state(false);
@@ -80,7 +87,7 @@
     }
   }
 
-  async function post(edits: { layer: number; matrix: GeoMatrixName; preset?: GeoPresetName; values?: number[][] }[]) {
+  async function post(edits: { layer: number; matrix: GeoMatrixName; preset?: GeoPresetName; values?: number[][]; seed?: number }[]) {
     posting = true;
     error = "";
     try {
@@ -96,8 +103,18 @@
     }
   }
 
+  const seededPreset = $derived(preset === "random" || preset === "random_autocorr");
+
   function applyPreset() {
-    void post([{ layer: isEmbedding ? 0 : layer, matrix, preset }]);
+    // The backend's default seed is 0; only the static build exposes a seed picker
+    // (limited to the shipped fixture seeds), so only it ever sends a non-default one.
+    const edit: { layer: number; matrix: GeoMatrixName; preset: GeoPresetName; seed?: number } = {
+      layer: isEmbedding ? 0 : layer,
+      matrix,
+      preset,
+    };
+    if (STATIC_MODE && seededPreset) edit.seed = seed;
+    void post([edit]);
   }
 
   function onCellEdit(row: number, col: number, value: number) {
@@ -157,6 +174,18 @@
         {#each PRESETS as p (p)}<option value={p}>{p}</option>{/each}
       </select>
     </label>
+    {#if STATIC_MODE && seededPreset}
+      <label class="field">
+        <span>seed</span>
+        <select
+          bind:value={seed}
+          data-testid="geo-seed"
+          title="the static demo ships real backend-computed matrices for these numpy seeds — other seeds need the full stack"
+        >
+          {#each FIXTURE_SEEDS as s (s)}<option value={s}>{s}</option>{/each}
+        </select>
+      </label>
+    {/if}
     <button data-testid="geo-apply" onclick={applyPreset} disabled={posting}>
       {posting ? "applying…" : "Apply"}
     </button>

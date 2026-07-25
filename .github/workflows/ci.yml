@@ -111,12 +111,16 @@ jobs:
           grep -v '^-e ' requirements.lock > /tmp/requirements-ci.txt
           pip install -r /tmp/requirements-ci.txt
           pip install -e . --no-deps
+      - name: Export static assets (quick — powers the "static" e2e project)
+        run: |
+          . code/backend/.venv/bin/activate
+          python scripts/export_static_assets.py --quick --git-sha "$GITHUB_SHA" --generated-at ci
       - name: Frontend install + browsers
         working-directory: code/frontend
         run: |
           npm ci
           npx playwright install --with-deps chromium
-      - name: e2e (real backend + real models)
+      - name: e2e (both projects — chromium against the real backend, static against the built Pages bundle)
         working-directory: code/frontend
         run: npm run test:e2e
       - name: Upload traces on failure

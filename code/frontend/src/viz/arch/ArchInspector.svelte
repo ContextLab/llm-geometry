@@ -3,6 +3,7 @@
   import MatrixHeatmap from "../../lib/MatrixHeatmap.svelte";
   import { client, type ArchNode, type ArchWeightsData } from "../../lib/dataClient";
   import { KIND_EXPLAINER, formatCount, paramCount, plainError } from "./archShared";
+  import { STATIC_MODE } from "../../lib/staticUx";
 
   // Node inspector drawer: kind/label/shape/param list (tied_to badge for aliased
   // tensors) + a MatrixHeatmap of the selected parameter. Default view = whole matrix
@@ -165,6 +166,20 @@
   const colLabels = $derived(
     weights ? idxLabels("col", weights.c0, weights.c1, weights.grid_shape[1]) : undefined,
   );
+
+  // STATIC build: downsampled windows come from ONE precomputed whole-tensor overview
+  // tile, so a downsampled response always reports r0..c1 = the FULL tensor (a
+  // sub-window overview can't be honestly derived from it — 003-C). Label it for what
+  // it is, keyed off the response DATA, never the request.
+  const fullOverview = $derived(
+    STATIC_MODE &&
+      weights !== null &&
+      weights.downsampled &&
+      weights.r0 === 0 &&
+      weights.c0 === 0 &&
+      weights.r1 === (weights.shape[0] ?? 1) &&
+      weights.c1 === (weights.shape[1] ?? 1),
+  );
 </script>
 
 <aside class="inspector" data-testid="arch-inspector" aria-label="node inspector">
@@ -218,16 +233,20 @@
       </div>
     {:else if weights}
       <div class="viewmeta">
-        {#if zoom}
-          rows {weights.r0}–{weights.r1 - 1} · cols {weights.c0}–{weights.c1 - 1}
-          of {weights.shape.join(" × ")}
+        {#if fullOverview}
+          {weights.shape.join(" × ")} · <b>overview (whole tensor, downsampled)</b>
         {:else}
-          whole matrix {weights.shape.join(" × ")}
+          {#if zoom}
+            rows {weights.r0}–{weights.r1 - 1} · cols {weights.c0}–{weights.c1 - 1}
+            of {weights.shape.join(" × ")}
+          {:else}
+            whole matrix {weights.shape.join(" × ")}
+          {/if}
+          ·
+          <b class:exact={!weights.downsampled}>
+            {weights.downsampled ? "downsampled (strided mean)" : "exact values"}
+          </b>
         {/if}
-        ·
-        <b class:exact={!weights.downsampled}>
-          {weights.downsampled ? "downsampled (strided mean)" : "exact values"}
-        </b>
       </div>
       <div
         class="stage"

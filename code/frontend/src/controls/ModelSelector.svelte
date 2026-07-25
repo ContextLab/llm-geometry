@@ -2,6 +2,8 @@
   import { onMount } from "svelte";
   import { modelId, numLayers, layerFrom, layerTo, modelError } from "../lib/stores";
   import { client, type ModelReference } from "../lib/dataClient";
+  import StaticNotice from "../lib/StaticNotice.svelte";
+  import { STATIC_MODE } from "../lib/staticUx";
 
   let models = $state<ModelReference[]>([]);
   let custom = $state("");
@@ -34,9 +36,14 @@
         const nl = ref.capabilities.num_layers ?? 0;
         numLayers.set(nl);
         // Default the readout layer to the FINAL layer (where next-token probabilities are
-        // computed). Single layer → keep from/to in sync.
-        layerFrom.set(nl);
-        layerTo.set(nl);
+        // computed). Single layer → keep from/to in sync. In the STATIC build the preset
+        // states own the readout layer (preset 1 is "Default · layer 0" and must render
+        // instantly as an exact precomputed hit) — clobbering it here would push the view
+        // off-preset the moment the model resolves.
+        if (!STATIC_MODE) {
+          layerFrom.set(nl);
+          layerTo.set(nl);
+        }
       })
       .catch((e) => {
         if (cancelled) return;
@@ -72,16 +79,26 @@
       <option value={$modelId}>{$modelId}</option>
     {/if}
   </select>
-  <div class="custom">
-    <input
-      type="text"
-      placeholder="…or any open-weights HF id (e.g. distilgpt2)"
-      bind:value={custom}
-      onkeydown={(e) => e.key === "Enter" && applyCustom()}
-      data-testid="model-custom"
+  {#if STATIC_MODE}
+    <!-- FR-203: arbitrary HF ids need the backend, so the free-input is replaced by a
+         designed affordance instead of silently failing on every id typed into it. -->
+    <StaticNotice
+      compact
+      testid="model-static-note"
+      message="Free-form HF model ids aren't available in the static demo — pick one of the precomputed models above."
     />
-    <button onclick={applyCustom}>Load</button>
-  </div>
+  {:else}
+    <div class="custom">
+      <input
+        type="text"
+        placeholder="…or any open-weights HF id (e.g. distilgpt2)"
+        bind:value={custom}
+        onkeydown={(e) => e.key === "Enter" && applyCustom()}
+        data-testid="model-custom"
+      />
+      <button onclick={applyCustom}>Load</button>
+    </div>
+  {/if}
   <div class="msg" class:err={status === "error"} title={detail || undefined} data-testid="model-message">{message}</div>
 </div>
 

@@ -4,6 +4,8 @@
   import { client, ApiError, type GeoFinetuneResult } from "../../lib/dataClient";
   import { geoWeightsToken } from "../../lib/explorerStores";
   import Progress from "../../lib/Progress.svelte";
+  import StaticNotice from "../../lib/StaticNotice.svelte";
+  import { STATIC_MODE } from "../../lib/staticUx";
 
   // Fine-tune the tiny model on the student's own data (FR-106): pasted text, an
   // uploaded .txt/.md, or an HF dataset id. Real SGD runs as a job (SSE phase
@@ -116,9 +118,29 @@
 
   <div class="tabs" role="tablist">
     {#each [["paste", "paste text"], ["file", "upload .txt/.md"], ["hf", "HF dataset"]] as [id, lbl] (id)}
-      <button class:active={source === id} role="tab" aria-selected={source === id} onclick={() => (source = id as Source)}>{lbl}</button>
+      <!-- STATIC build (FR-203): streaming an HF dataset needs the Python backend, so
+           that source is visibly disabled (with the note below) — paste/file fine-tunes
+           run for real in a Web Worker. -->
+      <button
+        class:active={source === id}
+        role="tab"
+        aria-selected={source === id}
+        disabled={STATIC_MODE && id === "hf"}
+        title={STATIC_MODE && id === "hf"
+          ? "HF-dataset fine-tuning needs the Python backend — not available in the static demo"
+          : undefined}
+        data-testid={id === "hf" ? "geo-finetune-hf-tab" : undefined}
+        onclick={() => (source = id as Source)}
+      >{lbl}</button>
     {/each}
   </div>
+  {#if STATIC_MODE}
+    <StaticNotice
+      compact
+      testid="geo-finetune-static-note"
+      message="HF-dataset streaming isn't available in the static demo — paste text or upload a .txt/.md and the fine-tune runs for real, right here in your browser."
+    />
+  {/if}
 
   {#if source === "paste"}
     <textarea rows="4" placeholder="Paste a paragraph or two — the model will take real gradient steps on it…" bind:value={text}></textarea>
@@ -196,6 +218,12 @@
     background: var(--accent-grad);
     color: #0b0e14;
     font-weight: 600;
+  }
+  .tabs button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    text-decoration: line-through;
+    text-decoration-thickness: 1px;
   }
   textarea {
     font-size: 0.84rem;
