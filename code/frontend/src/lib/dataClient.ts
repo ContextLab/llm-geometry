@@ -871,8 +871,10 @@ export function createClient(opts: ClientOptions = {}) {
 
 export type Client = ReturnType<typeof createClient>;
 
-// Default client used by the app (same-origin; Vite proxies /api in dev).
-export const client = createClient();
+// Default client used by the app: the backend client (same-origin; Vite proxies
+// /api in dev), or the static Pages client when built with VITE_DATA_MODE=static.
+// The pick lives in clientProvider.ts; the type is identical either way.
+export { client, DATA_MODE } from "./clientProvider";
 
 // ---------------------------------------------------------------------------
 // Trailing-edge debounce for interactive controls (FR-108 cancel-and-restart):
