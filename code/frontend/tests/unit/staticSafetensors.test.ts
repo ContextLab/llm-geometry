@@ -189,22 +189,39 @@ describe("safetensors range reads (REAL HuggingFace CDN)", () => {
     expect(Array.from(win.values.subarray(4, 6))).toEqual(Array.from(single.values));
   }, 120_000);
 
-  it("decodes a REAL BF16 window (SmolLM2) within its recorded bounds", async (ctx) => {
+  it("decodes a REAL BF16 window (SmolLM2) matching independent per-scalar reads", async (ctx) => {
     if (!online) return ctx.skip();
+    // Data-driven on meta.json only (quick exports carry it without SmolLM2 tiles):
+    // per-scalar independent Range reads are a STRONGER check than tile bounds —
+    // separate byte math + separate requests must agree with the window decode.
     const meta = await readStaticJson<Meta>("arch/HuggingFaceTB__SmolLM2-135M-Instruct/meta.json");
     const file = new SafetensorsFile(meta.safetensors_url);
     const header = await file.header();
     const embed = header.tensors["model.embed_tokens.weight"];
     expect(embed.dtype).toBe("BF16");
-    const win = await file.readWindow("model.embed_tokens.weight", 1000, 1002, 100, 103);
-    const tiles = await readStaticJson<TilesJson>(
-      "arch/HuggingFaceTB__SmolLM2-135M-Instruct/tiles.json",
-    );
-    const stats = tiles.tiles.find((t) => t.param === "model.embed_tokens.weight")!.stats;
+    const cols = asMatrixShape(embed.shape)[1];
+    const [r0, c0] = [1000, 100];
+    const win = await file.readWindow("model.embed_tokens.weight", r0, r0 + 2, c0, c0 + 3);
+    expect(win.values.length).toBe(6);
+    for (const [dr, dc] of [
+      [0, 0],
+      [0, 2],
+      [1, 1],
+    ]) {
+      const independent = await fetchScalar(
+        meta.safetensors_url,
+        header.dataStart,
+        embed.data_offsets[0],
+        "BF16",
+        cols,
+        r0 + dr,
+        c0 + dc,
+      );
+      expect(win.values[dr * 3 + dc]).toBe(independent);
+    }
     for (const v of win.values) {
       expect(Number.isFinite(v)).toBe(true);
-      expect(v).toBeGreaterThanOrEqual(stats.min);
-      expect(v).toBeLessThanOrEqual(stats.max);
+      expect(Math.abs(v)).toBeLessThan(10); // sane embedding magnitude, not garbage bits
     }
   }, 120_000);
 

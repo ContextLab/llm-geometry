@@ -92,24 +92,40 @@ describe("001 view presets (real preset files)", () => {
     expect(err!.message).toContain("full stack");
   });
 
+  // Manifest-driven: scan every exported preset for the first one carrying each
+  // endpoint (full and --quick exports both must supply all four request kinds —
+  // hard-coded file indices broke under --quick, where fewer presets exist).
+  async function findPresetWith(
+    view: "sankey" | "manifold",
+    endpoint: string,
+  ): Promise<PresetFileJson> {
+    const manifest = await readStaticJson<{ presets: Record<string, { n: number }[]> }>(
+      "index.json",
+    );
+    for (const entry of manifest.presets[view] ?? []) {
+      const preset = await readStaticJson<PresetFileJson>(`presets/${view}/${entry.n}.json`);
+      if (preset.requests.some((r) => r.endpoint === endpoint)) return preset;
+    }
+    throw new Error(`no exported ${view} preset carries ${endpoint} — export coverage gap`);
+  }
+
   it("serves sankey, sankey_highlight, manifold and manifold_animation presets", async () => {
     const c = makeClient();
-    for (const [file, endpoint, method] of [
-      ["presets/sankey/1.json", "/api/sankey", c.getSankey],
-      ["presets/sankey/4.json", "/api/sankey_highlight", c.getSankeyHighlight],
-      ["presets/manifold/2.json", "/api/manifold", c.getManifold],
-      ["presets/manifold/4.json", "/api/manifold_animation", c.getManifoldAnimation],
+    for (const [view, endpoint, method] of [
+      ["sankey", "/api/sankey", c.getSankey],
+      ["sankey", "/api/sankey_highlight", c.getSankeyHighlight],
+      ["manifold", "/api/manifold", c.getManifold],
+      ["manifold", "/api/manifold_animation", c.getManifoldAnimation],
     ] as const) {
-      const preset = await readStaticJson<PresetFileJson>(file);
-      const req = preset.requests.find((r) => r.endpoint === endpoint);
-      expect(req, `${file} should contain ${endpoint}`).toBeDefined();
-      const out = await method(preset.model_id, stripModel(req!.params));
-      expect(out).toEqual(req!.response);
+      const preset = await findPresetWith(view, endpoint);
+      const req = preset.requests.find((r) => r.endpoint === endpoint)!;
+      const out = await method(preset.model_id, stripModel(req.params));
+      expect(out).toEqual(req.response);
     }
   });
 
   it("serves recorded tokenize calls from presets without any live runtime", async () => {
-    const preset = await readStaticJson<PresetFileJson>("presets/sankey/4.json");
+    const preset = await findPresetWith("sankey", "/api/tokenize");
     const req = preset.requests.find((r) => r.endpoint === "/api/tokenize")!;
     const c = makeClient(); // no runtime injected: a live fallback would throw
     const out = await c.tokenize(preset.model_id, req.params.text as string);

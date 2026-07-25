@@ -539,6 +539,19 @@ def preset_specs(model_id: str, quick: bool) -> dict[str, list[dict[str, Any]]]:
                         "response_text": "",
                     },
                 },
+                # Response-bearing preset: records the tokenize + highlight requests
+                # the unit tests (and response UIs) exercise — quick mode must not
+                # leave those request kinds untested.
+                {
+                    "label": "Response (quick)",
+                    "state": {
+                        "prefix_text": DEFAULT_PREFIX,
+                        "temperature": 1.0,
+                        "n_particles": 40,
+                        "n_steps": 4,
+                        "response_text": " Paris",
+                    },
+                },
             ],
             "manifold": [
                 {
@@ -549,6 +562,16 @@ def preset_specs(model_id: str, quick: bool) -> dict[str, list[dict[str, Any]]]:
                         "width": 0.18,
                         "response_text": "",
                     },
+                },
+                {
+                    "label": "Response (quick)",
+                    "state": {
+                        "prefix_text": DEFAULT_PREFIX,
+                        "temperature": 1.0,
+                        "width": 0.18,
+                        "response_text": " Paris",
+                    },
+                    "kind": "animation",
                 },
             ],
         }
@@ -953,6 +976,19 @@ def main(argv: list[str] | None = None) -> int:
         if "arch" in sections:
             for mid in arch_models:
                 arch_meta.append(export_arch_model(client, out, mid, n_traces))
+            if args.quick:
+                # Metadata-only entry for a BF16-weighted model (gpt2 is F32): the
+                # safetensors range-read decode tests need a real BF16 target, and
+                # meta.json costs one config-only resolve — no weights, no graph.
+                from llm_geometry.models.loader import resolve_model
+
+                bf16_mid = "HuggingFaceTB/SmolLM2-135M-Instruct"
+                if bf16_mid not in arch_models:
+                    ref = resolve_model(bf16_mid)
+                    write_json(
+                        out / "arch" / _slug(bf16_mid) / "meta.json",
+                        _safetensors_meta(bf16_mid, ref["revision"]),
+                    )
         if "presets" in sections:
             preset_labels = export_presets(client, out, args.preset_model, args.quick)
 
