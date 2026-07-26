@@ -23,6 +23,7 @@
     type GeoLayerSelection,
   } from "../../lib/explorerStores";
   import Progress from "../../lib/Progress.svelte";
+  import ExportBar from "../../controls/ExportBar.svelte";
   import GeoScene from "./GeoScene.svelte";
   import TokenStrip from "./TokenStrip.svelte";
   import WeightLab from "./WeightLab.svelte";
@@ -36,6 +37,7 @@
   // vector fields, weight edits, fine-tunes, attention — is live and real.
   type Phase = "boot" | "training" | "ready" | "error";
 
+  let scene = $state<GeoScene | undefined>();
   let phase = $state<Phase>("boot");
   let bootError = $state("");
   let progress = $state(0);
@@ -322,10 +324,15 @@
           <input type="checkbox" checked={$geoAntisymmetrize} onchange={(e) => geoAntisymmetrize.set(e.currentTarget.checked)} />
           <span>antisymmetrize (W_V−W_Vᵀ)/2</span>
         </label>
+        <!-- Two DIFFERENT facts, so both are shown: whether the per-point field is
+             tangent by construction, and how much radial pull was projected out of the
+             aggregate forces before drawing them. Showing only the first would hide
+             what the projection removed. -->
         {#if field?.tangent_exact}
-          <span class="badge tangent" title="the antisymmetrized field is exactly tangent to the sphere">tangent: exact</span>
-        {:else if maxResidual != null}
-          <span class="badge residual" title="largest off-sphere component among the prompt's aggregate forces">max normal residual {maxResidual.toFixed(3)}</span>
+          <span class="badge tangent" data-testid="geo-tangent-badge" title="(W_V−W_Vᵀ)/2 is antisymmetric, so ⟨Az,z⟩ = 0 — the per-token field is exactly tangent to the sphere at every point">per-token field: exactly tangent</span>
+        {/if}
+        {#if maxResidual != null}
+          <span class="badge residual" data-testid="geo-residual-badge" title="Each aggregate force is drawn tangent at its own token, so its radial component is projected away first. This is the largest amount removed across the prompt — antisymmetrizing W_V does not reduce it, because each term is tangent at z_j rather than at the z_i where the sum is drawn.">radial pull projected out: {maxResidual.toFixed(3)} max</span>
         {/if}
       {/if}
       {#if fieldLoading}<span class="computing">computing field…</span>{/if}
@@ -356,19 +363,23 @@
     {/if}
 
     <GeoScene
+      bind:this={scene}
       {field}
       traceEmbeddings={trace?.embeddings ?? null}
       traceTokens={trace?.tokens ?? null}
       {label}
     />
-    <p class="caption">
-      {#if $geoFieldMode === "next_next"}
-        each arrow: append that token to the prompt, then follow it to the model's <i>next</i> prediction — brighter = more probable
-        {#if $geoTemperature > 0 && $geoTopM > 1}· {$geoTopM} weighted arrows per token at T={$geoTemperature.toFixed(2)}{/if}
-      {:else}
-        thin arrows: the per-token field W_V·z at layer {effLayer} · <span class="force-key">amber arrows</span>: the prompt's aggregate attention forces · <span class="path-key">green path</span>: the prompt's tokens across the sphere
-      {/if}
-    </p>
+    <div class="caption-row">
+      <p class="caption">
+        {#if $geoFieldMode === "next_next"}
+          each arrow: append that token to the prompt, then follow it to the model's <i>next</i> prediction — brighter = more probable
+          {#if $geoTemperature > 0 && $geoTopM > 1}· {$geoTopM} weighted arrows per token at T={$geoTemperature.toFixed(2)}{/if}
+        {:else}
+          thin arrows: the per-token field W_V·z at layer {effLayer} · <span class="force-key">amber arrows</span>: the prompt's aggregate attention forces, drawn tangent to the sphere at each token{#if maxResidual != null} (up to {maxResidual.toFixed(3)} of radial pull projected away — see the badge above){/if} · <span class="path-key">green path</span>: the prompt's tokens across the sphere, hidden where it passes behind
+        {/if}
+      </p>
+      <ExportBar name="geometry-sphere" webglCanvas={() => scene?.canvasEl()} />
+    </div>
 
     <div class="grid">
       <div class="card"><WeightLab {label} checkpointId={spec?.checkpoint.checkpoint_id ?? null} /></div>
@@ -562,6 +573,14 @@
     padding: 0.2rem 0.6rem;
     font-size: 0.72rem;
   }
+  .caption-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+  .caption-row .caption { flex: 1; min-width: 260px; }
   .caption {
     margin: 0;
     color: var(--text-dim);

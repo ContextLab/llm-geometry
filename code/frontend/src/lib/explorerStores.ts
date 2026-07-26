@@ -41,8 +41,15 @@ export const geoLayer = writable<GeoLayerSelection>("full");
 export const geoTemperature = writable<number>(0);
 /** Arrows per point (contract default 1). */
 export const geoTopM = writable<number>(1);
-/** Force mode only: use (W_V − W_Vᵀ)/2 so the per-point field is exactly tangent. */
-export const geoAntisymmetrize = writable<boolean>(false);
+/**
+ * Force mode only: use (W_V − W_Vᵀ)/2 so the per-point field is exactly tangent.
+ *
+ * ON by default (feature 004): the raw W_V·z field has a radial component, so it draws
+ * as arrows shooting off the sphere the points live on — unreadable as a surface field.
+ * Unchecking it shows the raw operator, which is a legitimate thing to look at; the
+ * "tangent: exact" badge disappears and the residual badge takes over.
+ */
+export const geoAntisymmetrize = writable<boolean>(true);
 
 // ---------------------------------------------------------------------------
 // geoWeightsToken — persisted to sessionStorage (spec acceptance 2.3: a page

@@ -25,6 +25,14 @@
 
   let containerEl: HTMLDivElement | undefined;
   let webglError = $state("");
+  // Auto-rotation is OFF by default: it used to spin unconditionally with no way to
+  // stop it, which made reading the field (or hovering a token) a moving target.
+  let autoRotate = $state(false);
+
+  /** The live WebGL canvas, for figure export. Undefined before mount / after teardown. */
+  export function canvasEl(): HTMLCanvasElement | undefined {
+    return renderer?.domElement;
+  }
 
   const HEIGHT = 520;
   const MAX_ARROWS = 5015; // 1003 points x top_m<=5
@@ -118,8 +126,13 @@
 
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.autoRotate = true;
+    controls.autoRotate = autoRotate;
     controls.autoRotateSpeed = 0.5;
+    // Grabbing the sphere always wins over the animation — spinning out from under a
+    // drag is the single most annoying thing an auto-rotating viewer can do.
+    controls.addEventListener("start", () => {
+      if (autoRotate) autoRotate = false;
+    });
 
     // The manifold the embeddings live on: a soft-shaded unit sphere + faint wireframe.
     const sphere = new THREE.Mesh(
@@ -147,7 +160,11 @@
     const arrowMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.7, toneMapped: false });
     shaft = new THREE.InstancedMesh(shaftGeom, arrowMat, MAX_ARROWS);
     head = new THREE.InstancedMesh(headGeom.clone(), arrowMat.clone(), MAX_ARROWS);
-    const forceMat = new THREE.MeshBasicMaterial({ color: COL_FORCE, transparent: true, opacity: 0.98, toneMapped: false, depthTest: false });
+    // Depth-tested (NOT depthTest:false): these arrows are anchored on the sphere, so
+    // the ones on the far side must be hidden by it or the whole thing stops reading as
+    // a surface. They stay tangent at their anchor (the backend projects them there),
+    // which keeps them outside the r=0.985 shell and therefore visible on the near side.
+    const forceMat = new THREE.MeshBasicMaterial({ color: COL_FORCE, transparent: true, opacity: 0.98, toneMapped: false });
     fShaft = new THREE.InstancedMesh(shaftGeom.clone(), forceMat, MAX_FORCES);
     fHead = new THREE.InstancedMesh(headGeom.clone(), forceMat.clone(), MAX_FORCES);
     for (const m of [shaft, head, fShaft, fHead]) {
@@ -156,8 +173,6 @@
       m.frustumCulled = false;
       scene.add(m);
     }
-    fShaft.renderOrder = 8;
-    fHead.renderOrder = 8;
 
     // Hover: raycast the token points (Manifold pattern).
     const raycaster = new THREE.Raycaster();
@@ -474,10 +489,13 @@
       dot.userData = { tok: tokens?.[i]?.text ?? "", pos: i };
       g.add(dot);
     });
-    g.renderOrder = 10;
+    // Depth-tested so the far half of the path is hidden by the sphere (it used to be
+    // drawn straight through, which made a path across the back look like a path across
+    // the front). Sitting at r=1.012 against the r=0.985 shell keeps the near half
+    // clearly visible without z-fighting.
     g.traverse((o: any) => {
       if (o.material) {
-        o.material.depthTest = false;
+        o.material.depthTest = true;
         o.material.transparent = true;
       }
     });
@@ -522,10 +540,29 @@
     buildPath(traceEmbeddings, traceTokens, showPath);
     if (showPath) retargetForces(field?.sequence_forces ?? null, traceEmbeddings);
   });
+
+  // Toggle → OrbitControls. Also runs when a drag turns rotation off (the "start"
+  // listener flips the state, this pushes it into the controls).
+  $effect(() => {
+    if (controls) controls.autoRotate = autoRotate;
+  });
 </script>
 
 <div bind:this={containerEl} class="canvas" data-testid="geo-canvas">
-  {#if webglError}<div class="webgl-error" data-testid="geo-error">{webglError}</div>{/if}
+  {#if webglError}
+    <div class="webgl-error" data-testid="geo-error">{webglError}</div>
+  {:else}
+    <button
+      class="spin"
+      class:on={autoRotate}
+      data-testid="geo-autorotate"
+      aria-pressed={autoRotate}
+      title={autoRotate
+        ? "stop the sphere (dragging it also stops the spin)"
+        : "slowly spin the sphere"}
+      onclick={() => (autoRotate = !autoRotate)}
+    >{autoRotate ? "❚❚ stop spin" : "⟳ spin"}</button>
+  {/if}
 </div>
 
 <style>
@@ -546,5 +583,28 @@
     color: var(--bad);
     font-family: var(--mono);
     font-size: 0.85rem;
+  }
+  .spin {
+    position: absolute;
+    top: 0.6rem;
+    right: 0.6rem;
+    z-index: 2;
+    background: rgba(11, 14, 20, 0.72);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.24rem 0.7rem;
+    font-size: 0.72rem;
+    font-family: var(--mono);
+    cursor: pointer;
+    backdrop-filter: blur(6px);
+  }
+  .spin:hover {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+  .spin.on {
+    color: var(--accent);
+    border-color: var(--accent);
   }
 </style>

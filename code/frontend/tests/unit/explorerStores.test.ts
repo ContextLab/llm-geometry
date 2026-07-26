@@ -29,7 +29,8 @@ describe("explorerStores", () => {
     expect(get(s.geoLayer)).toBe("full");
     expect(get(s.geoTemperature)).toBe(0);
     expect(get(s.geoTopM)).toBe(1);
-    expect(get(s.geoAntisymmetrize)).toBe(false);
+    // ON by default (004): the raw W_V field leaves the sphere it is drawn on.
+    expect(get(s.geoAntisymmetrize)).toBe(true);
     expect(get(s.geoWeightsToken)).toBeNull();
     expect(s.GEO_WEIGHTS_TOKEN_KEY).toBe(KEY);
   });
