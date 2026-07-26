@@ -52,8 +52,62 @@ Idempotent, single-flight. ← `{ "seed": 0 }` (optional; default 0)
 
 ### GET /api/geo/tokenize
 
-`?text=<str>` → `200 { "tokens": [ { "id": 17, "text": "alice", "unk": false }, … ],
-"n_unk": <int>, "truncated": <bool> }` (truncated ⇒ input exceeded context_window).
+`?text=<str>&weights_token=<hash?>` → `200 { "tokens": [ { "id": 17, "text": "alice",
+"unk": false }, … ], "n_unk": <int>, "truncated": <bool> }` (truncated ⇒ input exceeded
+context_window).
+
+`weights_token` is additive (feature 004) and OPTIONAL: models trained from scratch
+carry their own vocabulary, so their ids — and which words come back `unk` — depend on
+which model is active. Omitted ⇒ the canonical vocabulary, exactly as before.
+
+### POST /api/geo/train_scratch
+
+Train a BRAND NEW model on the caller's own corpus. Same three sources as
+`/api/geo/finetune`: JSON `{ "text": <str> }`, multipart with a `.txt`/`.md` `file`
+field, or JSON `{ "hf_dataset": <id>, "hf_split"?, "max_samples"? }` — exactly one.
+Optional `epochs` (1…60, default 12).
+
+Unlike fine-tuning, this builds a **fresh vocabulary from the supplied text** and
+freshly initialized weights: the result is a different model whose token ids mean
+different words. The canonical checkpoint is never modified.
+
+→ `200 { "weights_token", "vocab_size", "final_loss", "n_tokens", "n_distinct",
+"epochs", "seed", "ready": true }` on a content-hash cache hit, else
+`202 { "job_id", "ready": false }` with SSE `phase: "train_scratch"` and the same
+fields on the `done` event.
+
+→ `400 InvalidParamError` when the text has fewer distinct word types than the
+vocabulary is wide. The model's vocabulary size is an architectural dimension, so a
+short corpus cannot fill it; the error names the shortfall instead of padding the
+vocabulary with placeholders.
+
+### GET /api/geo/corpus_stats
+
+`?text=<str>` → `200 { "n_tokens": <int>, "n_distinct": <int>,
+"vocab_words_required": <int> }`. Lets a client show whether a corpus is big enough to
+train on *before* submitting it.
+
+### GET /api/geo/model
+
+`?weights_token=<hash|"learned">` → `200` a portable, self-describing bundle:
+
+`{ "format": "llm-geometry/geo-model", "version": 1, "weights_token": <hash>,
+   "config": { "d_model", "n_layers", "n_heads", "mlp_hidden", "vocab_size",
+               "context_window" },
+   "vocab": <tokenizer JSON string>,
+   "weights": { "<name>": { "shape": [...], "data": <base64 float32-LE> }, … } }`
+
+The vocabulary travels WITH the weights because a scratch-trained model's ids are
+meaningless without it.
+
+### POST /api/geo/model
+
+← a bundle from `GET /api/geo/model` → `200 { "weights_token", "vocab_size" }`.
+
+Validation is strict: format, version, every `config` field, weight shapes, and a
+re-hash of the decoded weights against the declared `weights_token`. A mismatch is
+`400 InvalidParamError`, never a partial load — pairing the wrong vocabulary with a
+set of weights would make every label in the UI quietly wrong.
 
 ### GET /api/geo/trace
 
