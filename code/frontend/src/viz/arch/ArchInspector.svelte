@@ -4,6 +4,7 @@
   import { client, type ArchNode, type ArchWeightsData } from "../../lib/dataClient";
   import { KIND_EXPLAINER, formatCount, paramCount, plainError } from "./archShared";
   import { STATIC_MODE } from "../../lib/staticUx";
+  import { hideTip } from "../../lib/tooltip";
 
   // Node inspector drawer: kind/label/shape/param list (tied_to badge for aliased
   // tensors) + a MatrixHeatmap of the selected parameter. Default view = whole matrix
@@ -108,6 +109,10 @@
 
   function zoomAt(fr: number, fc: number): void {
     if (!selParam || !canZoom) return;
+    // The cursor is stationary at the instant of the zoom click, so no mousemove fires
+    // to refresh the global tooltip — it kept showing the OVERVIEW's row/col range and
+    // value over the new exact window until the mouse was nudged.
+    hideTip();
     const R = selParam.shape[0] ?? 1;
     const C = selParam.shape[1] ?? 1;
     const { rows, cols } = windowFor(selParam.shape);

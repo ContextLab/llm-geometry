@@ -140,11 +140,30 @@
   const attn = $derived(layer ? layer.attention[Math.min(headSel, heads - 1)] : undefined);
   const tokenTexts = $derived((trace?.tokens ?? []).map((t) => t.text));
   const attnLabels = $derived(layer && !layer.attention_downsampled ? tokenTexts : undefined);
-  const maxNorm = $derived.by(() => {
-    let m = 0;
-    for (const v of layer?.hidden_norm ?? []) m = Math.max(m, v);
+  /**
+   * Scale for the residual-norm bars, robust to the attention sink.
+   *
+   * Every modern instruct model parks an enormous-norm "sink" on the first token
+   * (measured: 1725 against a body of 13–18), so scaling linearly against the raw max
+   * flattened all the other 35 bars onto the floor and the panel showed nothing. The
+   * scale is now the largest NON-outlier norm — outliers being anything past 8× the
+   * median — and bars beyond it are drawn clipped and marked rather than silently
+   * squashing everything else.
+   */
+  const normScale = $derived.by(() => {
+    const vals = [...(layer?.hidden_norm ?? [])].filter((v) => Number.isFinite(v) && v > 0);
+    if (vals.length === 0) return 1;
+    const sorted = [...vals].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)] || sorted[0];
+    const cutoff = median * 8;
+    const inliers = vals.filter((v) => v <= cutoff);
+    const m = Math.max(...(inliers.length > 0 ? inliers : vals));
     return m > 0 ? m : 1;
   });
+  /** Tokens whose norm exceeds the scale — reported rather than hidden. */
+  const offScale = $derived(
+    (layer?.hidden_norm ?? []).reduce((n, v) => (v > normScale ? n + 1 : n), 0),
+  );
   const maxLogit = $derived(Math.max(...(trace?.logits_topk.probs ?? [1]), 1e-9));
 
   function displayTok(s: string): string {
@@ -187,6 +206,20 @@
   {:else}
     <!-- tokenization strip -->
     <div class="strip" data-testid="arch-trace-strip">
+      <!-- Truncation is LEFT-side (arch/trace.py keeps the last 64 tokens), so the
+           elision marker belongs before the first surviving chip. It used to render
+           after all 64, where a leading "⋯" pointed at the wrong end. -->
+      {#if truncated}
+        <span
+          class="tmpl trunc"
+          data-testid="arch-truncated-chip"
+          role="note"
+          aria-label="the prompt was longer than the trace window — only its last 64 tokens were traced"
+          onmousemove={(e) =>
+            showTip(e, "the prompt was longer than the trace window — only its last 64 tokens were traced")}
+          onmouseleave={hideTip}
+        >earlier tokens dropped ⋯</span>
+      {/if}
       {#each trace.tokens as t, i (i)}
         <span
           class="tokchip"
@@ -204,17 +237,6 @@
           onmousemove={(e) => showTip(e, "the model's chat template wrapped your prompt")}
           onmouseleave={hideTip}
         >chat template</span>
-      {/if}
-      {#if truncated}
-        <span
-          class="tmpl trunc"
-          data-testid="arch-truncated-chip"
-          role="note"
-          aria-label="the prompt was longer than the trace window — only its last 64 tokens were traced"
-          onmousemove={(e) =>
-            showTip(e, "the prompt was longer than the trace window — only its last 64 tokens were traced")}
-          onmouseleave={hideTip}
-        >⋯ prompt truncated to the last 64 tokens</span>
       {/if}
     </div>
 
@@ -296,7 +318,7 @@
                   aria-pressed={h === Math.min(headSel, heads - 1)}
                   onclick={() => (headSel = h)}
                 >
-                  <MatrixHeatmap values={m} maxCanvasPx={74} />
+                  <MatrixHeatmap values={m} maxCanvasPx={64} />
                   <span class="headnum">{h}</span>
                 </button>
               {/each}
@@ -307,16 +329,30 @@
             {/if}
           </div>
           <div class="cell">
-            <span class="cell-label">‖residual stream‖ per token · layer {layerSel} out</span>
+            <span class="cell-label">
+              ‖residual stream‖ per token · layer {layerSel} out
+              {#if offScale > 0}
+                <span
+                  class="offscale-note"
+                  data-testid="arch-norm-offscale"
+                  title="Instruct models park a huge-norm 'attention sink' on the first token. Scaling to it would flatten every other bar to nothing, so the scale is the largest non-outlier norm and the outliers are drawn clipped (striped)."
+                >· {offScale} off-scale ↑</span>
+              {/if}
+            </span>
             <div class="bars">
               {#each layer.hidden_norm as v, i (i)}
                 <div
                   class="bar"
+                  class:over={v > normScale}
                   role="img"
-                  aria-label={`${tokenTexts[i] ?? `#${i}`}: norm ${v.toFixed(2)}`}
-                  style:height={`${Math.max(4, (v / maxNorm) * 100)}%`}
+                  aria-label={`${tokenTexts[i] ?? `#${i}`}: norm ${v.toFixed(2)}${v > normScale ? " (off scale)" : ""}`}
+                  style:height={`${Math.max(4, Math.min(100, (v / normScale) * 100))}%`}
                   onmousemove={(e) =>
-                    showTip(e, `${displayTok(tokenTexts[i] ?? `#${i}`)} · ‖h‖ = ${v.toFixed(2)}`)}
+                    showTip(
+                      e,
+                      `${displayTok(tokenTexts[i] ?? `#${i}`)} · ‖h‖ = ${v.toFixed(2)}` +
+                        (v > normScale ? " · off scale (clipped)" : ""),
+                    )}
                   onmouseleave={hideTip}
                 ></div>
               {/each}
@@ -559,15 +595,17 @@
     accent-color: var(--accent);
   }
   .heads {
-    display: flex;
-    flex-wrap: wrap;
+    /* No scroll cap: the label says "all N heads", and a 13rem cap showed 4 of 14
+       (1 of 9 on a phone) behind an invisible scrollbar — which defeats the entire
+       point of the grid. Tiles auto-fit instead, so every head is really on screen. */
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(58px, 1fr));
     gap: 0.3rem;
-    max-height: 13rem;
-    overflow-y: auto;
   }
   .headtile {
     position: relative;
-    display: block;
+    display: flex;
+    justify-content: center;
     padding: 2px;
     background: var(--bg-elev-2);
     border: 1px solid var(--border);
@@ -646,6 +684,21 @@
   }
   .bar:hover {
     background: var(--accent-2);
+  }
+  /* Clipped (off-scale) bars are striped so they read as "taller than shown" rather
+     than as a tie with whatever else happens to reach the top. */
+  .bar.over {
+    background: repeating-linear-gradient(
+      -45deg,
+      var(--accent-2) 0 3px,
+      rgba(183, 148, 246, 0.35) 3px 6px
+    );
+  }
+  .offscale-note {
+    color: #ffb454;
+    text-transform: none;
+    letter-spacing: 0;
+    cursor: help;
   }
   .logits {
     display: flex;

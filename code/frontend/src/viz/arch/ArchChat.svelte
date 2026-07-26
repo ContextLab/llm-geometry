@@ -82,12 +82,20 @@
     return text.slice(2, -2); // "<|im_end|>" -> "im_end"
   }
 
+  // These are two DIFFERENT distributions and the tooltip has to say so. `prob` is the
+  // chosen token's probability under the SAMPLING distribution (one-hot at T=0, so
+  // 100%); `topk.probs` is always the model's plain softmax. Labelling the first a bare
+  // "p =" let the same token read as 100% and 86.8% in one line.
   function tokenTip(t: ArchGeneratedToken): string {
     const alts = t.topk.texts
       .map((s, i) => `${JSON.stringify(s)} ${(t.topk.probs[i] * 100).toFixed(1)}%`)
       .join(" · ");
     const note = t.note ? ` · ⚠ ${t.note}` : "";
-    return `p = ${(t.prob * 100).toFixed(1)}% · top-5: ${alts}${note}`;
+    const chosen =
+      $archTemperature === 0
+        ? "greedy pick (chosen with certainty)"
+        : `chance of being drawn at T=${$archTemperature.toFixed(2)}: ${(t.prob * 100).toFixed(1)}%`;
+    return `${chosen} · the model's own top-5: ${alts}${note}`;
   }
 
   // Surprise coloring: confident tokens underline cool (--accent), unlikely draws warm
@@ -155,8 +163,7 @@
           onmouseleave={hideTip}>{isSpecial(t.text) ? specialLabel(t.text) : t.text}</span>{/each}
     </div>
     <div class="replymeta">
-      {result.tokens.length} tokens · finish: {result.finish_reason} · hover a token for its
-      probability + alternatives
+      {result.tokens.length} tokens · finish: {result.finish_reason} · hover a token for how likely the model thought it was
     </div>
   {/if}
 </div>

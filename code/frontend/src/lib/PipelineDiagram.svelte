@@ -200,7 +200,12 @@
     if (!viewInited && nodes.length > 0) {
       viewInited = true;
       untrack(() => {
-        vb = { x: -20, y: -10, w: DIAG_W + 40, h: Math.max(h + 20, 240) };
+        // Fitting the WHOLE model height (2658 units for a 24-layer model in a 520 px
+        // SVG) rendered 32-unit nodes ~6 px tall and their labels ~2 px — a column of
+        // unreadable slivers, against a caption inviting you to click one. Cap the
+        // initial height so the stem is legible; the user can zoom out from there.
+        const fit = Math.max(h + 20, 240);
+        vb = { x: -20, y: -10, w: DIAG_W + 40, h: Math.min(fit, INITIAL_MAX_H) };
       });
     }
   });
@@ -238,6 +243,7 @@
     if (focus === null) followZoomed = false;
   });
 
+  const INITIAL_MAX_H = 900; // ≈ 20 nodes: readable at 520 px tall
   const FOLLOW_H = 520; // viewBox units ≈ a dozen nodes: readable, not claustrophobic
 
   $effect(() => {

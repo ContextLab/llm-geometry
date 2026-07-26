@@ -410,7 +410,7 @@
           each arrow: append that token to the prompt, then follow it to the model's <i>next</i> prediction — brighter = more probable
           {#if $geoTemperature > 0 && $geoTopM > 1}· {$geoTopM} weighted arrows per token at T={$geoTemperature.toFixed(2)}{/if}
         {:else}
-          thin arrows: the per-token field W_V·z at layer {effLayer} · <span class="force-key">amber arrows</span>: the prompt's aggregate attention forces, drawn tangent to the sphere at each token{#if maxResidual != null} (up to {maxResidual.toFixed(3)} of radial pull projected away — see the badge above){/if} · <span class="path-key">green path</span>: the prompt's tokens across the sphere, hidden where it passes behind
+          thin arrows: the per-token field W_V·z at layer {effLayer} · <span class="force-key">amber arrows</span>: the prompt's aggregate attention forces, drawn tangent to the sphere at each token{#if maxResidual != null}&nbsp;(up to {maxResidual.toFixed(3)} of radial pull projected away — see the badge above){/if} · <span class="path-key">green path</span>: the prompt's tokens across the sphere, hidden where it passes behind
         {/if}
       </p>
       <ExportBar name="geometry-sphere" webglCanvas={() => scene?.canvasEl()} />
@@ -630,7 +630,9 @@
   }
   .grid {
     display: grid;
-    grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+    /* auto-fit: with three cards a fixed 2-column grid left the third one alone in a
+       row beside an empty column. */
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
     gap: 0.9rem;
     align-items: start;
   }

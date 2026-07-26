@@ -235,6 +235,16 @@
     traceCtl?.abort();
   });
 
+  /**
+   * True while a DIFFERENT model is loading and the previous model's graph/trace are
+   * still on screen. The diagram was already dimmed for this, but the header meta
+   * ("494.0M params"), the traced-op count and the token strip were not — so mid-switch
+   * the tab showed Qwen's numbers under SmolLM2's name at full opacity.
+   */
+  const staleModel = $derived(
+    graphLoading && graphForModel !== "" && graphForModel !== $archModelId,
+  );
+
   // --- diagram highlight (playback) + node inspector ------------------------------
   let highlightId = $state<string | null>(null);
   const diagramSelected = $derived(highlightId ?? $archSelectedNode);
@@ -260,12 +270,12 @@
       <p class="sub">
         A real open-weights model, traced live — every op in its forward pass is a clickable
         node. Type a prompt to trace it, ▶ play the trace through the diagram, click any block
-        to inspect its actual weights, then generate a reply and hover each token for its
+        to inspect it, then generate a reply and hover each token for its
         probabilities.
       </p>
     </div>
     {#if graph}
-      <div class="meta" data-testid="arch-meta">
+      <div class="meta" class:stale={staleModel} data-testid="arch-meta">
         <span>{graph.meta.n_layers} layers</span>
         <span>hidden {graph.meta.hidden}</span>
         <span>
@@ -275,6 +285,9 @@
         </span>
         <span>vocab {graph.meta.vocab.toLocaleString()}</span>
         <span class="strong">{formatCount(graph.meta.total_params)} params</span>
+        {#if staleModel}
+          <span class="stale-note" data-testid="arch-stale-note">↑ still {graphForModel} — loading {$archModelId}</span>
+        {/if}
       </div>
     {/if}
   </header>
@@ -366,8 +379,7 @@
         {/if}
       </div>
       <p class="caption">
-        scroll to zoom · drag to pan · ▸/▾ headers expand layers · click a block to inspect its
-        weights · Esc closes the inspector
+        scroll to zoom · drag to pan · ▸/▾ headers expand layers · click any block to inspect it · Esc closes the inspector
       </p>
     </div>
   </div>
@@ -408,6 +420,14 @@
     color: var(--text-dim);
     font-size: 0.82rem;
     line-height: 1.45;
+  }
+  .meta.stale {
+    opacity: 0.42;
+    filter: grayscale(0.5);
+  }
+  .stale-note {
+    color: #ffb454;
+    font-style: italic;
   }
   .meta {
     display: flex;
