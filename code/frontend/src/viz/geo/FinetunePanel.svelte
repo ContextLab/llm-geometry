@@ -2,10 +2,8 @@
   import { onDestroy } from "svelte";
 
   import { client, ApiError, type GeoFinetuneResult } from "../../lib/dataClient";
-  import { geoWeightsToken } from "../../lib/explorerStores";
+  import { geoModelNote, geoWeightsToken } from "../../lib/explorerStores";
   import Progress from "../../lib/Progress.svelte";
-  import StaticNotice from "../../lib/StaticNotice.svelte";
-  import { STATIC_MODE } from "../../lib/staticUx";
 
   // Fine-tune the tiny model on the student's own data (FR-106): pasted text, an
   // uploaded .txt/.md, or an HF dataset id. Real SGD runs as a job (SSE phase
@@ -92,7 +90,14 @@
 
   function finish(r: GeoFinetuneResult) {
     busy = false;
-    if (r.weights_token) geoWeightsToken.set(r.weights_token); // the geometry re-fetches under the new weights
+    if (r.weights_token) {
+      geoModelNote.set(
+        source === "hf"
+          ? `fine-tuned on ${hfDataset.trim()}`
+          : "fine-tuned on your text",
+      );
+      geoWeightsToken.set(r.weights_token); // the geometry re-fetches under the new weights
+    }
     if (r.loss_before != null && r.loss_after != null) {
       result = { before: r.loss_before, after: r.loss_after };
     }
@@ -117,30 +122,20 @@
   </div>
 
   <div class="tabs" role="tablist">
+    <!-- All three sources work in BOTH builds (feature 004): the Hub's dataset viewer
+         is a public CORS-enabled service, so the static build reads real rows instead
+         of refusing. This tab used to be disabled here with a "needs the Python
+         backend" note that is no longer true. -->
     {#each [["paste", "paste text"], ["file", "upload .txt/.md"], ["hf", "HF dataset"]] as [id, lbl] (id)}
-      <!-- STATIC build (FR-203): streaming an HF dataset needs the Python backend, so
-           that source is visibly disabled (with the note below) — paste/file fine-tunes
-           run for real in a Web Worker. -->
       <button
         class:active={source === id}
         role="tab"
         aria-selected={source === id}
-        disabled={STATIC_MODE && id === "hf"}
-        title={STATIC_MODE && id === "hf"
-          ? "HF-dataset fine-tuning needs the Python backend — not available in the static demo"
-          : undefined}
         data-testid={id === "hf" ? "geo-finetune-hf-tab" : undefined}
         onclick={() => (source = id as Source)}
       >{lbl}</button>
     {/each}
   </div>
-  {#if STATIC_MODE}
-    <StaticNotice
-      compact
-      testid="geo-finetune-static-note"
-      message="HF-dataset streaming isn't available in the static demo — paste text or upload a .txt/.md and the fine-tune runs for real, right here in your browser."
-    />
-  {/if}
 
   {#if source === "paste"}
     <textarea rows="4" placeholder="Paste a paragraph or two — the model will take real gradient steps on it…" bind:value={text}></textarea>

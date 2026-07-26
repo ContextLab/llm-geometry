@@ -9,7 +9,7 @@
     type GeoTrainScratchResult,
   } from "../../lib/dataClient";
   import { corpusStats } from "../../lib/geoEngine/scratch";
-  import { geoWeightsToken } from "../../lib/explorerStores";
+  import { geoModelNote, geoWeightsToken } from "../../lib/explorerStores";
   import Progress from "../../lib/Progress.svelte";
 
   // Train a BRAND NEW model on your own corpus (feature 004, FR-420), and save/load
@@ -131,7 +131,14 @@
     result = r;
     // The new model becomes active, so the sphere re-renders under its own geometry
     // AND its own vocabulary.
-    if (r.weights_token) geoWeightsToken.set(r.weights_token);
+    if (r.weights_token) {
+      geoModelNote.set(
+        source === "hf"
+          ? `trained from scratch on ${hfDataset.trim()}`
+          : "trained from scratch on your text",
+      );
+      geoWeightsToken.set(r.weights_token);
+    }
   }
 
   function fail(e: unknown): void {
@@ -176,6 +183,7 @@
     try {
       const parsed = JSON.parse(await f.text());
       const loaded = await client.geoImportModel(parsed);
+      geoModelNote.set(`loaded from ${f.name}`);
       geoWeightsToken.set(loaded.weights_token);
       ioNote = `loaded ${f.name} · ${loaded.vocab_size}-token vocabulary`;
     } catch (err) {

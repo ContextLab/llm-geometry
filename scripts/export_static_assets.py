@@ -37,10 +37,14 @@ SCHEMA_VERSION = 1
 
 # --- curated coverage -------------------------------------------------------------------
 
+# Must match config.CURATED_MODELS: the static build's menu IS this list, so a model
+# curated for the backend but missing here would be offered in one build and not the
+# other.
 ARCH_MODELS_FULL = [
+    "Qwen/Qwen2.5-0.5B-Instruct",
+    "HuggingFaceTB/SmolLM2-360M-Instruct",
     "HuggingFaceTB/SmolLM2-135M-Instruct",
     "gpt2",
-    "Qwen/Qwen2.5-0.5B-Instruct",
 ]
 ARCH_MODELS_QUICK = ["gpt2"]
 

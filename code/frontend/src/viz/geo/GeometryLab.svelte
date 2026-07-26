@@ -20,6 +20,7 @@
     geoTopM,
     geoAntisymmetrize,
     geoWeightsToken,
+    geoModelNote,
     type GeoLayerSelection,
   } from "../../lib/explorerStores";
   import Progress from "../../lib/Progress.svelte";
@@ -263,6 +264,7 @@
   // token, drop it — the field/trace effects re-fire against the learned weights.
   function healEvictedToken(e: unknown): boolean {
     if (e instanceof ApiError && e.type === "NotFoundError" && $geoWeightsToken) {
+      geoModelNote.set(null); // the note would otherwise describe a model that is gone
       geoWeightsToken.set(null);
       return true;
     }
@@ -285,14 +287,21 @@
     <div>
       <h2>Geometry Lab — a tiny transparent transformer</h2>
       <p class="sub">
-        A from-scratch GeoTransformer (<b>d_model = 3</b>, 4 layers, 1 head, 1000-word vocab) trained on
-        <i>Alice in Wonderland</i>. Its token embeddings genuinely live on this sphere — no dimensionality
-        reduction. Hover a dot for its word; drag to rotate, scroll to zoom. Edit the weights below and watch
-        the field move.
+        A GeoTransformer (<b>d_model = 3</b>, 4 layers, 1 head, 1000-word vocab) whose token
+        embeddings genuinely live on this sphere — no dimensionality reduction. Hover a dot for
+        its word; drag to rotate, scroll to zoom. Edit the weights, fine-tune it, or train a new
+        one on your own text below, and watch the field move.
       </p>
-      {#if spec}
-        <p class="chips">
-          <span class="chip">corpus {spec.model.corpus}</span>
+      {#if $geoWeightsToken}
+        <!-- A different model is driving the sphere: describing the shipped checkpoint's
+             corpus and loss here would be plainly false, so those chips are withheld. -->
+        <p class="chips" data-testid="geo-active-model">
+          <span class="chip active">active model: {$geoModelNote ?? "one you created this session"}</span>
+          <span class="chip mono" title="content hash of the active weights">{$geoWeightsToken.slice(0, 8)}</span>
+        </p>
+      {:else if spec}
+        <p class="chips" data-testid="geo-active-model">
+          <span class="chip">shipped checkpoint · corpus {spec.model.corpus}</span>
           {#if spec.checkpoint.final_loss != null}<span class="chip">final loss {spec.checkpoint.final_loss.toFixed(2)}</span>{/if}
           {#if spec.checkpoint.coverage_uniformity != null}<span class="chip">coverage {spec.checkpoint.coverage_uniformity.toFixed(2)}</span>{/if}
           {#if spec.checkpoint.field_directional_entropy != null}<span class="chip">field entropy {spec.checkpoint.field_directional_entropy.toFixed(2)}</span>{/if}

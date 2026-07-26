@@ -123,9 +123,8 @@ export class ArchSection {
     if (!found) {
       const ids = (await this.assets.index()).arch_models.map((m) => m.model_id);
       throw staticModeError(
-        `This is the static demo build — only its precomputed models are available: ` +
-          `${ids.join(", ")}. Run the full stack (see the README) for arbitrary ` +
-          `open-weights models.`,
+        `This build ships a curated set of models: ${ids.join(", ")}. ` +
+          "Widening that list is tracked in issue #4.",
       );
     }
     return found;

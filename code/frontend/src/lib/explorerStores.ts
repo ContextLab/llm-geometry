@@ -76,6 +76,38 @@ function readStoredWeightsToken(): string | null {
 /** Active edited-weights token; null = canonical learned checkpoint. */
 export const geoWeightsToken = writable<string | null>(readStoredWeightsToken());
 
+/**
+ * Plain-language provenance for the ACTIVE model ("trained from scratch on your
+ * text", "loaded from a file", …). null ⇒ the canonical checkpoint.
+ *
+ * Without this the header kept describing the shipped Alice-in-Wonderland checkpoint —
+ * corpus, final loss, coverage — while a completely different model was driving the
+ * sphere. Persisted next to the token so a reload does not lose the explanation while
+ * keeping the model.
+ */
+export const GEO_MODEL_NOTE_KEY = "llm-geometry:geo-model-note";
+
+function readStoredModelNote(): string | null {
+  try {
+    if (typeof sessionStorage === "undefined") return null;
+    return sessionStorage.getItem(GEO_MODEL_NOTE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export const geoModelNote = writable<string | null>(readStoredModelNote());
+
+geoModelNote.subscribe((note) => {
+  try {
+    if (typeof sessionStorage === "undefined") return;
+    if (note === null) sessionStorage.removeItem(GEO_MODEL_NOTE_KEY);
+    else sessionStorage.setItem(GEO_MODEL_NOTE_KEY, note);
+  } catch {
+    // storage unavailable — the note still lives in memory for this session
+  }
+});
+
 geoWeightsToken.subscribe((token) => {
   try {
     if (typeof sessionStorage === "undefined") return;

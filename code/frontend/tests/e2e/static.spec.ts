@@ -89,11 +89,14 @@ test("geometry lab runs fully live in-browser (engine, edits, worker fine-tune)"
   // identity preset mints an edited-weights token (live postGeoWeights)
   await page.getByTestId("geo-preset").selectOption("identity");
   await page.getByTestId("geo-apply").click();
-  await expect(page.getByTestId("geo-weight-panel")).toContainText("edited weights active", {
+  // The badge names WHAT the active model is (004): calling a scratch-trained or
+  // imported model "edited" was wrong, so the provenance is carried explicitly.
+  await expect(page.getByTestId("geo-weight-panel")).toContainText("hand-edited weights", {
     timeout: 60_000,
   });
+  await expect(page.getByTestId("geo-active-model")).toContainText("hand-edited weights");
   await page.getByTestId("geo-reset").click();
-  await expect(page.getByTestId("geo-weight-panel")).toContainText("learned checkpoint", {
+  await expect(page.getByTestId("geo-weight-panel")).toContainText("shipped checkpoint", {
     timeout: 60_000,
   });
 
@@ -106,9 +109,24 @@ test("geometry lab runs fully live in-browser (engine, edits, worker fine-tune)"
   await expect(loss).toBeVisible({ timeout: 180_000 });
   await expect(loss).toContainText(/loss .+ → .+ on your text/);
 
-  // the HF-dataset source needs the backend → visibly disabled with the affordance
-  await expect(page.getByTestId("geo-finetune-hf-tab")).toBeDisabled();
-  await expect(page.getByTestId("geo-finetune-static-note")).toBeVisible();
+  // Every source now works in the static build (feature 004): the Hub's dataset viewer
+  // is CORS-enabled, so this tab is live rather than the disabled stub it used to be.
+  await expect(page.getByTestId("geo-finetune-hf-tab")).toBeEnabled();
+  await expect(page.getByTestId("geo-finetune-static-note")).toHaveCount(0);
+
+  // Training a NEW model (feature 004) is offered here too, gated on a corpus big
+  // enough to fill the vocabulary — the gate must be visible before the long run.
+  const train = page.getByTestId("geo-train");
+  await expect(train).toBeVisible();
+  await page.getByTestId("geo-train-text").fill("alice met the rabbit");
+  await expect(page.getByTestId("geo-train-stats")).toContainText(/short/);
+  await expect(page.getByTestId("geo-train-run")).toBeDisabled();
+
+  // Saving the ACTIVE model produces a real, self-describing file.
+  const download = page.waitForEvent("download", { timeout: 60_000 });
+  await page.getByTestId("geo-save-model").click();
+  const saved = await download;
+  expect(saved.suggestedFilename()).toMatch(/\.llmgeo\.json$/);
   await page.screenshot({
     path: "tests/e2e/__screenshots__/static-geometry.png",
     fullPage: true,
@@ -155,9 +173,13 @@ test("architecture: precomputed graph + example traces + real HF weight windows"
   });
   await expect(page.getByTestId("arch-meta")).toContainText("params");
 
-  // the free-HF-id input is replaced by the designed affordance
+  // FR-412: the free-HF-id input is gone in BOTH builds, replaced by an honest note
+  // about the curated list (it promised something the static build cannot deliver).
   await expect(page.getByTestId("arch-model-custom")).toHaveCount(0);
-  await expect(page.getByTestId("arch-model-static-note")).toBeVisible();
+  const curated = page.getByTestId("arch-model-curated-note");
+  await expect(curated).toBeVisible();
+  await expect(curated).toContainText(/curated/i);
+  await expect(curated.locator("a")).toHaveAttribute("href", /issues\/4/);
 
   // runtime badge sits by the chat controls (idle until the first generate)
   await expect(page.getByTestId("static-runtime-badge")).toBeVisible();

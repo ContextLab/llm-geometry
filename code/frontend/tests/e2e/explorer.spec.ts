@@ -88,27 +88,37 @@ test.describe("Geometry Lab", () => {
     await expect(page.getByTestId("geo-view")).toContainText("unknown");
   });
 
-  test("force mode shows the residual badge; antisymmetrize makes it exact", async ({ page }) => {
+  test("force mode reports BOTH tangency facts; antisymmetrize can be turned off", async ({
+    page,
+  }) => {
     await openGeometry(page);
     await page.getByTestId("geo-mode").getByText("force").click();
-    await expect(page.getByTestId("geo-view")).toContainText("max normal residual", {
-      timeout: 120_000,
-    });
+
+    // Feature 004: antisymmetrize defaults ON (the raw W_V field leaves the sphere),
+    // and the two badges report DIFFERENT facts — whether the per-token field is
+    // tangent by construction, and how much radial pull was projected out of the
+    // aggregate forces. Showing only the first used to hide the projection.
+    await expect(page.getByTestId("geo-tangent-badge")).toBeVisible({ timeout: 120_000 });
+    const residual = page.getByTestId("geo-residual-badge");
+    await expect(residual).toBeVisible();
+    await expect(residual).toContainText(/radial pull projected out: \d+\.\d+ max/);
+
+    // Turning it off shows the raw operator: no longer tangent by construction, but the
+    // aggregate forces are still projected (and still reported).
     await page.getByTestId("geo-view").getByText("antisymmetrize").click();
-    await expect(page.getByTestId("geo-view")).toContainText("tangent: exact", {
-      timeout: 120_000,
-    });
+    await expect(page.getByTestId("geo-tangent-badge")).toHaveCount(0, { timeout: 120_000 });
+    await expect(page.getByTestId("geo-residual-badge")).toBeVisible();
   });
 
   test("applying the identity preset mints an edited-weights token", async ({ page }) => {
     await openGeometry(page);
     await page.getByTestId("geo-preset").selectOption("identity");
     await page.getByTestId("geo-apply").click();
-    await expect(page.getByTestId("geo-weight-panel")).toContainText("edited", {
+    await expect(page.getByTestId("geo-weight-panel")).toContainText("hand-edited weights", {
       timeout: 120_000,
     });
     await page.getByTestId("geo-reset").click();
-    await expect(page.getByTestId("geo-weight-panel")).toContainText("learned", {
+    await expect(page.getByTestId("geo-weight-panel")).toContainText("shipped checkpoint", {
       timeout: 60_000,
     });
   });

@@ -108,7 +108,7 @@
       <option value={id}>{id}</option>
     {/each}
   </select>
-  <p class="curated">
+  <p class="curated" data-testid="arch-model-curated-note">
     A curated set of small open-weights models. {#if STATIC_MODE}They run in your browser
     via their community ONNX exports;{:else}Each is traced live by the backend;{/if}
     <a href={ISSUE_URL} target="_blank" rel="noopener noreferrer">issue #4</a> tracks

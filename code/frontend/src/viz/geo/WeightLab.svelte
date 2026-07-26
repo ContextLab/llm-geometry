@@ -6,7 +6,7 @@
     type GeoPresetName,
     type GeoWeightsData,
   } from "../../lib/dataClient";
-  import { geoWeightsToken } from "../../lib/explorerStores";
+  import { geoModelNote, geoWeightsToken } from "../../lib/explorerStores";
   import MatrixHeatmap from "../../lib/MatrixHeatmap.svelte";
   import { STATIC_MODE } from "../../lib/staticUx";
 
@@ -51,7 +51,10 @@
   const editedActive = $derived($geoWeightsToken !== null && $geoWeightsToken !== checkpointId);
   $effect(() => {
     // Self-heal tokens persisted before this rule (or minted below on a slow path).
-    if (checkpointId && $geoWeightsToken === checkpointId) geoWeightsToken.set(null);
+    if (checkpointId && $geoWeightsToken === checkpointId) {
+      geoModelNote.set(null);
+      geoWeightsToken.set(null);
+    }
   });
   // Embedding (1003×3) renders transposed as a horizontally scrollable ribbon:
   // columns = tokens, rows = x/y/z. 12px cells keep the canvas under browser limits.
@@ -95,7 +98,9 @@
       // Minted token == learned checkpoint hash ⇒ bit-identical weights ⇒ no-edit:
       // store the canonical null instead (G1). Otherwise persist it; every geo fetch
       // now uses it.
-      geoWeightsToken.set(res.weights_token === checkpointId ? null : res.weights_token);
+      const backToCanonical = res.weights_token === checkpointId;
+      geoModelNote.set(backToCanonical ? null : "hand-edited weights");
+      geoWeightsToken.set(backToCanonical ? null : res.weights_token);
     } catch (e) {
       error = friendly(e);
     } finally {
@@ -128,6 +133,7 @@
   }
 
   function resetToLearned() {
+    geoModelNote.set(null);
     geoWeightsToken.set(null); // canonical learned checkpoint everywhere
     error = "";
   }
@@ -146,10 +152,10 @@
   <div class="head">
     <h3>Weight lab</h3>
     {#if editedActive}
-      <span class="badge edited" title={`weights_token ${$geoWeightsToken}`}>edited weights active</span>
+      <span class="badge edited" title={`weights_token ${$geoWeightsToken}`}>{$geoModelNote ?? "a model you created"} active</span>
       <button class="ghost" data-testid="geo-reset" onclick={resetToLearned}>reset to learned</button>
     {:else}
-      <span class="badge learned">learned checkpoint</span>
+      <span class="badge learned">shipped checkpoint</span>
     {/if}
   </div>
 
