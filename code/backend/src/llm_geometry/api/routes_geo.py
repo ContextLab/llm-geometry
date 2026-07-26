@@ -37,7 +37,14 @@ from ..geo.config import (
 from ..geo.fields import force_field, next_next_field
 from ..geo.finetune import load_text_from_hf
 from ..geo.model import model_from_weight_set
-from ..geo.tokenizer import get_tokenizer
+from ..geo.bundle import export_bundle, import_bundle
+from ..geo.scratch import (
+    SCRATCH_DEFAULT_EPOCHS,
+    SCRATCH_DEFAULT_MAX_SAMPLES,
+    SCRATCH_MAX_EPOCHS,
+    corpus_stats,
+)
+from ..geo.tokenizer import tokenizer_for
 from ..geo.train import canonical_cache_key, resolve_weight_set
 from ..geo.weights import EDITABLE_MATRICES
 from .encoding import jsonable_6sig
@@ -115,8 +122,10 @@ def train(response: Response, body: TrainBody | None = None) -> dict[str, Any]:
 
 
 @router.get("/tokenize")
-def tokenize(text: str = "") -> dict[str, Any]:
-    enc = get_tokenizer().encode(text)
+def tokenize(text: str = "", weights_token: str | None = None) -> dict[str, Any]:
+    # A model trained from scratch carries its own vocabulary, so the ids (and which
+    # words are <unk>) depend on WHICH model is active — additive `weights_token`.
+    enc = tokenizer_for(weights_token).encode(text)
     return {"tokens": enc.tokens(), "n_unk": enc.n_unk, "truncated": enc.truncated}
 
 
@@ -125,7 +134,7 @@ def tokenize(text: str = "") -> dict[str, Any]:
 
 @router.get("/trace")
 def trace(prompt: str = "", weights_token: str | None = None) -> dict[str, Any]:
-    tok = get_tokenizer()
+    tok = tokenizer_for(weights_token)
     enc = tok.encode(prompt)
     if not enc.ids:
         raise InvalidParamError("prompt is empty after tokenization")
@@ -165,7 +174,7 @@ def vector_field(
 ) -> dict[str, Any]:
     if mode not in ("next_next", "force"):
         raise InvalidParamError(f'mode must be "next_next" or "force", got {mode!r}')
-    prompt_ids = get_tokenizer().encode(prompt).ids
+    prompt_ids = tokenizer_for(weights_token).encode(prompt).ids
     model = model_from_weight_set(resolve_weight_set(weights_token or "learned"))
     if mode == "next_next":
         field = next_next_field(
@@ -307,3 +316,109 @@ async def finetune_route(request: Request, response: Response) -> dict[str, Any]
     result = geo_jobs.request_finetune(text=resolved_text, base=base, steps=steps, lr=lr)
     response.status_code = 200 if result.get("ready") else 202
     return _jsonable(result)
+
+
+# -- POST /api/geo/train_scratch ----------------------------------------------------------
+
+
+@router.post("/train_scratch")
+async def train_scratch_route(request: Request, response: Response) -> dict[str, Any]:
+    """Train a BRAND NEW model on the user's own corpus (feature 004, FR-420).
+
+    Same three sources as /finetune (JSON `text`, multipart `file`, or `hf_dataset`),
+    but this builds a fresh vocabulary from that text and freshly initialized weights
+    instead of continuing from the canonical checkpoint. The canonical checkpoint is
+    never touched.
+    """
+    content_type = (request.headers.get("content-type") or "").lower()
+    file_text: str | None = None
+    if content_type.startswith("multipart/"):
+        form = await request.form()
+        upload = form.get("file")
+        if upload is not None:
+            if isinstance(upload, str):
+                raise InvalidParamError("the `file` field must be an uploaded file")
+            filename = (upload.filename or "").lower()
+            if not filename.endswith((".txt", ".md")):
+                raise InvalidParamError(
+                    f"uploaded file must be .txt or .md, got {upload.filename!r}"
+                )
+            try:
+                file_text = (await upload.read()).decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise InvalidParamError(f"uploaded file is not valid UTF-8 text: {exc}")
+        payload: dict[str, Any] = {
+            k: form.get(k)
+            for k in ("text", "hf_dataset", "hf_split", "max_samples", "epochs")
+            if form.get(k) is not None
+        }
+    else:
+        try:
+            payload = await request.json()
+        except Exception:
+            raise InvalidParamError("request body must be JSON or multipart form data")
+        if not isinstance(payload, dict):
+            raise InvalidParamError("JSON body must be an object")
+
+    text = payload.get("text")
+    hf_dataset = payload.get("hf_dataset")
+    provided = [s for s in (text, file_text, hf_dataset) if s is not None]
+    if len(provided) != 1:
+        raise InvalidParamError(
+            "exactly one of text / file / hf_dataset must be provided, "
+            f"got {len(provided)} sources"
+        )
+
+    epochs = _as_int(payload.get("epochs", SCRATCH_DEFAULT_EPOCHS), "epochs")
+    if not 1 <= epochs <= SCRATCH_MAX_EPOCHS:
+        raise InvalidParamError(f"epochs must be in 1..{SCRATCH_MAX_EPOCHS}, got {epochs}")
+
+    if hf_dataset is not None:
+        # Resolved synchronously so an unusable dataset id is a 422 here, not a late
+        # job error event (same rule the fine-tune route follows).
+        resolved_text = load_text_from_hf(
+            str(hf_dataset),
+            split=str(payload.get("hf_split", "train")),
+            max_samples=_as_int(
+                payload.get("max_samples", SCRATCH_DEFAULT_MAX_SAMPLES), "max_samples"
+            ),
+        )
+    else:
+        resolved_text = str(text) if text is not None else file_text
+    assert resolved_text is not None
+
+    result = geo_jobs.request_train_scratch(text=resolved_text, epochs=epochs)
+    response.status_code = 200 if result.get("ready") else 202
+    return _jsonable(result)
+
+
+# -- GET /api/geo/corpus_stats ------------------------------------------------------------
+
+
+@router.get("/corpus_stats")
+def corpus_stats_route(text: str = "") -> dict[str, Any]:
+    """Token / distinct-type counts for a candidate corpus.
+
+    Lets the UI show whether a paste is big enough to train on BEFORE the user waits
+    for a training run that would be refused.
+    """
+    return _jsonable(corpus_stats(text))
+
+
+# -- GET/POST /api/geo/model (portable save + load) ---------------------------------------
+
+
+@router.get("/model")
+def export_model_route(weights_token: str = "learned") -> dict[str, Any]:
+    """The active model as one portable, self-describing bundle (weights + vocabulary)."""
+    return _jsonable(export_bundle(weights_token))
+
+
+@router.post("/model")
+async def import_model_route(request: Request) -> dict[str, Any]:
+    """Load a bundle saved by GET /api/geo/model; returns its weights_token."""
+    try:
+        payload = await request.json()
+    except Exception:
+        raise InvalidParamError("request body must be a JSON model bundle")
+    return _jsonable(import_bundle(payload))

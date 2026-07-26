@@ -27,6 +27,7 @@ Preset semantics (3×3 unless noted):
 from __future__ import annotations
 
 import hashlib
+from typing import Any
 
 import numpy as np
 from scipy.ndimage import gaussian_filter
@@ -204,8 +205,18 @@ def _artifact_key(token: str) -> str:
     return f"{_ARTIFACT_PREFIX}-{token}"
 
 
-def save_weight_set(ws: dict[str, np.ndarray], source: str, store: CacheStore | None = None) -> str:
-    """Persist a weight set under its content-hash token; return the token."""
+def save_weight_set(
+    ws: dict[str, np.ndarray],
+    source: str,
+    store: CacheStore | None = None,
+    vocab_json: str | None = None,
+) -> str:
+    """Persist a weight set under its content-hash token; return the token.
+
+    ``vocab_json`` travels with models trained from scratch on a user's own text: their
+    token ids mean different words than the canonical checkpoint's, so the vocabulary
+    is part of the model, not a global. Omitted (None) ⇒ the canonical vocabulary.
+    """
     store = store or CacheStore()
     token = weights_token(ws)
     key = _artifact_key(token)
@@ -215,9 +226,21 @@ def save_weight_set(ws: dict[str, np.ndarray], source: str, store: CacheStore | 
             "artifact_type": _ARTIFACT_PREFIX,
             "weights_token": token,
         }
-        meta = {"weights_token": token, "source": source, "names": sorted(ws)}
+        meta: dict[str, Any] = {"weights_token": token, "source": source, "names": sorted(ws)}
+        if vocab_json is not None:
+            meta["vocab"] = vocab_json
         store.put(key, spec, meta, {name: np.asarray(a, np.float32) for name, a in ws.items()})
     return token
+
+
+def load_weight_set_vocab(token: str, store: CacheStore | None = None) -> str | None:
+    """The vocabulary JSON stored alongside ``token``, or None for the canonical one."""
+    store = store or CacheStore()
+    entry = store.get(_artifact_key(token))
+    if entry is None:
+        return None
+    vocab = entry["meta"].get("vocab")
+    return vocab if isinstance(vocab, str) else None
 
 
 def load_weight_set(token: str, store: CacheStore | None = None) -> dict[str, np.ndarray]:

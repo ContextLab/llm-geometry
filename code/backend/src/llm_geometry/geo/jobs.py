@@ -22,6 +22,7 @@ from ..jobs.registry import registry
 from ..torchstate import TORCH_GLOBAL_LOCK
 from .config import N_LAYERS, SEED
 from .finetune import finetune, finetune_cache_key
+from .scratch import corpus_stats, scratch_cache_key, train_scratch
 from .tokenizer import get_tokenizer
 from .train import canonical_cache_key, resolve_weight_set, train_canonical
 from .weights import (
@@ -154,6 +155,66 @@ def _run_finetune(job_id: str, text: str, base: str, steps: int, lr: float, seed
                 "weights_token": result["weights_token"],
                 "loss_before": result["loss_before"],
                 "loss_after": result["loss_after"],
+            },
+        )
+    except LLMGeometryError as exc:
+        registry.fail(job_id, {"type": exc.error_type, "message": exc.message})
+    except Exception as exc:  # noqa: BLE001 — surfaced verbatim via the job error event
+        registry.fail(job_id, {"type": "TrainingFailedError", "message": str(exc)})
+
+
+# -- from-scratch training ---------------------------------------------------------------
+
+
+def request_train_scratch(
+    *,
+    text: str,
+    epochs: int,
+    seed: int = SEED,
+) -> dict[str, Any]:
+    """Idempotent, single-flight POST /api/geo/train_scratch (source already text).
+
+    Content-hash cache hit -> the trained model's metadata + ``ready: True`` (200).
+    Otherwise a background job -> ``{"job_id", "ready": False}`` (202); SSE
+    ``phase: "train_scratch"``, ``done`` data = the same metadata. The canonical
+    checkpoint is never touched — this mints an entirely separate model.
+    """
+    stats = corpus_stats(text)
+    if stats["n_distinct"] < stats["vocab_words_required"]:
+        raise InvalidParamError(
+            f"This text has only {stats['n_distinct']} distinct word types, and the "
+            f"model's vocabulary is {stats['vocab_words_required']} words wide — "
+            "training it would leave most of the vocabulary undefined. Paste more text "
+            "(a few pages of prose), or point at a larger HuggingFace dataset."
+        )
+    key, _ = scratch_cache_key(text, epochs, seed)
+    entry = CacheStore().get(key)
+    if entry is not None:
+        return {**entry["meta"], "ready": True}
+    job, created = registry.get_or_create(key, phase="train_scratch")
+    if created:
+        threading.Thread(
+            target=_run_train_scratch, args=(job.job_id, text, epochs, seed), daemon=True
+        ).start()
+    return {"job_id": job.job_id, "ready": False}
+
+
+def _run_train_scratch(job_id: str, text: str, epochs: int, seed: int) -> None:
+    def cb(progress: float, message: str) -> None:
+        registry.update(job_id, progress=progress, message=message)
+
+    try:
+        with TORCH_GLOBAL_LOCK:
+            result = train_scratch(text=text, epochs=epochs, seed=seed, progress_cb=cb)
+        registry.finish(
+            job_id,
+            result={
+                "weights_token": result["weights_token"],
+                "vocab_size": result["vocab_size"],
+                "final_loss": result["final_loss"],
+                "n_tokens": result["n_tokens"],
+                "n_distinct": result["n_distinct"],
+                "epochs": result["epochs"],
             },
         )
     except LLMGeometryError as exc:

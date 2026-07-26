@@ -21,6 +21,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Any
 
 from ..errors import InvalidParamError
 from .config import (
@@ -179,3 +180,19 @@ class GeoTokenizer:
 def get_tokenizer() -> GeoTokenizer:
     """The canonical tokenizer, built deterministically from the real corpus."""
     return GeoTokenizer.from_corpus_text(load_corpus_text())
+
+
+def tokenizer_for(weights_token: str | None, store: Any = None) -> GeoTokenizer:
+    """The tokenizer whose words give THIS model's token ids their meaning.
+
+    Models trained from scratch on a user's own text carry their own vocabulary, so
+    reading their ids with the canonical one would label every token wrongly. Anything
+    without a stored vocabulary (the canonical checkpoint, fine-tunes and weight edits
+    derived from it) uses the canonical tokenizer.
+    """
+    if not weights_token or weights_token == "learned":
+        return get_tokenizer()
+    from .weights import load_weight_set_vocab
+
+    payload = load_weight_set_vocab(weights_token, store=store)
+    return GeoTokenizer.from_json(payload) if payload else get_tokenizer()
