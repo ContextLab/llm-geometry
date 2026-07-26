@@ -107,7 +107,7 @@ jobs:
           python scripts/export_static_assets.py --quick \
             --git-sha "${GITHUB_SHA}" --generated-at ci
       - name: Install
-        run: npm ci
+        run: sh ../../scripts/npm-ci-retry.sh
       - name: Typecheck (svelte-check)
         run: npm run check
       - name: Unit tests (vitest)
@@ -160,7 +160,7 @@ jobs:
       - name: Frontend install + browsers
         working-directory: code/frontend
         run: |
-          npm ci
+          sh ../../scripts/npm-ci-retry.sh
           npx playwright install --with-deps chromium
       - name: e2e (both projects — chromium against the real backend, static against the built Pages bundle)
         working-directory: code/frontend

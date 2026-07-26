@@ -72,7 +72,7 @@ jobs:
           VITE_DATA_MODE: static
           PAGES_BASE: /llm-geometry/
         run: |
-          npm ci
+          sh ../../scripts/npm-ci-retry.sh
           npm run build
           cp dist/index.html dist/404.html
       - uses: actions/configure-pages@v5
