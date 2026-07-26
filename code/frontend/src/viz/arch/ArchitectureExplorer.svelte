@@ -17,6 +17,8 @@
   } from "../../lib/dataClient";
   import ArchModelPicker from "./ArchModelPicker.svelte";
   import ArchChat from "./ArchChat.svelte";
+  import Explain from "../../lib/Explain.svelte";
+  import { view } from "../../lib/stores";
   import ArchInspector from "./ArchInspector.svelte";
   import ArchTracePanel from "./ArchTracePanel.svelte";
   import { evictArchGraph, fetchArchGraph, formatCount, plainError } from "./archShared";
@@ -223,7 +225,7 @@
       lastFireKey = "";
       return;
     }
-    const key = `${m} ${p} ${sp}`;
+    const key = JSON.stringify([m, p, sp]);
     if (key === lastFireKey) return;
     lastFireKey = key;
     traceLoading = true; // instant feedback while the debounce window runs
@@ -268,16 +270,16 @@
     <div class="head-text">
       <h2>Architecture Explorer</h2>
       <p class="sub">
+        A real open-weights model, unfolded into the operations it actually performs. The diagram
+        below is <b>traced from a genuine forward pass</b>, not drawn from the config: every step
+        that transforms the hidden state is a node, including the parameterless ones — rotary
+        embeddings, the attention softmax, residual adds. Click any block to inspect its weights;
+        ▶ play the trace to walk the ops in execution order; generate a reply and hover a token for
+        its probability and the alternatives it beat.
         {#if STATIC_MODE}
-          A real open-weights model, running in your browser. Chat and tokenization are live
-          via its ONNX export; the op-by-op trace below is precomputed by the real backend for
-          a set of example prompts, because browser ONNX exports do not expose hidden states.
-          ▶ play the trace through the diagram, click any block to inspect it, then generate a
-          reply and hover each token for its probabilities.
-        {:else}
-          A real open-weights model, traced live — every op in its forward pass is a clickable
-          node. Type a prompt to trace it, ▶ play the trace through the diagram, click any block
-          to inspect it, then generate a reply and hover each token for its probabilities.
+          Chat and tokenization run live in your browser via the model's ONNX export; the
+          op-by-op trace is precomputed by the real backend for a set of example prompts, because
+          browser ONNX exports do not expose hidden states.
         {/if}
       </p>
     </div>
@@ -298,6 +300,84 @@
       </div>
     {/if}
   </header>
+
+  <div class="explainers">
+    <Explain
+      title="How to read the diagram"
+      hint="traced ops, tied weights, and what the inspector is showing you"
+      testid="arch-explain-diagram"
+    >
+      <p>
+        The graph comes from running the model once on a short fixed sentence with hooks on every
+        tensor operation. A node is <b>any step that transforms the hidden state</b> — so the ops
+        that architecture diagrams usually leave out (rotary position embedding, the attention
+        softmax, residual adds, activations) are first-class here. Edges are real dataflow,
+        recovered from tensor identity and storage aliasing, with execution order as a fallback
+        where views and copies break identity.
+      </p>
+      <p>
+        <b>Tied weights appear once.</b> When a model shares one tensor between its embedding and
+        its output projection, the graph detects that by storage pointer and shows a
+        <code>tied_to</code> badge on the alias instead of counting the parameters twice.
+      </p>
+      <p>
+        Clicking a node opens the inspector. The heat map you get first is an <b>overview</b>: a
+        strided mean of the whole matrix within a 4096-cell budget (computed live by the backend,
+        or precomputed and 8-bit quantized on the static site). Clicking into the map fetches the
+        <b>exact</b> sub-window at full precision rather than magnifying pixels you already have.
+        Ops with no learned weights say so — there is no matrix to plot, so watch them light up in
+        the breakdown instead.
+      </p>
+      <p>
+        Models are capped at <b>1.5B parameters</b>, decided from hub metadata <i>before</i> any
+        weights are downloaded.
+      </p>
+    </Explain>
+    <Explain
+      title="What can I change here?"
+      hint="model, prompt, system prompt, and the decoding controls in Chat"
+      testid="arch-explain-controls"
+    >
+      <ul>
+        <li>
+          <b>Model</b> — swaps the whole tab to a different real model. Every number on screen
+          comes from the one you have selected.
+          {#if STATIC_MODE}
+            Its graph and example traces were produced by the real backend at build time; its
+            weights are read live from HuggingFace's CDN.
+          {:else}
+            The first load of a new one downloads and traces it, which takes as long as your
+            network and CPU take; after that it is cached.
+          {/if}
+        </li>
+        <li>
+          <b>Prompt</b> and <b>system prompt</b> — rendered through the model's own chat template
+          when it has one, and truncated to the last 64 tokens.
+          {#if STATIC_MODE}
+            They stay live for chat and tokenization, but only the labelled example prompts have a
+            precomputed trace; anything else says so rather than inventing one.
+          {:else}
+            Retraced 400 ms after you stop typing.
+          {/if}
+        </li>
+        <li>
+          <b>Temperature</b> (in Chat) — 0 is greedy argmax; above 0 samples the temperature
+          softmax restricted to top-k 50 ∩ top-p 0.9, with a 1.1 repetition penalty applied first.
+          The filtering affects only which token is <i>drawn</i>: no percentage shown to you is
+          computed from the truncated distribution. (The Info tab spells out which distribution
+          each number comes from — they are not all the same one.)
+        </li>
+        <li>
+          <b>Base vs instruct models</b> — <code>gpt2</code> has no chat template, so it continues
+          your text rather than answering it. The Chat panel says so when a base model is selected.
+        </li>
+      </ul>
+      <p>
+        For the full notation and the mathematics, see the
+        <button class="linklike" onclick={() => view.set("info")}>Info tab</button>.
+      </p>
+    </Explain>
+  </div>
 
   <div class="body">
     <div class="rail">
@@ -369,10 +449,16 @@
         {#if graphLoading}
           <div class="gload" class:overlay={graph !== null}>
             <div class="glogo"></div>
-            <p class="phase">downloading + tracing <b>{$archModelId}</b>…</p>
+            <p class="phase">
+              {STATIC_MODE ? "loading" : "downloading + tracing"} <b>{$archModelId}</b>…
+            </p>
             <p class="phase-sub">
-              first load of a new model can take 10–60 s — the graph is built from a real traced
-              forward pass, then cached
+              {#if STATIC_MODE}
+                fetching the graph the real backend traced for this model at build time
+              {:else}
+                the first load of a new model takes a while — the graph is built from a real traced
+                forward pass, then cached
+              {/if}
             </p>
             <div class="indet"><div class="indet-bar"></div></div>
           </div>
@@ -397,6 +483,7 @@
     loading={traceLoading}
     error={traceError}
     staticNote={traceStaticNote}
+    hasPresets={tracePresets.length > 0}
     onHighlight={(id) => (highlightId = id)}
     onRetry={() => traceArgs && runTrace(traceArgs.m, traceArgs.p, traceArgs.sp)}
   />
@@ -610,5 +697,21 @@
     margin: 0;
     color: var(--text-dim);
     font-size: 0.72rem;
+  }
+  .explainers {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  /* A button that reads as a link: the tab switch is an action, not navigation, so it
+     must stay a <button> for assistive tech. */
+  .linklike {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    text-decoration: underline;
+    cursor: pointer;
   }
 </style>

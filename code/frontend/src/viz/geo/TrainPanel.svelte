@@ -198,6 +198,13 @@
     <h3>Train a new model</h3>
     <span class="hint">a fresh vocabulary + fresh weights — not a fine-tune of the shipped one</span>
   </div>
+  <p class="panel-note">
+    The vocabulary is rebuilt as the 1000 most frequent word and punctuation types in
+    <b>your</b> text, so token ids mean different words than in any other model here — which is why
+    a saved model file carries its vocabulary alongside its weights, each with its own checksum.
+    Give it a book's worth of text: fewer than 1000 distinct types and the run is refused rather
+    than padded out.
+  </p>
 
   <div class="tabs" role="tablist">
     {#each [["paste", "paste text"], ["file", "upload .txt/.md"], ["hf", "HF dataset"]] as [id, lbl] (id)}
@@ -297,6 +304,8 @@
   .head { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
   h3 { margin: 0; font-size: 0.95rem; }
   .hint { font-size: 0.72rem; color: var(--text-dim); line-height: 1.4; }
+  .panel-note { margin: 0.1rem 0 0; font-size: 0.74rem; line-height: 1.55; color: var(--text-dim); }
+  .panel-note b { color: var(--text); font-weight: 600; }
   .hint.small { margin: 0; }
   .tabs { display: inline-flex; gap: 0.25rem; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 999px; padding: 0.2rem; align-self: flex-start; }
   .tabs button { background: transparent; color: var(--text-dim); border: none; border-radius: 999px; padding: 0.22rem 0.7rem; font-size: 0.74rem; }

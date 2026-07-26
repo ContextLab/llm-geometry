@@ -158,6 +158,13 @@
       <span class="badge learned">shipped checkpoint</span>
     {/if}
   </div>
+  <p class="panel-note">
+    Pick a matrix and apply a preset, or click a cell of a 3×3 matrix to type a new value — the
+    1003-row <code>embedding</code> is read-only, so change it with a preset. The sphere, both
+    fields and the attention map immediately re-run against the edited weights; nothing here is a
+    preview. Edits mint a new weight set rather than overwriting the trained one, so the
+    <code>learned</code> preset always takes you back.
+  </p>
 
   <div class="picker">
     <label class="field">
@@ -232,6 +239,16 @@
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
+  }
+  .panel-note {
+    margin: 0.1rem 0 0;
+    font-size: 0.74rem;
+    line-height: 1.55;
+    color: var(--text-dim);
+  }
+  .panel-note code {
+    font-family: var(--mono);
+    color: var(--accent);
   }
   .head {
     display: flex;

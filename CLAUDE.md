@@ -25,7 +25,8 @@ those three views were removed in favor of the two explorer tabs below. Treat
 
 ## Current state
 
-The app is a **two-tab explorer**, deployed at https://context-lab.com/llm-geometry/.
+The app is a **three-tab explorer** — two visualizations plus a reference tab — deployed at
+https://context-lab.com/llm-geometry/.
 
 - **Architecture Explorer** (`llm_geometry/arch/` + `api/routes_arch.py` + `viz/arch/`) —
   traced-forward-pass graphs of real HF models (functional ops are first-class nodes;
@@ -38,6 +39,13 @@ The app is a **two-tab explorer**, deployed at https://context-lab.com/llm-geome
   corpus, with next-next + attention-force vector fields on a Three.js sphere, editable
   weights via content-hash `weights_token`s, real fine-tuning, from-scratch training on
   arbitrary text or a real HuggingFace dataset, and file save/load.
+- **Info tab** (`llm_geometry`-free; `viz/info/InfoTab.svelte` + `lib/Explain.svelte`) — the
+  reference surface added by feature 005: notation, the GeoTransformer's forward pass as
+  equations, both field definitions, the what-is-real/where-it-runs table, known limits, and
+  verified references. Both explorer tabs also carry always-visible orientation prose plus
+  collapsible `Explain` deep-dives. **Every number in that prose is transcribed from a source
+  constant** — `tests/e2e/docs.spec.ts` pins the ones cheapest to let rot, so changing a constant
+  without changing the sentence fails CI.
 - **Static build** (feature 003) — a TypeScript port of the GeoTransformer
   (`src/lib/geoEngine/`, golden-tested against the Python backend to ≤1e-5),
   transformers.js generation, and safetensors HTTP Range reads. `VITE_DATA_MODE=static`
@@ -115,9 +123,13 @@ Note: the `Dockerfile` builds the real dual stack (python:3.11-slim + Node 20,
 and the requirements files in sync with what the code actually imports.
 
 <!-- SPECKIT START -->
-Active feature: **004-two-tab-explorer** — removals, defect fixes, and real
-from-scratch training. Read the spec before changing either tab:
-- Spec: `specs/004-two-tab-explorer/spec.md`
+Active feature: **005-explain-the-visualizations** — the Info tab and the in-tab
+explanatory text, written for a mathematically sophisticated reader. If you change a
+constant, an equation, or what a control does, change the sentence that documents it in
+the same commit.
+- Spec: `specs/005-explain-the-visualizations/spec.md`
+- Previous: `specs/004-two-tab-explorer/spec.md` (removals, defect fixes, real
+  from-scratch training) — still the spec for both tabs' behavior
 - Frozen API contract (both tabs):
   `specs/002-interactive-model-explorer/contracts/api.md`
 - Superseded: `specs/001-core-machinery/` (the three removed views)

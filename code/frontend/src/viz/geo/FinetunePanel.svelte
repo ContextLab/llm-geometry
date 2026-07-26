@@ -120,6 +120,14 @@
     <h3>Fine-tune on your text</h3>
     <span class="hint">a new checkpoint is minted — the learned one is never touched</span>
   </div>
+  <p class="panel-note">
+    Real gradient steps (SGD, lr 1e-2) on the <b>currently active</b> weights — so this adapts the
+    model you are looking at rather than starting one. Watch the embedding drift on the sphere as
+    the loss falls. Note that your text is tokenized with the <b>shipped</b> vocabulary, so
+    fine-tuning a model you trained from scratch does not use that model's own words
+    (<a href="https://github.com/ContextLab/llm-geometry/issues/6" target="_blank" rel="noopener">issue #6</a>).
+    To build a vocabulary from your own text, use <b>Train a new model</b>.
+  </p>
 
   <div class="tabs" role="tablist">
     <!-- All three sources work in BOTH builds (feature 004): the Hub's dataset viewer
@@ -173,6 +181,16 @@
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
+  }
+  .panel-note {
+    margin: 0.1rem 0 0;
+    font-size: 0.74rem;
+    line-height: 1.55;
+    color: var(--text-dim);
+  }
+  .panel-note b {
+    color: var(--text);
+    font-weight: 600;
   }
   .head {
     display: flex;

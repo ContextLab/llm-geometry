@@ -31,6 +31,8 @@
   import FinetunePanel from "./FinetunePanel.svelte";
   import TrainPanel from "./TrainPanel.svelte";
   import AttentionView from "./AttentionView.svelte";
+  import Explain from "../../lib/Explain.svelte";
+  import { view } from "../../lib/stores";
   import { SPECIALS, tokenText, verifyVocab } from "./vocab";
 
   // Geometry Lab (issue #1's "deeper" demo; spec User Story 2): a tiny transparent
@@ -318,12 +320,13 @@
     <div>
       <h2>Geometry Lab — a tiny transparent transformer</h2>
       <p class="sub">
-        A GeoTransformer (<b>d_model = 3</b>, 4 layers, 1 head, 1000-word vocab) whose token
-        embeddings genuinely live on this sphere — no dimensionality reduction. Hover a dot for
-        its word; drag to rotate, scroll to zoom. Edit the weights, fine-tune it, or train a new
-        one on your own text below. (W_V and the embedding move the field most; at
-        temperature 0 the next-next field is an argmax, so W_Q/W_K often shift only a
-        few arrows.)
+        A GeoTransformer (<b>d_model = 3</b>, 4 layers, 1 head, 1000-word vocab), really trained on
+        a real corpus. Its 1003 token embeddings are unit vectors, so this sphere <b>is</b> the
+        model's embedding space at full rank — not a PCA, t-SNE, or UMAP projection of a bigger one.
+        Each dot is a token; hover it for its word. Drag to rotate, scroll to zoom, and
+        <b>⟳ spin</b> sets it turning on its own (grabbing it stops the spin). Below the sphere you can edit any weight matrix, fine-tune the model, or
+        train an entirely new one on your own text — every view updates from the real model that
+        results.
       </p>
       {#if $geoWeightsToken}
         <!-- A different model is driving the sphere: describing the shipped checkpoint's
@@ -334,14 +337,148 @@
         </p>
       {:else if spec}
         <p class="chips" data-testid="geo-active-model">
-          <span class="chip">shipped checkpoint · corpus {spec.model.corpus}</span>
-          {#if spec.checkpoint.final_loss != null}<span class="chip">final loss {spec.checkpoint.final_loss.toFixed(2)}</span>{/if}
-          {#if spec.checkpoint.coverage_uniformity != null}<span class="chip">coverage {spec.checkpoint.coverage_uniformity.toFixed(2)}</span>{/if}
-          {#if spec.checkpoint.field_directional_entropy != null}<span class="chip">field entropy {spec.checkpoint.field_directional_entropy.toFixed(2)}</span>{/if}
+          <span class="chip" title="the checkpoint that ships with this build — trained by the real backend on the corpus named here">shipped checkpoint · corpus {spec.model.corpus}</span>
+          {#if spec.checkpoint.final_loss != null}<span class="chip" title="next-token cross-entropy in nats at the end of training. A uniform model over 1003 tokens would score ln 1003 ≈ 6.91, so lower than that is real learning.">final loss {spec.checkpoint.final_loss.toFixed(2)}</span>{/if}
+          {#if spec.checkpoint.coverage_uniformity != null}<span class="chip" title="how evenly the 1003 embeddings occupy the sphere: normalized entropy of their occupancy over 64 equal-area bins, 0 = one cluster, 1 = perfectly spread. The test suite requires ≥ 0.80.">coverage {spec.checkpoint.coverage_uniformity.toFixed(2)}</span>{/if}
+          {#if spec.checkpoint.field_directional_entropy != null}<span class="chip" title="how many distinct directions the next-next field points in: entropy of arrow directions over the same 64 bins, in nats, max ln 64 ≈ 4.16. The test suite requires ≥ 2.0.">field entropy {spec.checkpoint.field_directional_entropy.toFixed(2)}</span>{/if}
         </p>
       {/if}
     </div>
   </header>
+
+  <!-- Outside the phase gate on purpose: the first open runs a real training job, and
+       that wait is exactly when a newcomer most needs to know what they are waiting for.
+       Nothing in these panels depends on `spec`, `field`, or `trace`. -->
+  <div class="explainers">
+    <Explain
+      title="The model, exactly"
+      hint="4 layers, 1 head, no layer norm, tied unembedding — the whole forward pass"
+      testid="geo-explain-model"
+    >
+      <p>
+        Decoder-only. Token embeddings <code>E</code> are 1003 unit vectors on <code>S²</code>;
+        positions are learned absolute embeddings (50 more 3-vectors; trained and saved with the
+        rest, though the weight editor does not expose them).
+        With <code>z</code> the residual stream at each position:
+      </p>
+      <!-- A scroll container must be focusable or keyboard-only users cannot reach the
+           overflow (WCAG 2.1.1). The linter only knows the element is non-interactive. -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+      <div class="eq" role="group" aria-label="equation" tabindex="0">
+        z_i⁽⁰⁾ = E[t_i] + p_i<br />
+        q_i = W_Q z_i, &nbsp; k_i = W_K z_i, &nbsp; v_i = W_V z_i<br />
+        A_ij = softmax_j ⟨k_j, q_i⟩ &nbsp; over j ≤ i<br />
+        z_i ← z_i + W_O {"Σ_{j≤i}"} A_ij v_j<br />
+        z_i ← z_i + W_outᵀ gelu(W_inᵀ z_i + b_in) + b_out<br />
+        logits = E z <span class="note">(tied unembedding)</span>
+      </div>
+      <p>
+        Two deliberate departures from the standard block. Attention scores are
+        <b>unscaled</b> — <code>⟨k_j, q_i⟩</code> with no <code>1/√d</code> — so the trace and the
+        force field are literally the same numbers. And there is <b>no layer norm</b>: at
+        <code>d = 3</code> it would erase precisely the radial information this tab exists to
+        show. The embedding is instead held on the sphere by renormalizing during training.
+      </p>
+      <p>
+        Because the unembedding is tied, reading out at an intermediate layer <i>is</i> the
+        <b>logit lens</b> — what the model would predict if it stopped after that layer. That is
+        what the <b>layer</b> control selects in next-next mode.
+      </p>
+    </Explain>
+
+    <Explain
+      title="What the arrows mean"
+      hint="the two field modes, and why the amber ones are projected"
+      testid="geo-explain-fields"
+    >
+      <p>
+        <b>next-next</b> asks, for every one of the 1003 tokens: <i>if the model went here, where
+        would it go from here?</i> Each token is appended to your prompt, the model runs, and an
+        arrow is drawn from that token's embedding toward what it would predict next — the argmax
+        at temperature 0, or the top-m targets weighted by probability above 0. Brighter is more
+        probable. At <code>T = 0</code> the distribution is one-hot, so there is exactly one arrow
+        per point however “arrows/point” is set, which is why that slider disables itself.
+      </p>
+      <p>
+        <b>force</b> draws the attention field of a single layer. Two different objects share the
+        view:
+      </p>
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+      <div class="eq" role="group" aria-label="equation" tabindex="0">
+        <b class="k-thin">thin arrows</b> — the per-point field x ↦ W_V x, over all 1003 embedding points<br />
+        <b class="k-amber">amber arrows</b> — the prompt's aggregate forces F_i = {"Σ_{j≤i}"} A_ij v_j
+      </div>
+      <p>
+        <code>F_i</code> is literally the model's <code>attention @ v</code> row. Ticking
+        <b>antisymmetrize</b> substitutes <code>(W_V − W_Vᵀ)/2</code> in the per-point field only;
+        for antisymmetric <code>A</code>, <code>⟨Ax, x⟩ = 0</code> identically, so that field is
+        exactly tangent to the sphere everywhere — an algebraic fact, not a measurement.
+      </p>
+      <p>
+        It does <b>not</b> make the amber arrows tangent. Each term <code>W_V z_j</code> is
+        tangent at <code>z_j</code>, but the sum is drawn anchored at <code>z_i</code>, where it
+        has no reason to be tangent. So each aggregate force is projected onto the tangent plane
+        at the point it is drawn from, <code>F_i − ⟨F_i, ẑ_i⟩ẑ_i</code>, and the badge reports
+        the largest radial component that projection removed. A picture that asserts a geometric
+        property should show the number that could falsify it.
+      </p>
+      <p>
+        The <span class="path-key">green path</span> traces your prompt's tokens across the
+        sphere in order, hidden where it passes behind, ending on a white dot at the last token.
+      </p>
+      <p>
+        <b>Arrow length is relative, not absolute.</b> Each render scales its arrows so the
+        90th-percentile magnitude reaches a fixed on-screen length, clipping anything longer, and
+        the two arrow classes are scaled independently. So multiplying <code>W_V</code> by a
+        constant leaves the thin arrows pixel-identical, and lengths do not compare across renders
+        or between the two classes. Trust directions, relative lengths within one field, and the
+        colour ramp; for absolute magnitudes, read the badges.
+      </p>
+      <p>
+        Both fields are <b>conditioned on your prompt</b> — retyping it redraws every arrow. And an
+        arrow's tail is the token's embedding, not the residual-stream state the prediction came
+        from: the tail is where the token lives, not where the model was.
+      </p>
+    </Explain>
+
+    <Explain
+      title="What can I change, and what happens"
+      hint="which matrices move which picture — and what barely moves it"
+      testid="geo-explain-controls"
+    >
+      <ul>
+        <li>
+          <b>W_V and the embedding</b> move the force field most — the thin arrows literally
+          <i>are</i> <code>W_V x</code> over the embedding points.
+        </li>
+        <li>
+          <b>W_Q and W_K</b> change only the attention matrix <code>A</code>. The attention map
+          and the amber forces respond at once, but at temperature 0 the next-next field is an
+          argmax, so small changes there often move only a few arrows.
+        </li>
+        <li>
+          <b>W_O</b> controls how strongly attention output re-enters the residual stream — watch
+          how far the green path departs from the sphere.
+        </li>
+        <li>
+          <b>Presets</b> per matrix: <code>identity</code>, <code>toeplitz_fuzzy</code>,
+          <code>random</code>, <code>random_autocorr</code>, <code>zero</code>, and
+          <code>learned</code> (back to the trained value). Editing never touches the trained
+          checkpoint — each edit mints a new weight set addressed by a hash of its own contents.
+        </li>
+        <li>
+          <b>Fine-tune</b> continues training the current weights (≤ 500 steps, default 100, lr
+          1e-2). <b>Train from scratch</b> builds a genuinely new model: fresh weights <i>and</i>
+          a fresh vocabulary rebuilt from your text, which is why a saved model file carries its
+          vocabulary alongside its weights.
+        </li>
+      </ul>
+      <p>
+        Full notation, the training recipe, and what is real in this deployment are in the
+        <button class="linklike" onclick={() => view.set("info")}>Info tab</button>.
+      </p>
+    </Explain>
+  </div>
 
   {#if phase === "boot" || phase === "training"}
     <div class="gate" data-testid="geo-progress">
@@ -400,7 +537,12 @@
         </label>
       {:else}
         <label class="ctl check">
-          <input type="checkbox" checked={$geoAntisymmetrize} onchange={(e) => geoAntisymmetrize.set(e.currentTarget.checked)} />
+          <input
+            type="checkbox"
+            data-testid="geo-antisymmetrize"
+            checked={$geoAntisymmetrize}
+            onchange={(e) => geoAntisymmetrize.set(e.currentTarget.checked)}
+          />
           <span>antisymmetrize (W_V−W_Vᵀ)/2</span>
         </label>
         <!-- Two DIFFERENT facts, so both are shown: whether the per-point field is
@@ -692,5 +834,23 @@
     border: 1px solid var(--border);
     border-radius: 12px;
     padding: 0.9rem 1rem;
+  }
+  .explainers {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  /* A key that names a colour is printed in it (the scene's exact values). */
+  .explainers :global(.eq b.k-amber) { color: #ffb454; }
+  .explainers :global(.eq b.k-thin) { color: #b794f6; }
+  /* Reads as a link, stays a button: switching tabs is an action, not navigation. */
+  .linklike {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    text-decoration: underline;
+    cursor: pointer;
   }
 </style>

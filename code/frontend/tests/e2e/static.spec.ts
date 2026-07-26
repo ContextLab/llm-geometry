@@ -56,6 +56,22 @@ test("app loads with the static-demo masthead badge", async ({ page }) => {
   await expect(page.getByTestId("view-tabs")).toBeVisible();
 });
 
+test("the Info tab tells a static visitor which capabilities they actually have", async ({
+  page,
+}) => {
+  await page.goto(BASE);
+  await page.getByTestId("tab-info").click();
+  const info = page.getByTestId("info-view");
+  await expect(info).toBeVisible();
+  // The honesty claim this whole build rests on: the reader is told they are on the
+  // static site, and told which capability is precomputed rather than live.
+  await expect(info).toContainText("You are currently on the static build");
+  await expect(info).toContainText("do not expose hidden states");
+  // The math must survive the static bundle intact (no backend involved in rendering it).
+  await expect(info).toContainText("logit lens");
+  await expect(info).toContainText("On Transformer Dynamics");
+});
+
 // ---------------------------------------------------------------------------------
 // [f] deep links under the Pages base path
 // ---------------------------------------------------------------------------------
@@ -84,7 +100,9 @@ test("geometry lab runs fully live in-browser (engine, edits, worker fine-tune)"
   // The TS engine initializes from the shipped checkpoint — no training gate.
   await ready(page, "geo-view", 30_000);
   await expect(page.getByTestId("geo-canvas")).toBeVisible(); // sphere + field render
-  await expect(page.getByTestId("geo-view")).toContainText("corpus");
+  // The shipped-checkpoint chip, not just the word somewhere in the tab: the header
+  // prose also mentions a corpus, so a tab-wide match would no longer prove the chip.
+  await expect(page.getByTestId("geo-active-model")).toContainText("corpus");
 
   // identity preset mints an edited-weights token (live postGeoWeights)
   await page.getByTestId("geo-preset").selectOption("identity");
@@ -192,13 +210,13 @@ test("architecture: precomputed graph + example traces + real HF weight windows"
     await expect(dd.locator("option", { hasText: t.label })).toHaveCount(1);
   }
   await expect(page.getByTestId("arch-trace-strip")).toBeVisible({ timeout: 60_000 });
-  await expect(page.getByTestId("arch-breakdown")).toContainText("next-token top-10");
+  await expect(page.getByTestId("arch-topk-label")).toBeVisible();
 
   // selecting another example loads ITS precomputed trace (strip + attention heatmap)
   const t2 = traces[Math.min(1, traces.length - 1)];
   await dd.selectOption(String(t2.n));
   await expect(page.getByTestId("arch-prompt")).toHaveValue(t2.prompt);
-  await expect(page.getByTestId("arch-breakdown")).toContainText("next-token top-10", {
+  await expect(page.getByTestId("arch-topk-label")).toBeVisible({
     timeout: 60_000,
   });
   await expect(

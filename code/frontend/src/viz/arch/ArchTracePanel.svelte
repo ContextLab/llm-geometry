@@ -2,6 +2,7 @@
   import { onDestroy } from "svelte";
   import MatrixHeatmap from "../../lib/MatrixHeatmap.svelte";
   import StaticNotice from "../../lib/StaticNotice.svelte";
+  import Explain from "../../lib/Explain.svelte";
   import { STATIC_MODE } from "../../lib/staticUx";
   import type { ArchGraph, ArchNode, ArchTrace } from "../../lib/dataClient";
   import { showTip, hideTip } from "../../lib/tooltip";
@@ -19,6 +20,8 @@
      * traces" — rendered as a designed affordance (not an error) while any previous
      * trace stays visible underneath (FR-203). */
     staticNote?: string;
+    /** Static build: whether any precomputed example prompts are actually available. */
+    hasPresets?: boolean;
     onHighlight?: (nodeId: string | null) => void;
     onRetry?: () => void;
   }
@@ -28,6 +31,7 @@
     loading = false,
     error = "",
     staticNote = "",
+    hasPresets = false,
     onHighlight,
     onRetry,
   }: Props = $props();
@@ -175,12 +179,11 @@
     return s.replace(/\n/g, "↵");
   }
 
-  // The trace contract is gaining an additive `truncated: bool` (long prompts are
-  // left-truncated to the last 64 tokens with no visible sign — F9). Read it
-  // defensively so the UI works both before and after the backend field lands.
-  const truncated = $derived(
-    (trace as (ArchTrace & { truncated?: boolean }) | null)?.truncated === true,
-  );
+  // Long prompts are left-truncated to the last 64 tokens; without this the loss is
+  // invisible (F9). `truncated` is part of the frozen trace contract and typed on
+  // ArchTrace — read it directly, so a payload that omits it fails type-checking
+  // instead of silently disabling the chip.
+  const truncated = $derived(trace?.truncated === true);
 </script>
 
 <div class="breakdown" data-testid="arch-breakdown">
@@ -189,6 +192,47 @@
     <span class="bd-sub">the real forward pass on your prompt — tokenize → {order.length || "…"} traced ops → next-token distribution</span>
     {#if loading && trace}<span class="tracing-chip">re-tracing…</span>{/if}
   </div>
+
+  <!-- Only once there is something to describe: with no trace on screen the panels this
+       text walks through do not exist yet. -->
+  {#if trace}
+  <Explain
+    title="What these panels are showing"
+    hint="attention heads, residual norms, the attention sink, and the top-10"
+    testid="arch-explain-breakdown"
+  >
+    <p>
+      Everything here is the same forward pass replayed. <b>▶</b> walks the traced ops in true
+      execution order, highlighting each in the diagram above; <b>follow playhead</b> keeps the layer
+      detail on whichever layer the current op belongs to, and unticks itself the moment you choose
+      a layer yourself.
+    </p>
+    <ul>
+      <li>
+        <b>Attention grid</b> — every head of the selected layer at once, each a
+        <code>T × T</code> map where <b>rows attend to columns</b>. The lower-triangular shape is
+        the causal mask: a token can only attend to itself and its past. Click a tile to enlarge it.
+        Long prompts are downsampled to at most 64×64 per head, which the label states when it
+        happens.
+      </li>
+      <li>
+        <b>‖residual stream‖ per token</b> — the L2 norm of each position's hidden state at that
+        layer's output. Most decoder-only LMs, base ones included, park a huge-norm
+        <b>massive activation</b> on the first token — the residual-stream counterpart of the
+        <b>attention sink</b> you can see in the head grid, where much of every attention row lands
+        on position 0. Scaling the chart to it would flatten everything else, so the scale is the
+        largest <i>non-outlier</i> norm and true outliers are drawn striped and clipped, with an
+        “off-scale” count beside the label.
+      </li>
+      <li>
+        <b>Next-token top-10</b> — the model's own distribution after the full forward pass, not
+        per-layer: a plain softmax over the real logits, with no temperature and no filtering.
+        Chat's sampler applies temperature, the repetition penalty and top-k/top-p <i>on top of
+        this</i>, so what it draws from is a different (narrower) distribution.
+      </li>
+    </ul>
+  </Explain>
+  {/if}
 
   {#if staticNote}
     <StaticNotice message={staticNote} testid="arch-static-note" />
@@ -207,7 +251,13 @@
       </div>
     {:else}
       <p class="empty">
-        {#if staticExample}
+        {#if staticExample && !hasPresets}
+          <!-- The example dropdown is only rendered when presets loaded, and a failed
+               fetch silently empties the list. Telling the reader to use a control that
+               is not on screen is a dead end, so name what actually happened. -->
+          The example prompts for this model could not be loaded, so there is no trace to show.
+          Reload the page to try again — or run the full stack, where any prompt is traced live.
+        {:else if staticExample}
           Pick an example prompt on the left — its full forward pass, traced by the real
           backend, lands here.
         {:else}
@@ -370,7 +420,7 @@
                 ></div>
               {/each}
             </div>
-            <span class="cell-label">next-token top-10</span>
+            <span class="cell-label" data-testid="arch-topk-label">next-token top-10</span>
             <div class="logits">
               {#each trace.logits_topk.ids as id, i (id)}
                 <div class="lrow">

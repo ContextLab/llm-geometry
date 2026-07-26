@@ -44,7 +44,7 @@ test.describe("Architecture Explorer", () => {
       timeout: 120_000,
     });
     // (the label is lowercase in the DOM; CSS uppercases it)
-    await expect(page.getByTestId("arch-breakdown")).toContainText("next-token top-10");
+    await expect(page.getByTestId("arch-topk-label")).toBeVisible();
   });
 
   test("clicking a diagram node opens the inspector with real weights", async ({ page }) => {
@@ -75,8 +75,9 @@ test.describe("Geometry Lab", () => {
   test("reaches ready and renders the sphere with gate metrics", async ({ page }) => {
     await openGeometry(page);
     await expect(page.getByTestId("geo-canvas")).toBeVisible();
-    await expect(page.getByTestId("geo-view")).toContainText("coverage");
-    await expect(page.getByTestId("geo-view")).toContainText("field entropy");
+    // Anchored on the chip row that actually carries the gate metrics.
+    await expect(page.getByTestId("geo-active-model")).toContainText("coverage");
+    await expect(page.getByTestId("geo-active-model")).toContainText("field entropy");
   });
 
   test("tokenization strip marks out-of-vocabulary words", async ({ page }) => {
@@ -105,7 +106,9 @@ test.describe("Geometry Lab", () => {
 
     // Turning it off shows the raw operator: no longer tangent by construction, but the
     // aggregate forces are still projected (and still reported).
-    await page.getByTestId("geo-view").getByText("antisymmetrize").click();
+    // Target the control itself, not its text: the tab now also *explains* the
+    // antisymmetrize toggle in prose, so matching on the word is ambiguous.
+    await page.getByTestId("geo-antisymmetrize").click();
     await expect(page.getByTestId("geo-tangent-badge")).toHaveCount(0, { timeout: 120_000 });
     await expect(page.getByTestId("geo-residual-badge")).toBeVisible();
   });

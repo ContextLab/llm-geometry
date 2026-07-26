@@ -351,6 +351,7 @@ export interface ArchNodeActivation {
 export interface ArchTrace {
   tokens: { id: number; text: string }[]; // T ≤ max_context
   chat_template_used: boolean;
+  truncated: boolean; // prompt exceeded max_context and was LEFT-truncated
   layers: ArchTraceLayer[];
   logits_topk: GeoLogitsTopk;
   node_activations: ArchNodeActivation[]; // one entry per traced node
