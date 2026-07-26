@@ -353,6 +353,6 @@ export class ArchSection {
       );
     }
     const rt = await this.runtime();
-    return rt.generate(body, repo, m.revision);
+    return rt.generate(body, repo);
   }
 }

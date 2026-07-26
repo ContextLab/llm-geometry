@@ -144,19 +144,22 @@ def force_field(
         tr = run["trace"][layer_idx]
         attn = tr["attention"][0]  # (T, T) row-stochastic, causal
         v_proj = tr["v"][0]  # (T, 3) — the real W_V z_j
-        z = tr["hidden_in"][0]  # (T, 3)
         forces = (attn @ v_proj).cpu().numpy().astype(np.float32)  # Σ_{j≤i} A_ij V z_j
-        z_np = z.cpu().numpy().astype(np.float32)
-        z_norms = np.linalg.norm(z_np, axis=1)
+        # Project at the point the arrow is actually DRAWN at — the prompt token's
+        # embedding, which is the unit-norm point on the sphere the client anchors to
+        # (`GeoTrace.embeddings`). Projecting at the layer's residual stream
+        # (`hidden_in`) instead was wrong: the residual stream is not on the sphere and
+        # drifts away from the token embedding with depth, so the "tangent" arrows came
+        # out up to 59° off the tangent plane at layer 2 while the UI claimed otherwise.
+        #
+        # Antisymmetrizing W_V does not help here either: each term W_V z_j is tangent
+        # at z_j, not at the anchor where the sum is drawn. `normal_residual` reports the
+        # radial magnitude removed, so nothing is hidden.
+        anchors = points[np.asarray(prompt, dtype=np.int64)]  # (T, 3) unit-norm
+        anchor_norms = np.linalg.norm(anchors, axis=1)
         for i in range(forces.shape[0]):
-            # The aggregate force is drawn as an arrow anchored AT z_i, so it must lie in
-            # the tangent plane there or it visibly leaves the sphere. Antisymmetrizing
-            # W_V is not sufficient: each term W_V z_j is tangent at z_j, not at the z_i
-            # where the sum is anchored. So project onto the tangent plane at z_i and
-            # report the magnitude of what was removed — the radial component is real,
-            # and `normal_residual` is how the UI stays honest about hiding it.
-            if z_norms[i] > 1e-12:
-                n_hat = z_np[i] / z_norms[i]
+            if anchor_norms[i] > 1e-12:
+                n_hat = anchors[i] / anchor_norms[i]
                 radial = float(forces[i] @ n_hat)
                 tangential = forces[i] - radial * n_hat
             else:

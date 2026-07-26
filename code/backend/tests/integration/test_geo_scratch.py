@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -135,6 +136,77 @@ def test_corrupt_bundle_is_refused_not_silently_loaded(tmp_path, corpus: str) ->
 
     with pytest.raises(InvalidParamError):
         import_bundle({"format": "something-else"}, store=CacheStore(tmp_path / "d"))
+
+
+def test_integrity_checks_cannot_be_bypassed(tmp_path, corpus: str) -> None:
+    """The exact bypasses a red-team pass found: an omitted token, and a fabricated
+    vocabulary that the weights hash cannot possibly cover."""
+    store = CacheStore(tmp_path)
+    trained = train_scratch(text=corpus[len(corpus) // 5 :], epochs=1, store=store)
+    bundle = export_bundle(trained["weights_token"], store=store)
+
+    # (a) Deleting the token must NOT be read as "nothing to verify".
+    no_token = {k: v for k, v in bundle.items() if k != "weights_token"}
+    with pytest.raises(InvalidParamError) as exc:
+        import_bundle(no_token, store=CacheStore(tmp_path / "e"))
+    assert "cannot be verified" in exc.value.message
+
+    # (b) Genuine weights + an invented word list: every label would be wrong.
+    fake_words = [f"zzz{i}" for i in range(VOCAB_WORDS)]
+    fake_vocab = json.dumps(
+        {"format": "geo-tokenizer-v1", "specials": {}, "words": fake_words},
+        ensure_ascii=True,
+        sort_keys=True,
+    )
+    swapped = {**bundle, "vocab": fake_vocab}  # vocab_sha256 left as the real one
+    with pytest.raises(InvalidParamError) as exc:
+        import_bundle(swapped, store=CacheStore(tmp_path / "f"))
+    assert "vocabulary" in exc.value.message
+
+    # (c) Dropping the vocabulary digest as well must not open the hole back up.
+    swapped_no_digest = {k: v for k, v in swapped.items() if k != "vocab_sha256"}
+    with pytest.raises(InvalidParamError) as exc:
+        import_bundle(swapped_no_digest, store=CacheStore(tmp_path / "g"))
+    assert "vocab_sha256" in exc.value.message
+
+    # (d) A v1 file (no vocabulary check at all) is refused by version.
+    v1 = {**bundle, "version": 1}
+    with pytest.raises(InvalidParamError) as exc:
+        import_bundle(v1, store=CacheStore(tmp_path / "h"))
+    assert "version" in exc.value.message
+
+
+def test_force_arrows_are_tangent_where_they_are_drawn(canonical_ready: None) -> None:
+    """FR-418: the aggregate force must be tangent at the point the CLIENT anchors it.
+
+    Regression for a real defect: the projection used the layer's residual stream
+    (`hidden_in`) while the UI draws at the token embedding, so the "tangent" arrows
+    came out up to 59 degrees off the tangent plane at layer 2.
+    """
+    from llm_geometry.geo.fields import force_field
+    from llm_geometry.geo.model import model_from_weight_set
+    from llm_geometry.geo.tokenizer import get_tokenizer
+    from llm_geometry.geo.train import resolve_weight_set
+
+    model = model_from_weight_set(resolve_weight_set("learned"))
+    ids = get_tokenizer().encode("alice rabbit queen said the little door").ids
+    embeddings = np.asarray(model.embedding.detach().cpu().numpy(), dtype=np.float64)
+
+    for layer in range(4):
+        field = force_field(model, ids, layer=layer, antisymmetrize=True)
+        for force in field["sequence_forces"]:
+            anchor = embeddings[ids[force["position"]]]
+            normal = anchor / np.linalg.norm(anchor)
+            vec = np.asarray(force["vec"], dtype=np.float64)
+            mag = np.linalg.norm(vec)
+            if mag < 1e-9:
+                continue
+            cos = abs(float(vec @ normal) / mag)
+            assert cos < 1e-5, (
+                f"layer {layer} position {force['position']}: force is "
+                f"{np.degrees(np.arcsin(min(1.0, cos))):.1f} degrees out of the tangent "
+                "plane at the point it is drawn from"
+            )
 
 
 # -- HTTP surface ------------------------------------------------------------------------

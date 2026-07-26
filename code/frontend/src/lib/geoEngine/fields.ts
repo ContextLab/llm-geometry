@@ -277,10 +277,10 @@ export function forceField(
 
   // Per-sequence-position aggregate forces (always the REAL W_V, never antisymmetrized).
   //
-  // Mirrors geo/fields.py: the sum is anchored AT z_i, so it is projected onto the
-  // tangent plane there before display and the removed radial magnitude is reported as
-  // normal_residual. Antisymmetrizing W_V would not help — each term W_V z_j is tangent
-  // at z_j, not at z_i.
+  // Mirrors geo/fields.py: the sum is drawn anchored at the prompt token's EMBEDDING,
+  // so it is projected onto the tangent plane there and the removed radial magnitude is
+  // reported as normal_residual. Antisymmetrizing W_V would not help — each term
+  // W_V z_j is tangent at z_j, not at the anchor.
   const sequenceForces: SequenceForce[] = [];
   const prompt = clipPrompt(promptIds.map((t) => Math.trunc(t)), 0);
   if (prompt.length > 0) {
@@ -293,9 +293,13 @@ export function forceField(
         const a = tr.attention[i * T + j];
         for (let c = 0; c < 3; c++) force[c] += a * tr.v[j * 3 + c];
       }
-      const z0 = tr.hiddenIn[i * 3];
-      const z1 = tr.hiddenIn[i * 3 + 1];
-      const z2 = tr.hiddenIn[i * 3 + 2];
+      // Project at the point the arrow is DRAWN at — the prompt token's embedding,
+      // which is the unit-norm sphere point the client anchors to. Using the layer's
+      // residual stream (hiddenIn) put the "tangent" arrows up to 59° out of plane.
+      const a = prompt[i] * 3;
+      const z0 = model.embedding[a];
+      const z1 = model.embedding[a + 1];
+      const z2 = model.embedding[a + 2];
       const zNorm = Math.hypot(z0, z1, z2);
       let radial = 0;
       if (zNorm > 1e-12) {

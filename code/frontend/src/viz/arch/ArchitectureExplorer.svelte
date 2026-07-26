@@ -268,10 +268,17 @@
     <div class="head-text">
       <h2>Architecture Explorer</h2>
       <p class="sub">
-        A real open-weights model, traced live — every op in its forward pass is a clickable
-        node. Type a prompt to trace it, ▶ play the trace through the diagram, click any block
-        to inspect it, then generate a reply and hover each token for its
-        probabilities.
+        {#if STATIC_MODE}
+          A real open-weights model, running in your browser. Chat and tokenization are live
+          via its ONNX export; the op-by-op trace below is precomputed by the real backend for
+          a set of example prompts, because browser ONNX exports do not expose hidden states.
+          ▶ play the trace through the diagram, click any block to inspect it, then generate a
+          reply and hover each token for its probabilities.
+        {:else}
+          A real open-weights model, traced live — every op in its forward pass is a clickable
+          node. Type a prompt to trace it, ▶ play the trace through the diagram, click any block
+          to inspect it, then generate a reply and hover each token for its probabilities.
+        {/if}
       </p>
     </div>
     {#if graph}

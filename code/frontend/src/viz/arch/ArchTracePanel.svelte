@@ -2,6 +2,7 @@
   import { onDestroy } from "svelte";
   import MatrixHeatmap from "../../lib/MatrixHeatmap.svelte";
   import StaticNotice from "../../lib/StaticNotice.svelte";
+  import { STATIC_MODE } from "../../lib/staticUx";
   import type { ArchGraph, ArchNode, ArchTrace } from "../../lib/dataClient";
   import { showTip, hideTip } from "../../lib/tooltip";
 
@@ -30,6 +31,10 @@
     onHighlight,
     onRetry,
   }: Props = $props();
+
+  // In the static build an arbitrary prompt is NOT run — only the precomputed example
+  // prompts produce a trace — so the empty state must not promise otherwise.
+  const staticExample = STATIC_MODE;
 
   onDestroy(() => {
     hideTip();
@@ -201,7 +206,15 @@
         <span>tracing the forward pass on your prompt…</span>
       </div>
     {:else}
-      <p class="empty">Type a prompt on the left — 400 ms after you stop, the model runs it and every tensor lands here.</p>
+      <p class="empty">
+        {#if staticExample}
+          Pick an example prompt on the left — its full forward pass, traced by the real
+          backend, lands here.
+        {:else}
+          Type a prompt on the left — 400 ms after you stop, the model runs it and every
+          tensor lands here.
+        {/if}
+      </p>
     {/if}
   {:else}
     <!-- tokenization strip -->

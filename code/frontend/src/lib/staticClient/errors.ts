@@ -2,8 +2,9 @@
  * Typed errors for the static (GitHub Pages) data client.
  *
  * `StaticModeError` is the honest "this build can't do that" signal (FR-203):
- * anything the static site cannot compute for real — arbitrary prompts on the
- * 001 views, HF-dataset fine-tunes, non-curated models — is refused with a
+ * anything the static site cannot compute for real — per-layer traces of
+ * arbitrary prompts (browser ONNX exports do not expose hidden states), models
+ * outside the curated set — is refused with a
  * plain-language message instead of fabricated output. Views can branch on
  * `error.type === "StaticModeError"` to show their "run the full stack"
  * affordance.

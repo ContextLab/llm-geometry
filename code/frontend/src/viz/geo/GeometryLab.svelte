@@ -62,12 +62,20 @@
   // ---- token labels: bundled deterministic vocab, verified live; plus everything the
   // API has told us (tokenize/trace) as an always-correct fallback.
   let vocabVerified = $state(false);
+  /**
+   * The ACTIVE model's own word list, when it has one (a scratch-trained or imported
+   * model). Without it every hover label fell back to "token #N" while the header
+   * still promised "hover a dot for its word" — and the words were right there in the
+   * model bundle the whole time.
+   */
+  let modelWords = $state<string[] | null>(null);
   const learnedLabels = new Map<number, string>();
   function noteTokens(tokens: GeoToken[]) {
     for (const t of tokens) if (!t.unk) learnedLabels.set(t.id, t.text);
   }
   function label(id: number): string {
     if (id >= 0 && id < 3) return SPECIALS[id];
+    if (modelWords) return modelWords[id - 3] ?? `token #${id}`;
     if (vocabVerified) return tokenText(id);
     return learnedLabels.get(id) ?? `token #${id}`;
   }
@@ -145,10 +153,24 @@
   function revalidateVocab(): void {
     const token = $geoWeightsToken ?? undefined;
     vocabVerified = false;
+    modelWords = null;
     learnedLabels.clear();
     void verifyVocab((text) => client.geoTokenize(text, token)).then((ok) => {
       if (($geoWeightsToken ?? undefined) === token) vocabVerified = ok;
     });
+    if (!token) return;
+    // The probe above fails for a model with its own vocabulary (correctly — the
+    // bundled table is the canonical model's), so fetch the real word list.
+    void client
+      .geoExportModel(token)
+      .then((bundle) => {
+        if (($geoWeightsToken ?? undefined) !== token) return;
+        const parsed = JSON.parse(bundle.vocab) as { words?: unknown };
+        if (Array.isArray(parsed.words)) modelWords = parsed.words as string[];
+      })
+      .catch(() => {
+        // Labels fall back to the ids the API reported — wrong-looking, never wrong.
+      });
   }
 
   // ---- debounced, abortable data fetches (FR-108 cancel-and-restart) ---------------
@@ -226,6 +248,15 @@
 
   $effect(() => {
     if (phase !== "ready") return;
+    // An empty prompt is a guaranteed 400 ("prompt is empty after tokenization"); the
+    // UI already hid the message, but the request still went out and logged an error.
+    if (!$geoPrompt.trim()) {
+      traceDeb.cancel();
+      traceCtl?.abort();
+      trace = null;
+      traceError = "";
+      return;
+    }
     traceDeb($geoPrompt, $geoWeightsToken ?? undefined);
   });
 
@@ -290,7 +321,9 @@
         A GeoTransformer (<b>d_model = 3</b>, 4 layers, 1 head, 1000-word vocab) whose token
         embeddings genuinely live on this sphere — no dimensionality reduction. Hover a dot for
         its word; drag to rotate, scroll to zoom. Edit the weights, fine-tune it, or train a new
-        one on your own text below, and watch the field move.
+        one on your own text below. (W_V and the embedding move the field most; at
+        temperature 0 the next-next field is an argmax, so W_Q/W_K often shift only a
+        few arrows.)
       </p>
       {#if $geoWeightsToken}
         <!-- A different model is driving the sphere: describing the shipped checkpoint's
@@ -350,9 +383,20 @@
           <span class="ctl-label">temperature <b>{$geoTemperature.toFixed(2)}</b></span>
           <input type="range" min="0" max="2" step="0.05" value={$geoTemperature} oninput={(e) => geoTemperature.set(Number(e.currentTarget.value))} />
         </label>
-        <label class="ctl slider narrow">
-          <span class="ctl-label">arrows/point <b>{$geoTopM}</b></span>
-          <input type="range" min="1" max="5" step="1" value={$geoTopM} oninput={(e) => geoTopM.set(Number(e.currentTarget.value))} />
+        <label class="ctl slider narrow" class:inert={$geoTemperature === 0}>
+          <span class="ctl-label">
+            arrows/point <b>{$geoTopM}</b>
+            {#if $geoTemperature === 0}<span class="why" title="At temperature 0 the next-token distribution is one-hot, so there is only ever one arrow to draw. Raise the temperature to fan them out.">· needs T &gt; 0</span>{/if}
+          </span>
+          <input
+            type="range"
+            min="1"
+            max="5"
+            step="1"
+            value={$geoTopM}
+            disabled={$geoTemperature === 0}
+            oninput={(e) => geoTopM.set(Number(e.currentTarget.value))}
+          />
         </label>
       {:else}
         <label class="ctl check">
@@ -410,7 +454,7 @@
           each arrow: append that token to the prompt, then follow it to the model's <i>next</i> prediction — brighter = more probable
           {#if $geoTemperature > 0 && $geoTopM > 1}· {$geoTopM} weighted arrows per token at T={$geoTemperature.toFixed(2)}{/if}
         {:else}
-          thin arrows: the per-token field W_V·z at layer {effLayer} · <span class="force-key">amber arrows</span>: the prompt's aggregate attention forces, drawn tangent to the sphere at each token{#if maxResidual != null}&nbsp;(up to {maxResidual.toFixed(3)} of radial pull projected away — see the badge above){/if} · <span class="path-key">green path</span>: the prompt's tokens across the sphere, hidden where it passes behind
+          thin arrows: the per-token field {$geoAntisymmetrize ? '((W_V−W_Vᵀ)/2)·z' : 'W_V·z'} at layer {effLayer} · <span class="force-key">amber arrows</span>: the prompt's aggregate attention forces, drawn tangent to the sphere at each token{#if maxResidual != null}&nbsp;(up to {maxResidual.toFixed(3)} of radial pull projected away — see the badge above){/if} · <span class="path-key">green path</span>: the prompt's tokens across the sphere, hidden where it passes behind
         {/if}
       </p>
       <ExportBar name="geometry-sphere" webglCanvas={() => scene?.canvasEl()} />
@@ -609,6 +653,8 @@
     padding: 0.2rem 0.6rem;
     font-size: 0.72rem;
   }
+  .ctl.inert { opacity: 0.55; }
+  .why { color: #ffb454; }
   .caption-row {
     display: flex;
     align-items: flex-start;

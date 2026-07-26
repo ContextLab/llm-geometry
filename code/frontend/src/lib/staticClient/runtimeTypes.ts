@@ -26,7 +26,8 @@ export interface ArchRuntime {
   /** Live tokenization from the pinned original-repo tokenizer files. */
   tokenize(modelId: string, revision: string, text: string): Promise<TokenizeResult>;
   /** Live generation (webgpu q4f16 → wasm q8 fallback) with real per-token probs. */
-  generate(body: ArchGenerateBody, onnxRepo: string, revision: string): Promise<ArchGenerateResult>;
+  /** The ONNX mirror is resolved at `main` — see transformersRuntime's header. */
+  generate(body: ArchGenerateBody, onnxRepo: string): Promise<ArchGenerateResult>;
 }
 
 export type RuntimeLoader = () => Promise<ArchRuntime>;

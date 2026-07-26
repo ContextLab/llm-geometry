@@ -22,6 +22,9 @@
   let progressMsg = $state("");
   let error = $state("");
   let result = $state<{ before: number; after: number } | null>(null);
+  /** What the finished run was actually trained on — "your text" was printed even for
+   * a Hugging Face dataset, which is not the user's text at all. */
+  let sourceLabel = $state("your text");
   let unsubscribe: (() => void) | null = null;
 
   onDestroy(() => unsubscribe?.());
@@ -91,11 +94,8 @@
   function finish(r: GeoFinetuneResult) {
     busy = false;
     if (r.weights_token) {
-      geoModelNote.set(
-        source === "hf"
-          ? `fine-tuned on ${hfDataset.trim()}`
-          : "fine-tuned on your text",
-      );
+      sourceLabel = source === "hf" ? hfDataset.trim() : source === "file" ? (file?.name ?? "your file") : "your text";
+      geoModelNote.set(`fine-tuned on ${sourceLabel}`);
       geoWeightsToken.set(r.weights_token); // the geometry re-fetches under the new weights
     }
     if (r.loss_before != null && r.loss_after != null) {
@@ -155,7 +155,7 @@
     <button onclick={run} disabled={busy}>{busy ? "fine-tuning…" : "Fine-tune"}</button>
     {#if result}
       <span class="loss" data-testid="geo-finetune-loss">
-        loss {result.before.toFixed(2)} <span class="arrow">→</span> {result.after.toFixed(2)} on your text
+        loss {result.before.toFixed(2)} <span class="arrow">→</span> {result.after.toFixed(2)} on {sourceLabel}
       </span>
     {/if}
   </div>

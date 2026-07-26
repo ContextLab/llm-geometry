@@ -36,7 +36,7 @@ import { GeoEngineError, computeError, invalidParam, notFound } from "./errors";
 /** Serialized minted weight set for external persistence (sessionStorage). */
 /** The portable model-file format — the same one GET /api/geo/model emits. */
 export const BUNDLE_FORMAT = "llm-geometry/geo-model";
-export const BUNDLE_VERSION = 1;
+export const BUNDLE_VERSION = 2; // v1 had no vocabulary integrity check
 
 export interface GeoModelBundle {
   format: string;
@@ -44,7 +44,14 @@ export interface GeoModelBundle {
   weights_token: string;
   config: Record<string, number>;
   vocab: string;
+  /** SHA-256 of `vocab`. The weights hash cannot cover the word list. */
+  vocab_sha256: string;
   weights: Record<string, { shape: number[]; data: string }>;
+}
+
+/** Mirrors geo/bundle.vocab_digest. */
+function vocabDigest(vocabJson: string): string {
+  return sha256Hex(utf8Bytes(vocabJson));
 }
 
 export interface ExportedWeightSet {
@@ -441,6 +448,11 @@ export class GeoEngine {
   exportBundle(token?: string | null): GeoModelBundle {
     const resolved = token && token !== "learned" ? token : this.canonicalToken;
     const ws = this.resolveWeightSet(resolved);
+    const vocabJson = JSON.stringify({
+      format: "geo-tokenizer-v1",
+      specials: { [UNK_TOKEN]: UNK_ID, [EOS_TOKEN]: EOS_ID, [PAD_TOKEN]: PAD_ID },
+      words: this.tokenizerFor(resolved).words,
+    });
     const weights: GeoModelBundle["weights"] = {};
     for (const name of Object.keys(ws).sort()) {
       weights[name] = { shape: [...(WEIGHT_SHAPES.get(name) ?? [ws[name].length])], data: b64FromF32(ws[name]) };
@@ -457,11 +469,8 @@ export class GeoEngine {
         vocab_size: VOCAB_SIZE,
         context_window: CONTEXT_WINDOW,
       },
-      vocab: JSON.stringify({
-        format: "geo-tokenizer-v1",
-        specials: { [UNK_TOKEN]: UNK_ID, [EOS_TOKEN]: EOS_ID, [PAD_TOKEN]: PAD_ID },
-        words: this.tokenizerFor(resolved).words,
-      }),
+      vocab: vocabJson,
+      vocab_sha256: vocabDigest(vocabJson),
       weights,
     };
   }
@@ -486,7 +495,8 @@ export class GeoEngine {
     if (b.version !== BUNDLE_VERSION) {
       throw invalidParam(
         `model file version ${JSON.stringify(b.version)} is not supported ` +
-          `(this build reads version ${BUNDLE_VERSION})`,
+          `(this build reads version ${BUNDLE_VERSION}). Version 1 files carried no ` +
+          "vocabulary integrity check; re-export the model to get a v2 file.",
       );
     }
     const cfg = b.config as Record<string, unknown> | undefined;
@@ -530,8 +540,16 @@ export class GeoEngine {
     }
     validateWeightSet(ws); // shapes + completeness, loudly
 
+    // Integrity is MANDATORY, not opt-in: treating a missing token as "nothing to
+    // check" let a file with tampered weights load just by deleting the field.
+    if (typeof b.weights_token !== "string" || !b.weights_token) {
+      throw invalidParam(
+        "model file has no `weights_token`, so its contents cannot be verified — " +
+          "refusing to load it. Re-export the model to get a valid file.",
+      );
+    }
     const actual = weightsToken(ws);
-    if (typeof b.weights_token === "string" && b.weights_token !== actual) {
+    if (b.weights_token !== actual) {
       throw invalidParam(
         `this model file is corrupt: its weights hash to ${actual} but it declares ` +
           `${b.weights_token}. Loading it would pair the wrong vocabulary with these ` +
@@ -540,6 +558,23 @@ export class GeoEngine {
     }
 
     if (typeof b.vocab !== "string") throw invalidParam("model file is missing its `vocab` block");
+    // The weights hash says nothing about the word list, so the vocabulary carries its
+    // own digest — otherwise genuine weights plus an invented vocabulary load cleanly
+    // and mislabel every token on screen.
+    if (typeof b.vocab_sha256 !== "string" || !b.vocab_sha256) {
+      throw invalidParam(
+        "model file has no `vocab_sha256`, so its vocabulary cannot be verified — " +
+          "refusing to load it. Re-export the model to get a valid file.",
+      );
+    }
+    const actualVocab = vocabDigest(b.vocab);
+    if (b.vocab_sha256 !== actualVocab) {
+      throw invalidParam(
+        `this model file is corrupt: its vocabulary hashes to ${actualVocab.slice(0, 16)}… ` +
+          `but it declares ${String(b.vocab_sha256).slice(0, 16)}…. Loading it would label ` +
+          "every token with the wrong word, so it is refused.",
+      );
+    }
     const tokenizer = GeoTokenizer.fromVocabJson(b.vocab);
 
     this.weightSets.set(actual, ws);

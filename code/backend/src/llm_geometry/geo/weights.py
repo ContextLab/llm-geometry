@@ -113,6 +113,14 @@ def preset_matrix(preset: str, matrix: str, seed: int = 0) -> np.ndarray:
     )
 
 
+def _learned_embedding() -> np.ndarray:
+    """The canonical embedding, verbatim (already unit-norm — do NOT re-normalize)."""
+    from .train import load_canonical_weight_set  # local import to avoid a cycle
+
+    ws = load_canonical_weight_set()
+    return np.asarray(ws["embedding"], dtype=np.float32).copy()
+
+
 def _learned_layer_matrix(layer: int, matrix: str) -> np.ndarray:
     from .train import load_canonical_weight_set  # local import to avoid a cycle
 
@@ -171,15 +179,27 @@ def build_weight_set(
         if values is not None:
             arr = validate_values(matrix, values)
             source = "edited"
-        elif preset == "learned" and matrix != "embedding":
-            arr = _learned_layer_matrix(int(layer), matrix)
+        elif preset == "learned":
+            # The embedding used to be excluded here, so "learned" fell through to
+            # preset_matrix + _unit_rows and came back ~1e-6 off the canonical rows.
+            # The content hash then never matched the checkpoint, and the UI was stuck
+            # reporting "hand-edited weights" forever for a model that WAS the shipped
+            # one. Restore the canonical array verbatim instead.
+            arr = (
+                _learned_embedding()
+                if matrix == "embedding"
+                else _learned_layer_matrix(int(layer), matrix)
+            )
             source = "preset:learned"
         else:
             arr = preset_matrix(str(preset), matrix, seed=seed)
             source = f"preset:{preset}"
 
         if matrix == "embedding":
-            arr = _unit_rows(arr, f"edit {n} (embedding)")
+            # Already unit-norm when it came straight from the checkpoint; re-normalizing
+            # in float32 is what introduced the drift.
+            if source != "preset:learned":
+                arr = _unit_rows(arr, f"edit {n} (embedding)")
             ws["embedding"] = arr
         else:
             ws[f"layers.{int(layer)}.{matrix}"] = arr

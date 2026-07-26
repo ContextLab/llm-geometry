@@ -206,7 +206,7 @@
       <span class="mono">{matrix}{isEmbedding ? "" : ` · layer ${layer}`} · {data.shape.join("×")}</span>
       <span class="badge src">{data.source}</span>
       {#if !isEmbedding}<span class="hint">click a cell to edit its value</span>
-      {:else}<span class="hint">read-only · scroll through all 1003 tokens (rows x/y/z)</span>{/if}
+      {:else}<span class="hint">cells are read-only (1003 rows) — use a preset above to change it (rows x/y/z)</span>{/if}
     </div>
     {#if isEmbedding}
       <div class="ribbon">

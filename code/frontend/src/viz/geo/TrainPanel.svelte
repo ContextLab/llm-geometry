@@ -276,8 +276,8 @@
   <div class="io">
     <span class="hint">Models live in this browser session — save one to keep it.</span>
     <div class="io-row">
-      <button data-testid="geo-save-model" onclick={() => void saveModel()}>⭳ Save model</button>
-      <button data-testid="geo-load-model" onclick={() => fileInput?.click()}>⭱ Load model</button>
+      <button data-testid="geo-save-model" onclick={() => void saveModel()}>↓ Save model</button>
+      <button data-testid="geo-load-model" onclick={() => fileInput?.click()}>↑ Load model</button>
       <input
         bind:this={fileInput}
         type="file"

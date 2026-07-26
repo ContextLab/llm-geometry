@@ -14,11 +14,18 @@
  *   softmax; top-5 alternatives under the plain softmax), just from the
  *   quantized weights. `seed` is NOT honored (transformers.js has no seeded
  *   sampler); callers receive real samples, never fake determinism.
+ * - The ONNX repo resolves at `main`, and this is the one thing here that is NOT
+ *   pinned. The pinned revision we hold belongs to the ORIGINAL model repo (it is
+ *   what the tokenizer and the safetensors range reads use); the community ONNX
+ *   mirror is a DIFFERENT repository with its own commit history, so that SHA simply
+ *   404s against it — measured, not assumed. Recording each mirror's own SHA is
+ *   tracked in issue #5.
  */
 
 import {
   AutoTokenizer,
   Tensor,
+  env,
   pipeline,
   type PreTrainedTokenizer,
   type TextGenerationPipeline,
@@ -37,6 +44,15 @@ const TOPK = 5;
 const TOP_P = 0.9;
 const TOP_K = 50;
 const REPETITION_PENALTY = 1.1;
+
+// Serve the ONNX runtime's WASM from OUR origin. transformers.js defaults this to a
+// cdn.jsdelivr.net URL for a pinned PRERELEASE build, which made the deployed site's
+// headline feature depend on a third party staying up and keeping that version
+// published. vite.config.ts copies the byte-identical files out of the installed
+// onnxruntime-web into <base>ort/.
+if (env.backends?.onnx?.wasm) {
+  env.backends.onnx.wasm.wasmPaths = `${import.meta.env.BASE_URL}ort/`;
+}
 
 let generationInfo: RuntimeGenerationInfo = { ...IDLE_GENERATION_INFO };
 
@@ -171,7 +187,6 @@ function topkByLogits(logits: Float32Array, k: number): number[] {
 async function generateImpl(
   body: ArchGenerateBody,
   onnxRepo: string,
-  _revision: string,
 ): Promise<ArchGenerateResult> {
   const prompt = (body.prompt ?? "").trim();
   if (!prompt) throw invalidParamError("prompt must be a non-empty string");

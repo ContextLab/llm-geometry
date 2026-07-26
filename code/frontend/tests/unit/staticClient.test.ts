@@ -161,8 +161,8 @@ describe("live runtime seam (no model downloads)", () => {
       calls.push(["tokenize", modelId, revision, text]);
       return { model_id: modelId, tokens: [{ token: 1, token_str: "x" }] };
     },
-    generate: async (body, onnxRepo, revision): Promise<ArchGenerateResult> => {
-      calls.push(["generate", body.model_id, onnxRepo, revision]);
+    generate: async (body, onnxRepo): Promise<ArchGenerateResult> => {
+      calls.push(["generate", body.model_id, onnxRepo]);
       return {
         text: "hi",
         tokens: [{ id: 1, text: "hi", prob: 0.5, topk: { ids: [1], texts: ["hi"], probs: [0.5] } }],
@@ -188,7 +188,9 @@ describe("live runtime seam (no model downloads)", () => {
     const c = makeClient(fakeRuntime(calls));
     const r = await c.archGenerate({ model_id: "gpt2", prompt: "hello" });
     expect(r.finish_reason).toBe("length");
-    expect(calls[0]).toEqual(["generate", "gpt2", "onnx-community/gpt2-ONNX", expect.any(String)]);
+    // No revision: the ONNX mirror is a different repo from the pinned model, so the
+    // model's SHA cannot pin it (it 404s). See transformersRuntime's header + issue #5.
+    expect(calls[0]).toEqual(["generate", "gpt2", "onnx-community/gpt2-ONNX"]);
     expect(c.staticRuntimeInfo().generation.status).toBe("ready");
     await expect(c.archGenerate({ model_id: "nope/nope", prompt: "hello" })).rejects.toMatchObject({
       type: "StaticModeError",

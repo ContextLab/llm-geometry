@@ -146,7 +146,11 @@
     hideTip();
     editor = { row: hit.row, col: hit.col };
     editorText = formatValue(grid[hit.row][hit.col]);
+    editorSeed = editorText;
   }
+
+  /** What onClick seeded the editor with — an unchanged value must not be written. */
+  let editorSeed = "";
 
   function commitEdit() {
     if (!editor) return;
@@ -156,6 +160,14 @@
     // runtime despite the string typing.)
     const text = String(editorText ?? "").trim();
     if (text === "") {
+      editor = null;
+      return;
+    }
+    // Opening a cell and clicking away without typing must be a no-op. It used to
+    // commit the SEEDED display string, which formatValue() has already rounded to 6
+    // significant digits — so merely looking at a weight silently rewrote it (lossily)
+    // and flagged the whole model "hand-edited".
+    if (text === editorSeed) {
       editor = null;
       return;
     }

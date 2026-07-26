@@ -111,6 +111,9 @@
     }
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(w, HEIGHT);
+    camera.aspect = w / HEIGHT;
+    camera.updateProjectionMatrix();
+    fitCamera();
     // If the browser reclaims our context anyway (limit pressure), surface the
     // designed error instead of a silently blank canvas.
     renderer.domElement.addEventListener("webglcontextlost", (e) => {
@@ -162,8 +165,10 @@
     head = new THREE.InstancedMesh(headGeom.clone(), arrowMat.clone(), MAX_ARROWS);
     // Depth-tested (NOT depthTest:false): these arrows are anchored on the sphere, so
     // the ones on the far side must be hidden by it or the whole thing stops reading as
-    // a surface. They stay tangent at their anchor (the backend projects them there),
-    // which keeps them outside the r=0.985 shell and therefore visible on the near side.
+    // a surface. They are tangent AT THEIR ANCHOR — the backend projects onto the
+    // tangent plane at the prompt token's embedding, which is the very point used
+    // below as the arrow origin — so they never dip inside the r=0.985 shell and stay
+    // visible on the near side.
     const forceMat = new THREE.MeshBasicMaterial({ color: COL_FORCE, transparent: true, opacity: 0.98, toneMapped: false });
     fShaft = new THREE.InstancedMesh(shaftGeom.clone(), forceMat, MAX_FORCES);
     fHead = new THREE.InstancedMesh(headGeom.clone(), forceMat.clone(), MAX_FORCES);
@@ -218,6 +223,7 @@
       renderer.setSize(cw, HEIGHT);
       camera.aspect = cw / HEIGHT;
       camera.updateProjectionMatrix();
+      fitCamera();
       const mat = points?.material as THREE.ShaderMaterial | undefined;
       if (mat?.uniforms?.uScale) mat.uniforms.uScale.value = pointScale();
     });
@@ -226,6 +232,21 @@
 
   function easeOut(x: number): number {
     return 1 - (1 - x) * (1 - x);
+  }
+
+  /**
+   * Pull the camera back far enough that the whole r=1 sphere fits the NARROWER field
+   * of view. At 390 px the aspect drops to ~0.65, where the horizontal half-extent is
+   * 0.75 < 1 and the sphere was cropped at both edges with no way back except manually
+   * zooming out.
+   */
+  function fitCamera(): void {
+    if (!camera) return;
+    const fovY = (camera.fov * Math.PI) / 180;
+    const fovX = 2 * Math.atan(Math.tan(fovY / 2) * camera.aspect);
+    const needed = 1.25 / Math.sin(Math.max(1e-3, Math.min(fovY, fovX)) / 2);
+    const dist = camera.position.length() || 1;
+    if (dist < needed) camera.position.multiplyScalar(needed / dist);
   }
 
   function pointScale(): number {

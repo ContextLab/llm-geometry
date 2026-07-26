@@ -15,6 +15,7 @@ UI would then be quietly wrong.
 from __future__ import annotations
 
 import base64
+import hashlib
 from typing import Any
 
 import numpy as np
@@ -27,7 +28,7 @@ from .train import resolve_weight_set
 from .weights import load_weight_set_vocab, save_weight_set, weights_token
 
 BUNDLE_FORMAT = "llm-geometry/geo-model"
-BUNDLE_VERSION = 1
+BUNDLE_VERSION = 2  # v1 had no vocabulary integrity check (see import_bundle)
 
 _EXPECTED_CONFIG = {
     "d_model": D_MODEL,
@@ -37,6 +38,16 @@ _EXPECTED_CONFIG = {
     "vocab_size": VOCAB_SIZE,
     "context_window": CONTEXT_WINDOW,
 }
+
+
+def vocab_digest(vocab_json: str) -> str:
+    """SHA-256 of the vocabulary JSON.
+
+    The weights hash cannot cover the vocabulary, so without this a file could carry
+    intact weights and a FABRICATED word list and load cleanly — every label in the UI
+    would then be confidently wrong, which is exactly what this module exists to stop.
+    """
+    return hashlib.sha256(vocab_json.encode("utf-8")).hexdigest()
 
 
 def _b64(arr: np.ndarray) -> str:
@@ -71,6 +82,7 @@ def export_bundle(token: str, store: CacheStore | None = None) -> dict[str, Any]
         "weights_token": real_token,
         "config": dict(_EXPECTED_CONFIG),
         "vocab": vocab_json,
+        "vocab_sha256": vocab_digest(vocab_json),
         "weights": {
             name: {"shape": list(np.asarray(arr).shape), "data": _b64(arr)}
             for name, arr in sorted(ws.items())
@@ -90,7 +102,8 @@ def import_bundle(bundle: Any, store: CacheStore | None = None) -> dict[str, Any
     if bundle.get("version") != BUNDLE_VERSION:
         raise InvalidParamError(
             f"model file version {bundle.get('version')!r} is not supported "
-            f"(this build reads version {BUNDLE_VERSION})"
+            f"(this build reads version {BUNDLE_VERSION}). Version 1 files carried no "
+            "vocabulary integrity check; re-export the model to get a v2 file."
         )
 
     config = bundle.get("config")
@@ -118,9 +131,16 @@ def import_bundle(bundle: Any, store: CacheStore | None = None) -> dict[str, Any
         except Exception as exc:
             raise InvalidParamError(f"weight {name!r} could not be decoded: {exc}")
 
+    # Integrity is MANDATORY, not opt-in. Treating a missing `weights_token` as "nothing
+    # to check" let a file with tampered weights load silently just by deleting a field.
     declared = bundle.get("weights_token")
+    if not isinstance(declared, str) or not declared:
+        raise InvalidParamError(
+            "model file has no `weights_token`, so its contents cannot be verified — "
+            "refusing to load it. Re-export the model to get a valid file."
+        )
     actual = weights_token(ws)
-    if declared is not None and declared != actual:
+    if declared != actual:
         raise InvalidParamError(
             "this model file is corrupt: its weights hash to "
             f"{actual} but it declares {declared}. Loading it would pair the wrong "
@@ -130,6 +150,22 @@ def import_bundle(bundle: Any, store: CacheStore | None = None) -> dict[str, Any
     vocab_json = bundle.get("vocab")
     if not isinstance(vocab_json, str):
         raise InvalidParamError("model file is missing its `vocab` block")
+    # The weights hash says nothing about the vocabulary, so the vocabulary carries its
+    # own digest. Without it a file with genuine weights and an invented word list
+    # loaded cleanly and mislabelled every token on screen.
+    declared_vocab = bundle.get("vocab_sha256")
+    if not isinstance(declared_vocab, str) or not declared_vocab:
+        raise InvalidParamError(
+            "model file has no `vocab_sha256`, so its vocabulary cannot be verified — "
+            "refusing to load it. Re-export the model to get a valid file."
+        )
+    actual_vocab = vocab_digest(vocab_json)
+    if declared_vocab != actual_vocab:
+        raise InvalidParamError(
+            "this model file is corrupt: its vocabulary hashes to "
+            f"{actual_vocab[:16]}… but it declares {declared_vocab[:16]}…. Loading it "
+            "would label every token with the wrong word, so it is refused."
+        )
     tokenizer = GeoTokenizer.from_json(vocab_json)  # raises on a malformed vocabulary
 
     token = save_weight_set(ws, source="imported", store=store, vocab_json=vocab_json)
