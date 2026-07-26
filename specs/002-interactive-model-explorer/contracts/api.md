@@ -95,8 +95,16 @@ Idempotent, single-flight. ← `{ "seed": 0 }` (optional; default 0)
   prediction (per 001 conventions); `"full"` = final layer.
 - `force`: per-point field `W_V·z` for the selected layer (`antisymmetrize=true` uses
   `(W_V−W_Vᵀ)/2`; exactly tangent), plus per-sequence-position aggregate forces
-  `Σ_{j≤i} softmax(⟨K z_j, Q z_i⟩)·V z_j` with their normal residual magnitudes.
+  `Σ_{j≤i} softmax(⟨K z_j, Q z_i⟩)·V z_j`.
   `layer="full"` ⇒ `400` (force mode is per-layer by definition).
+- **`sequence_forces[].vec` is the aggregate force projected onto the tangent plane at
+  its anchor point `z_i`**, and `normal_residual` is the magnitude of the radial
+  component that projection removed (amended 2026-07-26, feature 004). Before the
+  amendment `vec` carried the unprojected sum, which rendered as arrows visibly leaving
+  the sphere they are anchored to. Note that `antisymmetrize` does not fix this: each
+  term `W_V z_j` is tangent at `z_j`, not at the `z_i` where the sum is drawn. The
+  projection is a display choice and `normal_residual` is what keeps it honest — a
+  client MUST surface it rather than presenting `vec` as the whole force.
 
 ### GET /api/geo/weights
 

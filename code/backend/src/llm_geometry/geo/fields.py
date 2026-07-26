@@ -13,11 +13,18 @@ only the argmax arrow (the only one with positive weight) is emitted regardless 
 the chosen layer (``antisymmetrize=true`` uses ``(W_V−W_Vᵀ)/2``, whose field is
 *exactly* tangent to the sphere: ⟨Az, z⟩ = 0 for antisymmetric A), plus per-sequence-
 position aggregate forces ``Σ_{j≤i} softmax(⟨K z_j, Q z_i⟩)·V z_j`` — literally the
-model's ``attention @ v`` rows — with their normal residual magnitudes
-``|⟨f_i, ẑ_i⟩|`` (ẑ_i = unit vector of the layer's input hidden state at position i).
+model's ``attention @ v`` rows.
+
+Those aggregate forces are **projected onto the tangent plane at their anchor point**
+``z_i`` before being returned, and the magnitude of the removed radial component is
+reported as ``normal_residual``. This matters: the arrow is drawn anchored at ``z_i``
+on the sphere, and antisymmetrizing ``W_V`` does NOT make the sum tangent there —
+each term ``W_V z_j`` is tangent at ``z_j``, not at ``z_i``. Projecting is a display
+choice, and ``normal_residual`` is how the UI stays honest about what it hides.
+
 The antisymmetrize toggle applies to the per-point field only; the aggregate forces
-always use the real W_V (that is what the normal residual measures). ``layer="full"``
-is invalid for force mode (it is per-layer by definition).
+always use the real W_V. ``layer="full"`` is invalid for force mode (it is per-layer
+by definition).
 
 Also home to the spherical-binning helpers shared with the training gate metrics
 (Fibonacci-lattice bins; directional entropy; coverage uniformity).
@@ -136,18 +143,31 @@ def force_field(
         run = model._run(ids, need_trace=True)
         tr = run["trace"][layer_idx]
         attn = tr["attention"][0]  # (T, T) row-stochastic, causal
-        v_proj = tr["v"][0]  # (T, 3) — the real W_V z_j (never antisymmetrized here)
+        v_proj = tr["v"][0]  # (T, 3) — the real W_V z_j
         z = tr["hidden_in"][0]  # (T, 3)
         forces = (attn @ v_proj).cpu().numpy().astype(np.float32)  # Σ_{j≤i} A_ij V z_j
         z_np = z.cpu().numpy().astype(np.float32)
         z_norms = np.linalg.norm(z_np, axis=1)
         for i in range(forces.shape[0]):
+            # The aggregate force is drawn as an arrow anchored AT z_i, so it must lie in
+            # the tangent plane there or it visibly leaves the sphere. Antisymmetrizing
+            # W_V is not sufficient: each term W_V z_j is tangent at z_j, not at the z_i
+            # where the sum is anchored. So project onto the tangent plane at z_i and
+            # report the magnitude of what was removed — the radial component is real,
+            # and `normal_residual` is how the UI stays honest about hiding it.
             if z_norms[i] > 1e-12:
-                normal = abs(float(forces[i] @ (z_np[i] / z_norms[i])))
+                n_hat = z_np[i] / z_norms[i]
+                radial = float(forces[i] @ n_hat)
+                tangential = forces[i] - radial * n_hat
             else:
-                normal = 0.0
+                radial = 0.0
+                tangential = forces[i]
             sequence_forces.append(
-                {"position": i, "vec": forces[i].tolist(), "normal_residual": normal}
+                {
+                    "position": i,
+                    "vec": tangential.tolist(),
+                    "normal_residual": abs(radial),
+                }
             )
 
     return {

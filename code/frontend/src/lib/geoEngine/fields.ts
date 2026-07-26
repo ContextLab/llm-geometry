@@ -276,6 +276,11 @@ export function forceField(
   }
 
   // Per-sequence-position aggregate forces (always the REAL W_V, never antisymmetrized).
+  //
+  // Mirrors geo/fields.py: the sum is anchored AT z_i, so it is projected onto the
+  // tangent plane there before display and the removed radial magnitude is reported as
+  // normal_residual. Antisymmetrizing W_V would not help — each term W_V z_j is tangent
+  // at z_j, not at z_i.
   const sequenceForces: SequenceForce[] = [];
   const prompt = clipPrompt(promptIds.map((t) => Math.trunc(t)), 0);
   if (prompt.length > 0) {
@@ -292,9 +297,17 @@ export function forceField(
       const z1 = tr.hiddenIn[i * 3 + 1];
       const z2 = tr.hiddenIn[i * 3 + 2];
       const zNorm = Math.hypot(z0, z1, z2);
-      const normal =
-        zNorm > 1e-12 ? Math.abs((force[0] * z0 + force[1] * z1 + force[2] * z2) / zNorm) : 0;
-      sequenceForces.push({ position: i, vec: force, normal_residual: normal });
+      let radial = 0;
+      if (zNorm > 1e-12) {
+        const n0 = z0 / zNorm;
+        const n1 = z1 / zNorm;
+        const n2 = z2 / zNorm;
+        radial = force[0] * n0 + force[1] * n1 + force[2] * n2;
+        force[0] -= radial * n0;
+        force[1] -= radial * n1;
+        force[2] -= radial * n2;
+      }
+      sequenceForces.push({ position: i, vec: force, normal_residual: Math.abs(radial) });
     }
   }
 
