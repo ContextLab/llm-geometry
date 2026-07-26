@@ -110,9 +110,7 @@ def test_bundle_roundtrip_preserves_the_model_exactly(tmp_path, corpus: str) -> 
     assert imported["vocab_size"] == VOCAB_SIZE
 
     # And the vocabulary came with it: the reloaded model reads ids the same way.
-    assert (
-        tokenizer_for(token, store=fresh).words == tokenizer_for(token, store=store).words
-    )
+    assert tokenizer_for(token, store=fresh).words == tokenizer_for(token, store=store).words
 
 
 def test_corrupt_bundle_is_refused_not_silently_loaded(tmp_path, corpus: str) -> None:

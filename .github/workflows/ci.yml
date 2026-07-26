@@ -55,7 +55,7 @@ jobs:
       - name: Lint (ruff + black)
         run: |
           ruff check src/ tests/
-          black --check src/
+          black --check src/ tests/
       - name: Tests (real models, no mocks)
         run: python -m pytest -q
 

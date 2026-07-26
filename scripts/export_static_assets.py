@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -349,7 +350,9 @@ def _safetensors_meta(model_id: str, revision: str) -> dict[str, Any]:
     """Verify + record how the raw weights are served on the HF CDN (pinned revision)."""
     from huggingface_hub import list_repo_files
 
-    files = list_repo_files(model_id, revision=revision)
+    from llm_geometry.models.hub import hub_call
+
+    files = hub_call(list_repo_files, model_id, revision=revision)
     base = f"https://huggingface.co/{model_id}/resolve/{revision}"
     meta: dict[str, Any] = {"model_id": model_id, "revision": revision}
     if "model.safetensors" in files:
@@ -378,6 +381,15 @@ def export_arch_model(
 
     ref = resolve_model(model_id)
     revision = ref["revision"]
+    # resolve_model degrades to "main" when the hub is unreachable. That is fine for a
+    # live explorer but not for a deployed artifact: the range-read URLs baked into
+    # meta.json would drift the next time the repo is updated. Fail instead.
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise SystemExit(
+            f"{model_id}: revision did not resolve to a commit sha (got {revision!r}). "
+            "The HuggingFace API is probably rate-limiting or down — rerun the export "
+            "rather than publishing unpinned weight URLs."
+        )
     write_json(mdir / "meta.json", _safetensors_meta(model_id, revision))
 
     # Weight-overview tiles: the exact grid GET /api/arch/weights serves for the FULL

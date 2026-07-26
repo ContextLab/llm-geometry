@@ -15,7 +15,9 @@ MODEL = "sshleifer/tiny-gpt2"
 
 def test_roundtrip_and_delete_rebuild_identical(tmp_path):
     store = CacheStore(tmp_path)
-    key, spec = make_cache_key(model_id="m", revision="r", artifact_type="embeddings", params={"a": 1})
+    key, spec = make_cache_key(
+        model_id="m", revision="r", artifact_type="embeddings", params={"a": 1}
+    )
     arrays = {"v": np.arange(12, dtype=np.float32).reshape(3, 4)}
     store.put(key, spec, {"shape": [3, 4]}, arrays)
     got = store.get(key)

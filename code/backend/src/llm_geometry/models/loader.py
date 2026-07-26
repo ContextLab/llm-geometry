@@ -26,6 +26,7 @@ from huggingface_hub import model_info
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from ..errors import UnsupportedModelError
+from .hub import hub_call
 from .registry import curated_ids, display_name, normalize_model_id
 
 _CAUSAL_SUFFIXES = ("LMHeadModel", "ForCausalLM")
@@ -60,9 +61,14 @@ def _capabilities_from_config(config: Any) -> dict[str, Any]:
 
 
 def _resolve_revision(model_id: str) -> str:
-    """Best-effort pin of the model's commit sha for reproducibility (FR-013)."""
+    """Best-effort pin of the model's commit sha for reproducibility (FR-013).
+
+    Rate limits are retried (a 429 must not silently unpin the revision); a sustained
+    failure still degrades to "main" so the explorer keeps working offline, and callers
+    that need a real pin — the static export — check for one explicitly.
+    """
     try:
-        return model_info(model_id).sha or "main"
+        return hub_call(model_info, model_id).sha or "main"
     except Exception:
         return "main"
 

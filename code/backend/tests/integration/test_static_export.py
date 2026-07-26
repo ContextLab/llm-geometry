@@ -124,8 +124,7 @@ def test_golden_schema(export_dir: Path) -> None:
     all_params = [f["params"] for c in cases for f in c["fields"]]
     assert any(p["mode"] == "next_next" and p["layer"] == "full" for p in all_params)
     assert any(
-        p["mode"] == "next_next" and p["temperature"] > 0 and p["top_m"] > 1
-        for p in all_params
+        p["mode"] == "next_next" and p["temperature"] > 0 and p["top_m"] > 1 for p in all_params
     )
     assert any(p["mode"] == "force" and p["antisymmetrize"] for p in all_params)
     assert any(p["mode"] == "force" and not p["antisymmetrize"] for p in all_params)
@@ -161,9 +160,7 @@ def test_golden_schema(export_dir: Path) -> None:
 def test_checkpoint_complete_and_exact(export_dir: Path) -> None:
     ckpt = _load(export_dir / "geo" / "checkpoint.json")
     state_names = set(GeoTransformer().state_dict().keys())
-    assert (
-        set(ckpt["weights"].keys()) == state_names
-    ), "checkpoint must cover state_dict fully"
+    assert set(ckpt["weights"].keys()) == state_names, "checkpoint must cover state_dict fully"
     assert set(ckpt["shapes"].keys()) == state_names
     canonical = load_canonical_weight_set()
     for name, arr in canonical.items():

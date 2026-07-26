@@ -17,6 +17,7 @@ from transformers import AutoConfig
 
 from ..config import ARCH_MAX_PARAMS
 from ..errors import ModelTooLargeError, UnsupportedModelError
+from ..models.hub import hub_call
 from ..models.registry import normalize_model_id
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,7 @@ def check_model_size(model_id: str) -> dict[str, Any]:
     total: int | None = None
     source = ""
     try:
-        meta = get_safetensors_metadata(mid)
+        meta = hub_call(get_safetensors_metadata, mid)
         counts = getattr(meta, "parameter_count", None) or {}
         if counts:
             total = int(sum(counts.values()))
