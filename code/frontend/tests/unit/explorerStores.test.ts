@@ -18,7 +18,8 @@ describe("explorerStores", () => {
 
   it("has the contract defaults", async () => {
     const s = await freshStores();
-    expect(get(s.archModelId)).toBe("HuggingFaceTB/SmolLM2-135M-Instruct");
+    // 004: the 135M default could not produce usable replies at any sampling setting.
+    expect(get(s.archModelId)).toBe("Qwen/Qwen2.5-0.5B-Instruct");
     expect(get(s.archSystemPrompt)).toBe("");
     expect(get(s.archTemperature)).toBe(0.8);
     expect(get(s.archMaxNewTokens)).toBe(64);

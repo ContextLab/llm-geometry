@@ -323,7 +323,7 @@
       </p>
       <div class="divider"></div>
       <span class="group-label">Chat</span>
-      <ArchChat />
+      <ArchChat chatTemplate={trace ? trace.chat_template_used : null} />
     </div>
 
     <div class="stagecol">
@@ -341,6 +341,7 @@
               nodes={graph.nodes}
               edges={graph.edges}
               selected={diagramSelected}
+              focus={highlightId}
               onSelect={(id) => archSelectedNode.set(id)}
             />
           </div>

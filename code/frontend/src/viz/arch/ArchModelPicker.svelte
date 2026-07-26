@@ -4,20 +4,25 @@
   import { archModelId } from "../../lib/explorerStores";
   import { client, type ModelReference } from "../../lib/dataClient";
   import { plainError } from "./archShared";
-  import StaticNotice from "../../lib/StaticNotice.svelte";
   import { STATIC_MODE } from "../../lib/staticUx";
 
-  // Candidate models are resolved (existence + capability check) BEFORE the store
-  // updates, so a rejected pick leaves the active model untouched (FR-107). Size
-  // gating (ModelTooLargeError) happens server-side at graph time — the parent
-  // reverts the store and surfaces that message here via `externalError`.
+  const ISSUE_URL = "https://github.com/ContextLab/llm-geometry/issues/4";
+
+  // Curated menu ONLY (feature 004, FR-412). The old free-text "any open-weights HF
+  // id" box promised something the deployed demo cannot keep: the static build needs a
+  // community ONNX export, which most HF repos do not have. Growing the list — or
+  // filtering the Hub for repos that genuinely load — is tracked in issue #4.
+  //
+  // Picks are still resolved (existence + capability) BEFORE the store updates, so a
+  // rejected model leaves the active one untouched (FR-107). Size gating
+  // (ModelTooLargeError) happens server-side at graph time — the parent reverts the
+  // store and surfaces that message here via `externalError`.
   interface Props {
     externalError?: string;
   }
   let { externalError = "" }: Props = $props();
 
   let models = $state<ModelReference[]>([]);
-  let custom = $state("");
   let status = $state<"idle" | "checking" | "ok" | "error">("idle");
   let message = $state("");
 
@@ -27,7 +32,7 @@
   // STATIC build: the list IS the complete catalog (only precomputed models can be
   // explored), so don't offer the backend default when this build doesn't carry it —
   // only the transiently-active id until the boot steer lands.
-  const DEFAULT_MODEL_ID = "HuggingFaceTB/SmolLM2-135M-Instruct"; // archModelId's initial value (explorerStores.ts)
+  const DEFAULT_MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"; // archModelId's initial value (explorerStores.ts)
   const extraOptions = $derived(
     (STATIC_MODE ? [$archModelId] : [DEFAULT_MODEL_ID, $archModelId]).filter(
       (id, i, arr) => arr.indexOf(id) === i && !models.some((m) => m.model_id === id),
@@ -38,7 +43,8 @@
     try {
       models = (await client.listModels()).models;
     } catch {
-      // listing is best-effort; the free-text HF-id path still works
+      // Listing failed: the dropdown still offers the default + active id via
+      // extraOptions, and the graph loader surfaces the real error.
     }
   });
 
@@ -102,26 +108,12 @@
       <option value={id}>{id}</option>
     {/each}
   </select>
-  {#if STATIC_MODE}
-    <!-- FR-203: arbitrary HF ids need the backend — a designed affordance replaces the
-         free input instead of letting every typed id fail. -->
-    <StaticNotice
-      compact
-      testid="arch-model-static-note"
-      message="Free-form HF model ids aren't available in the static demo — the models above ship with precomputed graphs, traces, and weight tiles."
-    />
-  {:else}
-    <div class="custom">
-      <input
-        type="text"
-        placeholder="…or any open-weights HF id"
-        bind:value={custom}
-        onkeydown={(e) => e.key === "Enter" && void pick(custom)}
-        data-testid="arch-model-custom"
-      />
-      <button onclick={() => void pick(custom)}>Load</button>
-    </div>
-  {/if}
+  <p class="curated">
+    A curated set of small open-weights models. {#if STATIC_MODE}They run in your browser
+    via their community ONNX exports;{:else}Each is traced live by the backend;{/if}
+    <a href={ISSUE_URL} target="_blank" rel="noopener noreferrer">issue #4</a> tracks
+    widening the list.
+  </p>
   {#if status === "checking"}
     <div class="msg">{message}</div>
   {:else if status === "error"}
@@ -134,13 +126,14 @@
 </div>
 
 <style>
-  .custom {
-    display: flex;
-    gap: 0.5rem;
+  .curated {
+    margin: 0;
+    font-size: 0.72rem;
+    line-height: 1.45;
+    color: var(--text-dim);
   }
-  .custom input {
-    flex: 1;
-    min-width: 0;
+  .curated a {
+    color: var(--accent);
   }
   .msg {
     font-size: 0.76rem;

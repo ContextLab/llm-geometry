@@ -51,6 +51,10 @@
   let engaged = $state(false); // no highlight until the user plays or scrubs
   let layerSel = $state(0);
   let headSel = $state(0);
+  // The playhead used to overwrite layerSel unconditionally, so choosing a layer while
+  // the trace played was impossible — it snapped back on the next op. Auto-follow is now
+  // an explicit mode that touching the layer control turns off.
+  let followLayer = $state(true);
   let raf = 0;
   let lastTs = 0;
   let acc = 0;
@@ -100,12 +104,18 @@
   const current = $derived(engaged ? order[idx] : undefined);
   const currentNode = $derived(current ? nodeById.get(current.node_id) : undefined);
 
-  // Report the active node up (diagram highlight) + auto-follow its layer.
+  // Report the active node up (diagram highlight) + follow its layer when asked to.
   $effect(() => {
     onHighlight?.(current ? current.node_id : null);
     const l = currentNode?.layer;
-    if (current && l !== null && l !== undefined) layerSel = l;
+    if (followLayer && current && l !== null && l !== undefined) layerSel = l;
   });
+
+  /** Any manual layer change means "I want this layer" — stop following the playhead. */
+  function pickLayer(v: number): void {
+    followLayer = false;
+    layerSel = v;
+  }
 
   function togglePlay(): void {
     if (order.length === 0) return;
@@ -253,25 +263,45 @@
               type="range"
               min="0"
               max={trace.layers.length - 1}
-              bind:value={layerSel}
+              value={layerSel}
+              oninput={(e) => pickLayer(Number(e.currentTarget.value))}
               aria-label="detail layer"
             />
           </label>
-          <label class="head">
-            <span class="dlabel">head</span>
-            <select bind:value={headSel} aria-label="attention head">
-              {#each { length: heads } as _, h (h)}
-                <option value={h}>{h}</option>
-              {/each}
-            </select>
+          <label class="follow" title="while the trace plays, jump the detail to whichever layer the current op belongs to">
+            <input
+              type="checkbox"
+              data-testid="arch-follow-layer"
+              checked={followLayer}
+              onchange={(e) => (followLayer = e.currentTarget.checked)}
+            />
+            <span class="dlabel">follow playhead</span>
           </label>
         </div>
         <div class="detail-grid">
           <div class="cell">
             <span class="cell-label">
-              attention · layer {layerSel} · head {Math.min(headSel, heads - 1)}
+              attention · layer {layerSel} · all {heads} head{heads === 1 ? "" : "s"}
               {#if layer.attention_downsampled}· downsampled{/if}
             </span>
+            <!-- Every head of the layer at once: comparing heads was impossible when
+                 only one could be shown at a time. Click a tile to enlarge it below. -->
+            <div class="heads" data-testid="arch-head-grid">
+              {#each layer.attention as m, h (h)}
+                <button
+                  class="headtile"
+                  class:sel={h === Math.min(headSel, heads - 1)}
+                  data-testid={`arch-head-tile-${h}`}
+                  aria-label={`attention head ${h} of layer ${layerSel}`}
+                  aria-pressed={h === Math.min(headSel, heads - 1)}
+                  onclick={() => (headSel = h)}
+                >
+                  <MatrixHeatmap values={m} maxCanvasPx={74} />
+                  <span class="headnum">{h}</span>
+                </button>
+              {/each}
+            </div>
+            <span class="cell-label">head {Math.min(headSel, heads - 1)} · rows attend to columns</span>
             {#if attn}
               <MatrixHeatmap values={attn} rowLabels={attnLabels} colLabels={attnLabels} maxCanvasPx={252} />
             {/if}
@@ -516,16 +546,53 @@
     gap: 0.25rem;
     max-width: 340px;
   }
-  .head {
+  .follow {
     display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
+    align-items: center;
+    gap: 0.35rem;
+    cursor: pointer;
+    padding-bottom: 0.15rem;
   }
-  .head select {
+  .follow input {
     width: auto;
-    padding: 0.3rem 0.5rem;
-    font-size: 0.78rem;
+    margin: 0;
+    accent-color: var(--accent);
+  }
+  .heads {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    max-height: 13rem;
+    overflow-y: auto;
+  }
+  .headtile {
+    position: relative;
+    display: block;
+    padding: 2px;
+    background: var(--bg-elev-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    line-height: 0;
+    cursor: pointer;
+  }
+  .headtile:hover {
+    border-color: var(--accent);
+  }
+  .headtile.sel {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+  .headnum {
+    position: absolute;
+    bottom: 2px;
+    right: 3px;
     font-family: var(--mono);
+    font-size: 0.58rem;
+    line-height: 1;
+    color: var(--text);
+    background: rgba(11, 14, 20, 0.72);
+    border-radius: 3px;
+    padding: 0 2px;
   }
   .dlabel {
     font-size: 0.74rem;
@@ -537,7 +604,9 @@
   }
   .detail-grid {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
+    /* Bounded on BOTH sides: with `auto` the all-heads grid grew until the residual /
+       top-10 column was a few characters wide and unreadable. */
+    grid-template-columns: minmax(0, 1fr) minmax(15rem, 21rem);
     gap: 1.1rem;
     align-items: start;
   }

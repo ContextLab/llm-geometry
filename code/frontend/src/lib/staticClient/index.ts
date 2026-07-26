@@ -54,8 +54,9 @@ export type { StaticRuntimeInfo } from "./runtimeTypes";
 /** Friendly names for the curated static models (labels only, not data). */
 const DISPLAY_NAMES: Record<string, string> = {
   "Qwen/Qwen2.5-0.5B-Instruct": "Qwen2.5 0.5B Instruct (default)",
-  gpt2: "GPT-2 (124M)",
-  "HuggingFaceTB/SmolLM2-135M-Instruct": "SmolLM2 135M Instruct",
+  gpt2: "GPT-2 124M (base — completes text)",
+  "HuggingFaceTB/SmolLM2-360M-Instruct": "SmolLM2 360M Instruct",
+  "HuggingFaceTB/SmolLM2-135M-Instruct": "SmolLM2 135M Instruct (smallest)",
 };
 
 export interface StaticClientOptions {

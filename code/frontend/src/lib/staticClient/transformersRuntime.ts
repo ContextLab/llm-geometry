@@ -31,6 +31,13 @@ import { IDLE_GENERATION_INFO, type ArchRuntime, type RuntimeGenerationInfo } fr
 const MAX_NEW_TOKENS_LIMIT = 128; // ARCH_MAX_NEW_TOKENS (backend config)
 const TOPK = 5;
 
+// Decoding constraints — MIRROR of llm_geometry/config.py (ARCH_TOP_P / ARCH_TOP_K /
+// ARCH_REPETITION_PENALTY). Keep the two in sync: the whole point is that the static
+// build and the full stack sample identically.
+const TOP_P = 0.9;
+const TOP_K = 50;
+const REPETITION_PENALTY = 1.1;
+
 let generationInfo: RuntimeGenerationInfo = { ...IDLE_GENERATION_INFO };
 
 const tokenizerCache = new Map<string, Promise<PreTrainedTokenizer>>();
@@ -187,7 +194,13 @@ async function generateImpl(
   );
 
   // Real autoregressive decode. temperature==0 → greedy; otherwise sample the
-  // full temperature softmax (top_k/top_p disabled to mirror the backend).
+  // temperature softmax restricted to the top-k ∩ top-p nucleus, with a repetition
+  // penalty. These MUST match llm_geometry.config's ARCH_TOP_P/ARCH_TOP_K/
+  // ARCH_REPETITION_PENALTY so the static build and the full stack decode the same
+  // way. (Sampling the full vocabulary — the previous top_k:0, top_p:1.0 — draws from
+  // the long tail every step, which is what made small models produce word salad.)
+  // Only the draw is filtered; every probability reported below still comes from the
+  // unfiltered distribution, exactly as the backend does it.
   const generated = (await (
     model as unknown as {
       generate(o: Record<string, unknown>): Promise<Tensor>;
@@ -197,7 +210,8 @@ async function generateImpl(
     attention_mask: attention,
     max_new_tokens: maxNew,
     do_sample: temperature > 0,
-    ...(temperature > 0 ? { temperature, top_k: 0, top_p: 1.0 } : {}),
+    repetition_penalty: REPETITION_PENALTY,
+    ...(temperature > 0 ? { temperature, top_k: TOP_K, top_p: TOP_P } : {}),
   })) as Tensor;
   const fullIds = tensorIds(generated);
   const newIds = fullIds.slice(promptIds.length);

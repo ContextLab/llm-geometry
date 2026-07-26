@@ -13,10 +13,58 @@ from typing import Any
 
 import torch
 
-from ..config import ARCH_MAX_NEW_TOKENS
+from ..config import (
+    ARCH_MAX_NEW_TOKENS,
+    ARCH_REPETITION_PENALTY,
+    ARCH_TOP_K,
+    ARCH_TOP_P,
+)
 from ..errors import InvalidParamError
 from ..models.loader import LoadedModel, load_model
 from .tracing import _TRACE_LOCK, encode_prompt
+
+
+def _sample_filtered(
+    logits: torch.Tensor,
+    temperature: float,
+    seen_ids: list[int],
+    generator: torch.Generator | None,
+) -> int:
+    """Draw a token from the temperature softmax restricted to top-k ∩ top-p, with a
+    repetition penalty applied first.
+
+    Sampling the FULL vocabulary (the previous behavior) draws from the long tail on
+    every single step, which small models cannot survive — it was the main reason
+    replies read as word salad. These are the standard decoding constraints; the
+    transformers.js runtime mirrors them so both stacks decode the same way.
+
+    Only the DRAW is filtered. Every probability this module reports still comes from
+    the unfiltered distribution, so no number shown to the user changes meaning.
+    """
+    work = logits.clone()
+    if ARCH_REPETITION_PENALTY != 1.0 and seen_ids:
+        idx = torch.tensor(sorted(set(seen_ids)), dtype=torch.long, device=work.device)
+        vals = work[idx]
+        # HF's convention: divide positive logits, multiply negative ones — both push
+        # an already-used token down regardless of its sign.
+        work[idx] = torch.where(
+            vals > 0, vals / ARCH_REPETITION_PENALTY, vals * ARCH_REPETITION_PENALTY
+        )
+
+    scaled = work / float(temperature)
+    k = min(ARCH_TOP_K, int(scaled.shape[0]))
+    top_vals, top_idx = torch.topk(scaled, k=k)
+    probs = torch.softmax(top_vals, dim=-1)
+
+    # Nucleus: smallest prefix whose cumulative mass reaches top_p (never empty).
+    csum = torch.cumsum(probs, dim=-1)
+    keep = int(torch.searchsorted(csum, torch.tensor(ARCH_TOP_P, device=csum.device)).item()) + 1
+    keep = max(1, min(keep, k))
+    probs = probs[:keep]
+    probs = probs / probs.sum()
+
+    choice = int(torch.multinomial(probs, 1, generator=generator).item())
+    return int(top_idx[choice])
 
 
 def _eos_ids(lm: LoadedModel) -> set[int]:
@@ -75,8 +123,13 @@ def generate(
                 probs = torch.zeros_like(logits)
                 probs[next_id] = 1.0
             else:
+                # Reported probability: the UNFILTERED temperature softmax, so `prob`
+                # keeps the meaning it has always had even though the draw below is
+                # restricted to the top-k ∩ top-p nucleus.
                 probs = torch.softmax(logits / float(temperature), dim=-1)
-                next_id = int(torch.multinomial(probs, 1, generator=generator).item())
+                next_id = _sample_filtered(
+                    logits, temperature, ids + [t["id"] for t in tokens], generator
+                )
 
             k = min(5, int(logits.shape[0]))
             top_ids = [int(i) for i in torch.topk(logits, k=k).indices]

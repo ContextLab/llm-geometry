@@ -12,8 +12,12 @@ export type { GeoFieldMode } from "./dataClient";
 // Architecture Explorer (/api/arch/*)
 // ---------------------------------------------------------------------------
 
-/** The traced open-weights model (contract default; capability + size gated server-side). */
-export const archModelId = writable<string>("HuggingFaceTB/SmolLM2-135M-Instruct");
+/**
+ * The traced open-weights model. Qwen2.5-0.5B-Instruct is the default (feature 004):
+ * the previous 135M default is near the floor of usable reply quality no matter how
+ * the sampling is tuned, and the smaller models stay in the menu for speed.
+ */
+export const archModelId = writable<string>("Qwen/Qwen2.5-0.5B-Instruct");
 export const archPrompt = writable<string>("What is the capital of France?");
 export const archSystemPrompt = writable<string>("");
 /** POST /api/arch/generate default per the frozen contract. */

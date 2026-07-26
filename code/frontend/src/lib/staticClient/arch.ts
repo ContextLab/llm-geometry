@@ -32,6 +32,7 @@ const TRACE_EXPORT_MAX_CONTEXT = 64; // the exporter ran the backend default
  * all ship model_q4f16.onnx + a q8 "quantized" file). */
 const ONNX_REPOS: Record<string, string> = {
   "HuggingFaceTB/SmolLM2-135M-Instruct": "onnx-community/SmolLM2-135M-Instruct-ONNX",
+  "HuggingFaceTB/SmolLM2-360M-Instruct": "onnx-community/SmolLM2-360M-Instruct-ONNX",
   gpt2: "onnx-community/gpt2-ONNX",
   "Qwen/Qwen2.5-0.5B-Instruct": "onnx-community/Qwen2.5-0.5B-Instruct",
 };

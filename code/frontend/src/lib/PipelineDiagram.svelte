@@ -18,9 +18,16 @@
     nodes: ArchNode[];
     edges: ArchEdge[];
     selected?: string | null;
+    /**
+     * Node the view should keep visible (the trace playhead). Large models collapse
+     * every layer past the first and open zoomed all the way out, so without this the
+     * "animation" highlighted a node that was inside a collapsed group, off-screen, and
+     * a few pixels tall — the playhead advanced but nothing visibly moved.
+     */
+    focus?: string | null;
     onSelect?: (nodeId: string) => void;
   }
-  let { nodes, edges, selected = null, onSelect }: Props = $props();
+  let { nodes, edges, selected = null, focus = null, onSelect }: Props = $props();
 
   const DIAG_W = 640; // content width in viewBox units
   const CX = DIAG_W / 2;
@@ -179,7 +186,7 @@
       placedEdges.push({ x1: a.x, y1, x2: b.x, y2, path });
     }
 
-    return { placed, headers, collapsedBoxes, edges: placedEdges, totalH: y + 8 };
+    return { placed, headers, collapsedBoxes, edges: placedEdges, pos, totalH: y + 8 };
   });
 
   // --- viewBox pan/zoom ------------------------------------------------------------
@@ -196,6 +203,64 @@
         vb = { x: -20, y: -10, w: DIAG_W + 40, h: Math.max(h + 20, 240) };
       });
     }
+  });
+
+  // --- follow the playhead ----------------------------------------------------------
+  // Two steps, in this order: make the focused node EXIST in the layout (its group may
+  // be collapsed), then bring it into view. The auto-expanded group is remembered so the
+  // next one can close it again — otherwise a 30-layer model ends up fully expanded and
+  // the view scrolls through hundreds of nodes.
+  let autoExpanded: string | null = null;
+
+  $effect(() => {
+    const id = focus;
+    if (!id) return;
+    const node = nodes.find((n) => n.id === id);
+    if (!node) return;
+    untrack(() => {
+      if (node.group === autoExpanded) return;
+      const next = { ...expandOverrides };
+      if (autoExpanded && autoExpanded !== node.group) delete next[autoExpanded];
+      if (/^layer_\d+$/.test(node.group)) {
+        next[node.group] = true;
+        autoExpanded = node.group;
+      } else {
+        autoExpanded = null;
+      }
+      expandOverrides = next;
+    });
+  });
+
+  // Reset the "zoom in once" latch whenever following stops, so a later playback run
+  // gets a readable zoom again without stealing zoom mid-run.
+  let followZoomed = false;
+  $effect(() => {
+    if (focus === null) followZoomed = false;
+  });
+
+  const FOLLOW_H = 520; // viewBox units ≈ a dozen nodes: readable, not claustrophobic
+
+  $effect(() => {
+    const id = focus;
+    if (!id) return;
+    const p = layout.pos.get(id);
+    if (!p) return;
+    untrack(() => {
+      let { x, y, w, h } = vb;
+      // First frame of a run: if the whole model is in view, nothing is legible — zoom
+      // to a readable height once, then respect whatever zoom the user chooses after.
+      if (!followZoomed && h > FOLLOW_H * 1.35) {
+        const s = FOLLOW_H / h;
+        w *= s;
+        h = FOLLOW_H;
+        x = CX - w / 2;
+        followZoomed = true;
+      }
+      // Keep the node inside the middle band; only scroll when it leaves it.
+      const margin = h * 0.22;
+      if (p.y < y + margin || p.y > y + h - margin) y = p.y - h / 2;
+      vb = { x, y, w, h };
+    });
   });
 
   // Wheel zoom about the cursor. Registered manually so preventDefault works

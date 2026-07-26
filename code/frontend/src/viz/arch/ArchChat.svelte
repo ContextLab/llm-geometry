@@ -18,6 +18,18 @@
   // optional system prompt; the reply renders token-by-token with per-token probability
   // + top-5 alternatives on hover. "Re-run" simply samples again (temperature > 0 ⇒ a
   // genuinely different draw from the real model).
+  interface Props {
+    /**
+     * Whether the live trace wrapped the prompt in the model's chat template. Comes
+     * from the REAL trace (`chat_template_used`), not a hardcoded list. `null` = not
+     * traced yet. `false` means a base model: it continues text rather than answering
+     * questions, which the UI has to say outright instead of presenting the output as
+     * a failed reply.
+     */
+    chatTemplate?: boolean | null;
+  }
+  let { chatTemplate = null }: Props = $props();
+
   onDestroy(hideTip);
 
   let busy = $state(false);
@@ -95,6 +107,12 @@
          the real device/dtype ladder (webgpu·q4f16 → wasm·q8) as it loads. -->
     <StaticRuntimeBadge />
   {/if}
+  {#if chatTemplate === false}
+    <p class="basenote" data-testid="arch-base-note">
+      This model has no chat template — it is a <b>base</b> model, so it continues your
+      text rather than answering it. Try a prompt like “The capital of France is”.
+    </p>
+  {/if}
   <div class="knobs">
     <label class="knob">
       <span class="klabel">temperature <b>{$archTemperature.toFixed(2)}</b></span>
@@ -148,6 +166,16 @@
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
+  }
+  .basenote {
+    margin: 0;
+    font-size: 0.72rem;
+    line-height: 1.45;
+    color: #ffb454;
+    background: rgba(255, 180, 84, 0.1);
+    border: 1px solid rgba(255, 180, 84, 0.3);
+    border-radius: 8px;
+    padding: 0.4rem 0.55rem;
   }
   .knobs {
     display: flex;
