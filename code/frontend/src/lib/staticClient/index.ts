@@ -32,6 +32,10 @@ import type {
   GeoTokenizeResult,
   GeoTrace,
   GeoTrainResult,
+  GeoTrainScratchBody,
+  GeoTrainScratchResult,
+  CorpusStatsResult,
+  GeoModelBundleShape,
   GeoVectorFieldData,
   GeoVectorFieldParams,
   GeoWeightsData,
@@ -161,7 +165,8 @@ export function createStaticClient(opts: StaticClientOptions = {}): StaticClient
     // Geometry Lab: fully live in TypeScript (golden-tested geoEngine)
     getGeoSpec: (): Promise<GeoSpec> => geo.getGeoSpec(),
     geoTrain: (seed?: number): Promise<GeoTrainResult> => geo.geoTrain(seed),
-    geoTokenize: (text: string): Promise<GeoTokenizeResult> => geo.geoTokenize(text),
+    geoTokenize: (text: string, weightsToken?: string): Promise<GeoTokenizeResult> =>
+      geo.geoTokenize(text, weightsToken),
     getGeoTrace: (prompt: string, weightsToken?: string, _signal?: AbortSignal): Promise<GeoTrace> =>
       geo.getGeoTrace(prompt, weightsToken),
     getGeoVectorField: (
@@ -178,6 +183,14 @@ export function createStaticClient(opts: StaticClientOptions = {}): StaticClient
       filename: string,
       options: Omit<GeoFinetuneBody, "text" | "hf_dataset"> = {},
     ): Promise<GeoFinetuneResult> => geo.geoFinetuneFile(file, filename, options),
+    // Feature 004: real from-scratch training + portable model files, in-browser
+    geoTrainScratch: (body: GeoTrainScratchBody): Promise<GeoTrainScratchResult> =>
+      geo.geoTrainScratch(body),
+    geoCorpusStats: (text: string): Promise<CorpusStatsResult> => geo.geoCorpusStats(text),
+    geoExportModel: (weightsToken?: string): Promise<GeoModelBundleShape> =>
+      geo.geoExportModel(weightsToken) as Promise<GeoModelBundleShape>,
+    geoImportModel: (bundle: unknown): Promise<{ weights_token: string; vocab_size: number }> =>
+      geo.geoImportModel(bundle),
     // Architecture Explorer: precomputed graph/traces, live weights/tokenize/chat
     getArchGraph: (model_id: string): Promise<ArchGraph> => arch.getArchGraph(model_id),
     getArchWeights: (params: ArchWeightsParams, _signal?: AbortSignal): Promise<ArchWeightsData> =>

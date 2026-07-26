@@ -28,6 +28,7 @@
   import TokenStrip from "./TokenStrip.svelte";
   import WeightLab from "./WeightLab.svelte";
   import FinetunePanel from "./FinetunePanel.svelte";
+  import TrainPanel from "./TrainPanel.svelte";
   import AttentionView from "./AttentionView.svelte";
   import { SPECIALS, tokenText, verifyVocab } from "./vocab";
 
@@ -131,7 +132,22 @@
 
   function readyUp() {
     phase = "ready";
-    void verifyVocab(client.geoTokenize).then((ok) => (vocabVerified = ok));
+    revalidateVocab();
+  }
+
+  /**
+   * The bundled vocab table is the CANONICAL model's. A model trained from scratch has
+   * its own words, so the probe legitimately fails for it and `label()` falls back to
+   * the ids the API actually reported — which is correct rather than confidently wrong.
+   * Re-run whenever the active model changes.
+   */
+  function revalidateVocab(): void {
+    const token = $geoWeightsToken ?? undefined;
+    vocabVerified = false;
+    learnedLabels.clear();
+    void verifyVocab((text) => client.geoTokenize(text, token)).then((ok) => {
+      if (($geoWeightsToken ?? undefined) === token) vocabVerified = ok;
+    });
   }
 
   // ---- debounced, abortable data fetches (FR-108 cancel-and-restart) ---------------
@@ -179,7 +195,7 @@
 
   const tokDeb = debounced((text: string) => {
     client
-      .geoTokenize(text)
+      .geoTokenize(text, $geoWeightsToken ?? undefined)
       .then((r) => {
         tokenized = r;
         noteTokens(r.tokens);
@@ -210,6 +226,16 @@
   $effect(() => {
     if (phase !== "ready") return;
     traceDeb($geoPrompt, $geoWeightsToken ?? undefined);
+  });
+
+  let vocabForToken: string | null | undefined;
+  $effect(() => {
+    if (phase !== "ready") return;
+    const token = $geoWeightsToken;
+    if (token !== vocabForToken) {
+      vocabForToken = token;
+      revalidateVocab();
+    }
   });
 
   $effect(() => {
@@ -384,6 +410,7 @@
     <div class="grid">
       <div class="card"><WeightLab {label} checkpointId={spec?.checkpoint.checkpoint_id ?? null} /></div>
       <div class="card"><FinetunePanel /></div>
+      <div class="card"><TrainPanel /></div>
     </div>
     <div class="card"><AttentionView {trace} /></div>
   {/if}

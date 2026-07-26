@@ -7,12 +7,15 @@
  */
 
 import type {
+  CorpusStatsResult,
   GeoFinetuneBody,
   GeoFinetuneResult,
   GeoSpec,
   GeoTokenizeResult,
   GeoTrace,
   GeoTrainResult,
+  GeoTrainScratchBody,
+  GeoTrainScratchResult,
   GeoVectorFieldData,
   GeoVectorFieldParams,
   GeoWeightsData,
@@ -20,7 +23,17 @@ import type {
   GeoWeightsPostBody,
   GeoWeightsPostResult,
 } from "../dataClient";
-import { GeoEngine, runFinetune, type ExportedWeightSet, type WeightSet } from "../geoEngine";
+import { GeoEngine, runFinetune, type ExportedWeightSet, type GeoModelBundle, type WeightSet } from "../geoEngine";
+import {
+  buildVocabWords,
+  corpusStats,
+  runScratchTrain,
+  SCRATCH_DEFAULT_EPOCHS,
+  SCRATCH_MAX_EPOCHS,
+} from "../geoEngine/scratch";
+import type { ScratchWorkerRequest, ScratchWorkerResponse } from "../geoEngine/scratchWorker";
+import { GeoTokenizer } from "../geoEngine/tokenizer";
+import { fetchDatasetText } from "./hfDatasets";
 import type { FinetuneWorkerRequest, FinetuneWorkerResponse } from "../geoEngine";
 import type { StaticAssets } from "./assets";
 import { computeError, invalidParamError, staticModeError, toApiError } from "./errors";
@@ -104,6 +117,7 @@ function readBlobText(file: Blob): Promise<string> {
 export class GeoSection {
   private enginePromise: Promise<GeoEngine> | null = null;
   private readonly finetuneCache = new Map<string, GeoFinetuneResult>();
+  private readonly scratchCache = new Map<string, GeoTrainScratchResult>();
 
   constructor(
     private readonly assets: StaticAssets,
@@ -164,8 +178,10 @@ export class GeoSection {
     return { ready: true, checkpoint_id: engine.canonicalToken, status: "ready" };
   }
 
-  geoTokenize(text: string): Promise<GeoTokenizeResult> {
-    return this.run((e) => e.tokenize(text));
+  geoTokenize(text: string, weightsToken?: string): Promise<GeoTokenizeResult> {
+    // A scratch-trained model has its own vocabulary — tokenizing with the canonical
+    // one would mislabel every chip in the token strip.
+    return this.run((e) => e.tokenize(text, weightsToken));
   }
 
   getGeoTrace(prompt: string, weightsToken?: string): Promise<GeoTrace> {
@@ -195,14 +211,14 @@ export class GeoSection {
    * cache hits. `hf_dataset` needs the full stack's streaming → StaticModeError.
    */
   async geoFinetune(body: GeoFinetuneBody): Promise<GeoFinetuneResult> {
+    // HuggingFace datasets DO work here (feature 004): the Hub's public, CORS-enabled
+    // dataset-viewer service serves real rows, so the static build reads genuine data
+    // instead of refusing. Same column choice as the backend.
+    let text = body.text;
     if (body.hf_dataset != null && body.hf_dataset !== "") {
-      throw staticModeError(
-        "Fine-tuning on a Hugging Face dataset needs the full stack's streaming " +
-          "download — the static demo can't fetch datasets. Paste text or upload " +
-          "a .txt/.md file instead, or run the full stack (see the README).",
-      );
+      const pulled = await fetchDatasetText(String(body.hf_dataset), { maxSamples: 500 });
+      text = pulled.text;
     }
-    const text = body.text;
     if (text == null || text.trim().length === 0) {
       throw invalidParamError("Provide non-empty fine-tuning text (exactly one of text/hf_dataset).");
     }
@@ -238,6 +254,131 @@ export class GeoSection {
       return payload;
     });
     return { ready: false, job_id: jobId };
+  }
+
+  // --- from-scratch training + portable models (feature 004) ------------------------
+
+  /** Token / distinct-type counts — the same numbers GET /api/geo/corpus_stats reports. */
+  async geoCorpusStats(text: string): Promise<CorpusStatsResult> {
+    return corpusStats(text);
+  }
+
+  /**
+   * Train a BRAND NEW model on the user's own corpus, really, in this browser.
+   *
+   * Fine-tuning keeps the shipped vocabulary; this rebuilds it from the supplied text
+   * and starts from fresh weights, so the result is a different model. The run happens
+   * in a Worker (it is minutes of arithmetic, not the fine-tune's fraction of a
+   * second) and reports through the same job protocol as the backend's SSE.
+   */
+  async geoTrainScratch(body: GeoTrainScratchBody): Promise<GeoTrainScratchResult> {
+    const epochs = Math.trunc(body.epochs ?? SCRATCH_DEFAULT_EPOCHS);
+    if (!(epochs >= 1 && epochs <= SCRATCH_MAX_EPOCHS)) {
+      throw invalidParamError(`epochs must be in 1..${SCRATCH_MAX_EPOCHS}, got ${body.epochs}`);
+    }
+    const sources = [body.text, body.hf_dataset].filter((v) => v != null && String(v).trim() !== "");
+    if (sources.length !== 1) {
+      throw invalidParamError(
+        `exactly one of text / hf_dataset must be provided, got ${sources.length} sources`,
+      );
+    }
+
+    const engine = await this.engine();
+    const cacheKey = JSON.stringify({ scratch: sources[0], epochs });
+    const cached = this.scratchCache.get(cacheKey);
+    if (cached) return { ...cached };
+
+    const jobId = this.jobs.create(cacheKey, async (report) => {
+      let text = body.text ? String(body.text) : "";
+      if (body.hf_dataset) {
+        const pulled = await fetchDatasetText(String(body.hf_dataset), {
+          maxSamples: body.max_samples ?? 2000,
+          onProgress: (f, m) => report(0.02 * f, m),
+        });
+        text = pulled.text;
+      }
+      const result = await this.runScratchAsync({ text, epochs, seed: 0 }, report);
+      const token = engine.registerScratchModel(
+        result.weights as WeightSet,
+        result.vocabWords,
+      );
+      persistMintedSet(engine, token);
+      const payload = {
+        weights_token: token,
+        vocab_size: new GeoTokenizer(result.vocabWords).idToText.size,
+        final_loss: result.finalLoss,
+        n_tokens: result.nTokens,
+        n_distinct: result.nDistinct,
+        epochs: result.epochs,
+      };
+      this.scratchCache.set(cacheKey, { ready: true, ...payload });
+      return payload;
+    });
+    return { ready: false, job_id: jobId };
+  }
+
+  /** The active model as one portable file (weights + the vocabulary its ids mean). */
+  geoExportModel(weightsToken?: string): Promise<GeoModelBundle> {
+    return this.run((e) => e.exportBundle(weightsToken));
+  }
+
+  /** Validate and load a saved model file; returns its token. */
+  geoImportModel(bundle: unknown): Promise<{ weights_token: string; vocab_size: number }> {
+    return this.run((e) => {
+      const out = e.importBundle(bundle);
+      persistMintedSet(e, out.weights_token);
+      return out;
+    });
+  }
+
+  /** Real training in the scratch worker; synchronous when Workers don't exist
+   * (vitest/jsdom) — the same code the worker itself runs. */
+  private runScratchAsync(
+    req: ScratchWorkerRequest,
+    report: ProgressFn,
+  ): Promise<Extract<ScratchWorkerResponse, { type: "done" }>> {
+    if (typeof Worker === "undefined") {
+      return Promise.resolve().then(() => {
+        const words = buildVocabWords(req.text);
+        const tokenizer = new GeoTokenizer(words);
+        const tokenIds = tokenizer.encodeStream(req.text);
+        const r = runScratchTrain({
+          tokenIds,
+          epochs: req.epochs,
+          seed: req.seed,
+          onProgress: report,
+        });
+        return {
+          type: "done" as const,
+          weights: r.weights as Record<string, Float32Array>,
+          vocabWords: words,
+          finalLoss: r.finalLoss,
+          epochs: r.epochs,
+          nTokens: tokenIds.length,
+          nDistinct: new Set(words).size,
+        };
+      });
+    }
+    return new Promise((resolve, reject) => {
+      const worker = new Worker(new URL("../geoEngine/scratchWorker.ts", import.meta.url), {
+        type: "module",
+      });
+      worker.onmessage = (ev: MessageEvent<ScratchWorkerResponse>) => {
+        const msg = ev.data;
+        if (msg.type === "progress") {
+          report(msg.fraction, msg.message);
+          return;
+        }
+        worker.terminate();
+        if (msg.type === "done") resolve(msg);
+        else reject(toApiError(Object.assign(new Error(msg.message), { type: msg.errorType })));
+      };
+      worker.onerror = (ev) => {
+        worker.terminate();
+        reject(computeError(`training worker failed: ${ev.message || "unknown error"}`));
+      };
+      worker.postMessage(req);
+    });
   }
 
   async geoFinetuneFile(

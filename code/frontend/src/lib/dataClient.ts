@@ -121,6 +121,43 @@ export interface GeoTrace {
 export type GeoFieldMode = "next_next" | "force";
 export type GeoLayerParam = number | "full"; // 0..3 or "full" (force mode: per-layer only)
 
+/** POST /api/geo/train_scratch (feature 004). */
+export interface GeoTrainScratchBody {
+  text?: string | null;
+  hf_dataset?: string | null;
+  hf_split?: string;
+  max_samples?: number;
+  epochs?: number;
+}
+
+export interface GeoTrainScratchResult {
+  ready: boolean;
+  job_id?: string;
+  weights_token?: string;
+  vocab_size?: number;
+  final_loss?: number;
+  n_tokens?: number;
+  n_distinct?: number;
+  epochs?: number;
+}
+
+/** GET /api/geo/corpus_stats — is this corpus big enough to train on? */
+export interface CorpusStatsResult {
+  n_tokens: number;
+  n_distinct: number;
+  vocab_words_required: number;
+}
+
+/** GET/POST /api/geo/model — the portable model file. */
+export interface GeoModelBundleShape {
+  format: string;
+  version: number;
+  weights_token: string;
+  config: Record<string, number>;
+  vocab: string;
+  weights: Record<string, { shape: number[]; data: string }>;
+}
+
 export interface GeoVectorFieldParams {
   mode: GeoFieldMode;
   layer: GeoLayerParam;
@@ -520,8 +557,8 @@ export function createClient(opts: ClientOptions = {}) {
     return request("/api/geo/train", jsonInit(seed === undefined ? {} : { seed }));
   }
 
-  function geoTokenize(text: string): Promise<GeoTokenizeResult> {
-    return request("/api/geo/tokenize" + qs({ text }));
+  function geoTokenize(text: string, weightsToken?: string): Promise<GeoTokenizeResult> {
+    return request("/api/geo/tokenize" + qs({ text, weights_token: weightsToken }));
   }
 
   function getGeoTrace(
@@ -572,6 +609,26 @@ export function createClient(opts: ClientOptions = {}) {
     return request("/api/geo/finetune", { method: "POST", body: form });
   }
 
+  // --- Feature 004: from-scratch training + portable models ---
+
+  function geoTrainScratch(body: GeoTrainScratchBody): Promise<GeoTrainScratchResult> {
+    return request("/api/geo/train_scratch", jsonInit(body));
+  }
+
+  function geoCorpusStats(text: string): Promise<CorpusStatsResult> {
+    return request("/api/geo/corpus_stats" + qs({ text }));
+  }
+
+  function geoExportModel(weightsToken?: string): Promise<GeoModelBundleShape> {
+    return request("/api/geo/model" + qs({ weights_token: weightsToken ?? "learned" }));
+  }
+
+  function geoImportModel(
+    bundle: unknown,
+  ): Promise<{ weights_token: string; vocab_size: number }> {
+    return request("/api/geo/model", jsonInit(bundle as Record<string, unknown>));
+  }
+
   // --- Feature 002: Architecture Explorer (/api/arch/*, frozen contract) ---
 
   function getArchGraph(model_id: string): Promise<ArchGraph> {
@@ -616,6 +673,10 @@ export function createClient(opts: ClientOptions = {}) {
     postGeoWeights,
     geoFinetune,
     geoFinetuneFile,
+    geoTrainScratch,
+    geoCorpusStats,
+    geoExportModel,
+    geoImportModel,
     getArchGraph,
     getArchWeights,
     getArchTrace,

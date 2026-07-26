@@ -34,6 +34,19 @@ import type {
 import { GeoEngineError, computeError, invalidParam, notFound } from "./errors";
 
 /** Serialized minted weight set for external persistence (sessionStorage). */
+/** The portable model-file format — the same one GET /api/geo/model emits. */
+export const BUNDLE_FORMAT = "llm-geometry/geo-model";
+export const BUNDLE_VERSION = 1;
+
+export interface GeoModelBundle {
+  format: string;
+  version: number;
+  weights_token: string;
+  config: Record<string, number>;
+  vocab: string;
+  weights: Record<string, { shape: number[]; data: string }>;
+}
+
 export interface ExportedWeightSet {
   weights: Record<string, string>; // tensor name -> base64 of float32-LE bytes
   sources: Record<string, string>;
@@ -62,15 +75,23 @@ import {
   CONTEXT_WINDOW,
   D_MODEL,
   EDITABLE_MATRICES,
+  EOS_ID,
+  EOS_TOKEN,
   FINETUNE_DEFAULT_LR,
   FINETUNE_DEFAULT_STEPS,
   GeoModel,
   MLP_HIDDEN,
   N_HEADS,
   N_LAYERS,
+  PAD_ID,
+  PAD_TOKEN,
   SPECIAL_TOKENS,
+  UNK_ID,
+  UNK_TOKEN,
   VOCAB_SIZE,
+  WEIGHT_SHAPES,
   loadCheckpoint,
+  validateWeightSet,
   type CheckpointMeta,
   type WeightSet,
 } from "./model";
@@ -118,6 +139,13 @@ export class GeoEngine {
   /** token -> set-level provenance ("learned" | "edited" | "finetuned"). */
   private readonly setSources = new Map<string, string>();
   private readonly models = new Map<string, GeoModel>();
+  /**
+   * token -> the vocabulary THAT model's ids mean (feature 004). Only models trained
+   * from scratch appear here; everything derived from the canonical checkpoint shares
+   * the canonical tokenizer. Reading a scratch model's ids with the canonical
+   * vocabulary would mislabel every token on screen.
+   */
+  private readonly vocabs = new Map<string, GeoTokenizer>();
   private readonly finetuneCache = new Map<string, GeoFinetuneResult>();
 
   private constructor(
@@ -179,17 +207,24 @@ export class GeoEngine {
     };
   }
 
+  /** The vocabulary that gives `token`'s ids meaning (mirrors geo/tokenizer.tokenizer_for). */
+  tokenizerFor(token?: string | null): GeoTokenizer {
+    if (!token || token === "learned") return this.tokenizer;
+    return this.vocabs.get(token) ?? this.tokenizer;
+  }
+
   // --- GET /api/geo/tokenize -------------------------------------------------------
 
-  tokenize(text: string): GeoTokenizeResult {
-    const enc = this.tokenizer.encode(text);
+  tokenize(text: string, weightsTokenParam?: string): GeoTokenizeResult {
+    const enc = this.tokenizerFor(weightsTokenParam).encode(text);
     return { tokens: encodedTokens(enc), n_unk: enc.n_unk, truncated: enc.truncated };
   }
 
   // --- GET /api/geo/trace ----------------------------------------------------------
 
   trace(prompt: string, weightsTokenParam?: string): GeoTrace {
-    const enc = this.tokenizer.encode(prompt);
+    const tok = this.tokenizerFor(weightsTokenParam);
+    const enc = tok.encode(prompt);
     if (enc.ids.length === 0) throw invalidParam("prompt is empty after tokenization");
     const model = this.modelFor(weightsTokenParam ?? "learned");
     const tr = model.forwardTrace(enc.ids);
@@ -202,7 +237,7 @@ export class GeoEngine {
       for (let i = 0; i < 10; i++) top.push(idx[i]);
     }
     const nextId = top[0];
-    const text = (id: number): string => this.tokenizer.idToText.get(id) as string;
+    const text = (id: number): string => tok.idToText.get(id) as string;
     return {
       tokens: encodedTokens(enc),
       embeddings: tr.embeddings,
@@ -224,7 +259,7 @@ export class GeoEngine {
     if (mode !== "next_next" && mode !== "force") {
       throw invalidParam(`mode must be "next_next" or "force", got ${JSON.stringify(mode)}`);
     }
-    const promptIds = this.tokenizer.encode(prompt).ids;
+    const promptIds = this.tokenizerFor(params.weights_token).encode(prompt).ids;
     const model = this.modelFor(params.weights_token ?? "learned");
     const field =
       mode === "next_next"
@@ -385,6 +420,132 @@ export class GeoEngine {
     this.weightSets.set(token, weights);
     this.setSources.set(token, "finetuned");
     return token;
+  }
+
+  // --- from-scratch models + portable bundles (feature 004) ------------------------
+
+  /**
+   * Register a model trained from scratch, together with the vocabulary its ids mean.
+   * Unlike a fine-tune, this is a different model, not a variation of the canonical
+   * one — so the vocabulary is stored with it and every read path uses it.
+   */
+  registerScratchModel(weights: WeightSet, vocabWords: string[]): string {
+    const token = weightsToken(weights);
+    this.weightSets.set(token, weights);
+    this.setSources.set(token, "scratch");
+    this.vocabs.set(token, new GeoTokenizer(vocabWords));
+    return token;
+  }
+
+  /** The portable bundle for a model — the same shape as GET /api/geo/model. */
+  exportBundle(token?: string | null): GeoModelBundle {
+    const resolved = token && token !== "learned" ? token : this.canonicalToken;
+    const ws = this.resolveWeightSet(resolved);
+    const weights: GeoModelBundle["weights"] = {};
+    for (const name of Object.keys(ws).sort()) {
+      weights[name] = { shape: [...(WEIGHT_SHAPES.get(name) ?? [ws[name].length])], data: b64FromF32(ws[name]) };
+    }
+    return {
+      format: BUNDLE_FORMAT,
+      version: BUNDLE_VERSION,
+      weights_token: weightsToken(ws),
+      config: {
+        d_model: D_MODEL,
+        n_layers: N_LAYERS,
+        n_heads: N_HEADS,
+        mlp_hidden: MLP_HIDDEN,
+        vocab_size: VOCAB_SIZE,
+        context_window: CONTEXT_WINDOW,
+      },
+      vocab: JSON.stringify({
+        format: "geo-tokenizer-v1",
+        specials: { [UNK_TOKEN]: UNK_ID, [EOS_TOKEN]: EOS_ID, [PAD_TOKEN]: PAD_ID },
+        words: this.tokenizerFor(resolved).words,
+      }),
+      weights,
+    };
+  }
+
+  /**
+   * Validate and load a bundle; returns its token. Mirrors geo/bundle.py including
+   * the hash check — a bundle whose weights do not re-hash to its declared token is
+   * REFUSED, because loading it would pair the wrong vocabulary with those weights
+   * and silently mislabel everything.
+   */
+  importBundle(bundle: unknown): { weights_token: string; vocab_size: number } {
+    if (bundle === null || typeof bundle !== "object" || Array.isArray(bundle)) {
+      throw invalidParam("a model file must be a JSON object");
+    }
+    const b = bundle as Record<string, unknown>;
+    if (b.format !== BUNDLE_FORMAT) {
+      throw invalidParam(
+        `not a Geometry Lab model file (format=${JSON.stringify(b.format)}, expected ` +
+          `${JSON.stringify(BUNDLE_FORMAT)})`,
+      );
+    }
+    if (b.version !== BUNDLE_VERSION) {
+      throw invalidParam(
+        `model file version ${JSON.stringify(b.version)} is not supported ` +
+          `(this build reads version ${BUNDLE_VERSION})`,
+      );
+    }
+    const cfg = b.config as Record<string, unknown> | undefined;
+    if (!cfg || typeof cfg !== "object") throw invalidParam("model file is missing its `config` block");
+    const expected: Record<string, number> = {
+      d_model: D_MODEL,
+      n_layers: N_LAYERS,
+      n_heads: N_HEADS,
+      mlp_hidden: MLP_HIDDEN,
+      vocab_size: VOCAB_SIZE,
+      context_window: CONTEXT_WINDOW,
+    };
+    for (const [field, want] of Object.entries(expected)) {
+      if (cfg[field] !== want) {
+        throw invalidParam(
+          `model file was built for ${field}=${JSON.stringify(cfg[field])}, but this build's ` +
+            `GeoTransformer is ${field}=${want} — they are different architectures, so the ` +
+            "weights cannot be loaded",
+        );
+      }
+    }
+
+    const rawWeights = b.weights as Record<string, { shape?: number[]; data?: string }> | undefined;
+    if (!rawWeights || typeof rawWeights !== "object" || Object.keys(rawWeights).length === 0) {
+      throw invalidParam("model file carries no weights");
+    }
+    const ws: WeightSet = {};
+    for (const [name, payload] of Object.entries(rawWeights)) {
+      if (!payload || typeof payload.data !== "string" || !Array.isArray(payload.shape)) {
+        throw invalidParam(`weight ${JSON.stringify(name)} is malformed (need shape + data)`);
+      }
+      const arr = f32FromB64(payload.data);
+      const want = payload.shape.reduce((a, d) => a * d, 1);
+      if (arr.length !== want) {
+        throw invalidParam(
+          `weight ${JSON.stringify(name)} has ${arr.length} values but shape ` +
+            `[${payload.shape.join(", ")}] needs ${want}`,
+        );
+      }
+      ws[name] = arr;
+    }
+    validateWeightSet(ws); // shapes + completeness, loudly
+
+    const actual = weightsToken(ws);
+    if (typeof b.weights_token === "string" && b.weights_token !== actual) {
+      throw invalidParam(
+        `this model file is corrupt: its weights hash to ${actual} but it declares ` +
+          `${b.weights_token}. Loading it would pair the wrong vocabulary with these ` +
+          "weights, so it is refused.",
+      );
+    }
+
+    if (typeof b.vocab !== "string") throw invalidParam("model file is missing its `vocab` block");
+    const tokenizer = GeoTokenizer.fromVocabJson(b.vocab);
+
+    this.weightSets.set(actual, ws);
+    this.setSources.set(actual, "imported");
+    this.vocabs.set(actual, tokenizer);
+    return { weights_token: actual, vocab_size: VOCAB_SIZE };
   }
 
   // --- internals -------------------------------------------------------------------

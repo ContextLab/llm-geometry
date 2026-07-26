@@ -149,7 +149,7 @@ function grad(grads: GradSet, name: string, size: number): Float64Array {
  * non-pad targets across the WHOLE batch — torch's cross_entropy averages over
  * all of them at once). Returns this window's summed CE (for the batch loss).
  */
-function accumulateWindowGrads(model: GeoModel, window: Int32Array, nValid: number, grads: GradSet): number {
+export function accumulateWindowGrads(model: GeoModel, window: Int32Array, nValid: number, grads: GradSet): number {
   const T = window.length - 1;
   const ids = Array.from(window.subarray(0, T));
   const acts = model.forwardSeq(ids);

@@ -276,7 +276,7 @@ describe("geo delegation + job emulation", () => {
     expect(w.source).toBe("edited");
   });
 
-  it("supports pollJob and file-based fine-tunes; hf_dataset is refused", async () => {
+  it("supports pollJob and file-based fine-tunes", async () => {
     const c = makeClient();
     const blob = new Blob(["Alice took up the fan and gloves"], { type: "text/plain" });
     const r = await c.geoFinetuneFile(blob, "alice.txt", { steps: 4 });
@@ -287,9 +287,9 @@ describe("geo delegation + job emulation", () => {
     await expect(c.geoFinetuneFile(blob, "alice.pdf", {})).rejects.toMatchObject({
       type: "InvalidParamError",
     });
-    await expect(c.geoFinetune({ hf_dataset: "roneneldan/TinyStories" })).rejects.toMatchObject({
-      type: "StaticModeError",
-    });
+    // hf_dataset is NO LONGER refused here (feature 004): the Hub's dataset viewer is
+    // CORS-enabled, so the static build reads real rows. The network path is covered by
+    // tests/unit/hfDatasets.test.ts against the real service.
     await expect(c.pollJob("static-job-does-not-exist")).rejects.toMatchObject({
       type: "NotFoundError",
     });
