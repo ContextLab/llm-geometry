@@ -36,12 +36,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-models-${{ runner.os }}-v1
+          key: hf-models-${{ runner.os }}-v2-${{ github.run_id }}
+          restore-keys: |
+            hf-models-${{ runner.os }}-v2-
       - name: Cache derived artifacts (tiny-model checkpoints, graphs)
         uses: actions/cache@v4
         with:
           path: .cache/llm-geometry
-          key: llmgeo-cache-${{ runner.os }}-${{ hashFiles('code/backend/src/llm_geometry/geo/config.py') }}
+          key: llmgeo-cache-${{ runner.os }}-v2-${{ github.run_id }}
+          restore-keys: |
+            llmgeo-cache-${{ runner.os }}-v2-
       - name: Install
         run: |
           python -m pip install --upgrade pip
@@ -80,12 +84,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-models-${{ runner.os }}-v1
+          key: hf-models-${{ runner.os }}-v2-${{ github.run_id }}
+          restore-keys: |
+            hf-models-${{ runner.os }}-v2-
       - name: Cache derived artifacts
         uses: actions/cache@v4
         with:
           path: .cache/llm-geometry
-          key: llmgeo-cache-${{ runner.os }}-${{ hashFiles('code/backend/src/llm_geometry/geo/config.py') }}
+          key: llmgeo-cache-${{ runner.os }}-v2-${{ github.run_id }}
+          restore-keys: |
+            llmgeo-cache-${{ runner.os }}-v2-
       - name: Install backend (static-asset exporter)
         working-directory: code/backend
         run: |
@@ -126,12 +134,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-models-${{ runner.os }}-v1
+          key: hf-models-${{ runner.os }}-v2-${{ github.run_id }}
+          restore-keys: |
+            hf-models-${{ runner.os }}-v2-
       - name: Cache derived artifacts
         uses: actions/cache@v4
         with:
           path: .cache/llm-geometry
-          key: llmgeo-cache-${{ runner.os }}-${{ hashFiles('code/backend/src/llm_geometry/geo/config.py') }}
+          key: llmgeo-cache-${{ runner.os }}-v2-${{ github.run_id }}
+          restore-keys: |
+            llmgeo-cache-${{ runner.os }}-v2-
       - name: Backend venv (playwright's webServer activates .venv)
         working-directory: code/backend
         run: |
