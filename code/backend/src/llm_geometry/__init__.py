@@ -1,12 +1,12 @@
-"""llm_geometry — core machinery for geometric LLM visualizations.
+"""llm_geometry — the backend for the two-tab LLM geometry explorer.
 
 Subpackages:
   models   — open-weights model loading + capability detection
-  compute  — real model-derived quantities (next-token distributions, embeddings)
-  reduce   — dimensionality reduction (2D PCA/UMAP, grid, 3D spherical)
+  arch     — Architecture Explorer: traced forward passes, weight windows, generation
+  geo      — Geometry Lab: the from-scratch d_model=3 GeoTransformer and its fields
   cache    — deterministic keys + integrity-checked artifact store
-  jobs     — precompute job registry (single-flight + progress)
-  api      — FastAPI app serving cached artifacts + SSE progress
+  jobs     — job registry (single-flight + progress)
+  api      — FastAPI app serving /api/arch/*, /api/geo/*, and shared job/SSE routes
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

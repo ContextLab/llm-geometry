@@ -6,7 +6,8 @@
  *   LIVE       — computed in the browser (TS geoEngine; transformers.js;
  *                safetensors HTTP Range reads at pinned revisions), or
  *   PRECOMPUTED — served verbatim from build-time exports of the real backend
- *                (static-data/: graphs, traces, tiles, 001-view presets), or
+ *                (static-data/: architecture graphs, example traces, weight tiles,
+ *                the geo checkpoint), or
  *   REFUSED    — a typed ApiError("StaticModeError", …) naming what IS
  *                available; nothing is ever fabricated (FR-203).
  *
@@ -25,7 +26,6 @@ import type {
   ArchWeightsData,
   ArchWeightsParams,
   Client,
-  Distribution,
   GeoFinetuneBody,
   GeoFinetuneResult,
   GeoSpec,
@@ -39,23 +39,12 @@ import type {
   GeoWeightsPostBody,
   GeoWeightsPostResult,
   JobSnapshot,
-  ManifoldAnimation,
-  ManifoldData,
   ModelReference,
-  PrecomputeResult,
-  Reduction2D,
-  SankeyData,
-  SankeyHighlightData,
-  TokenCloud,
   TokenizeResult,
-  VectorField,
-  VectorFieldAnimation,
 } from "../dataClient";
 import { ArchSection, type TraceIndexEntry } from "./arch";
 import { StaticAssets, type FetchLike } from "./assets";
-import { staticModeError } from "./errors";
 import { LocalJobRegistry } from "./jobs";
-import { PresetStore, type PresetView } from "./presets";
 import type { RuntimeLoader, StaticRuntimeInfo } from "./runtimeTypes";
 import { GeoSection } from "./geo";
 
@@ -69,12 +58,6 @@ const DISPLAY_NAMES: Record<string, string> = {
   "HuggingFaceTB/SmolLM2-135M-Instruct": "SmolLM2 135M Instruct",
 };
 
-export interface StaticPresetSummary {
-  n: number;
-  label: string;
-  state: Record<string, unknown>;
-}
-
 export interface StaticClientOptions {
   baseUrl?: string;
   fetchImpl?: FetchLike;
@@ -85,8 +68,6 @@ export interface StaticClientOptions {
 export interface StaticExtras {
   /** Marker + type guard hook for views that need static-only affordances. */
   readonly staticMode: true;
-  /** The labeled presets a 001 view can offer ({n, label, saved control state}). */
-  staticPresets(view: PresetView): Promise<StaticPresetSummary[]>;
   /** The example prompts with precomputed traces for a curated model. */
   staticArchTracePresets(modelId: string): Promise<TraceIndexEntry[]>;
   /** Device/dtype report for the in-browser generation runtime. */
@@ -101,7 +82,6 @@ export function isStaticClient(c: Client): c is StaticClient {
 
 export function createStaticClient(opts: StaticClientOptions = {}): StaticClient {
   const assets = new StaticAssets(opts);
-  const presets = new PresetStore(assets);
   const jobs = new LocalJobRegistry();
   const geo = new GeoSection(assets, jobs);
   const arch = new ArchSection(assets, opts.runtimeLoader);
@@ -139,37 +119,7 @@ export function createStaticClient(opts: StaticClientOptions = {}): StaticClient
     return modelReference(model_id);
   }
 
-  // --- 001 machinery: precompute/jobs are preset cache hits ------------------------
-
-  async function precompute(
-    artifact_type: string,
-    model_id: string,
-    params: Record<string, unknown> = {},
-    inputs: Record<string, unknown> = {},
-  ): Promise<PrecomputeResult> {
-    const endpoint = `/api/${artifact_type}`;
-    const merged = { model_id, ...params, ...inputs };
-    const hit = await presets.find(endpoint, merged);
-    if (hit === null) throw staticModeError(await presets.missMessage(endpoint));
-    return {
-      cache_key: `static:${artifact_type}:${JSON.stringify(merged)}`,
-      job_id: null,
-      status: "complete",
-      ready: true,
-    };
-  }
-
-  async function ensureArtifact(
-    artifact_type: string,
-    model_id: string,
-    params: Record<string, unknown> = {},
-    inputs: Record<string, unknown> = {},
-    onProgress?: (progress: number, message: string) => void,
-  ): Promise<string> {
-    const result = await precompute(artifact_type, model_id, params, inputs);
-    onProgress?.(1, "cached");
-    return result.cache_key;
-  }
+  // --- jobs (geo training / fine-tuning run locally) -------------------------------
 
   async function getJob(job_id: string): Promise<JobSnapshot> {
     return jobs.snapshot(job_id);
@@ -193,68 +143,8 @@ export function createStaticClient(opts: StaticClientOptions = {}): StaticClient
     return jobs.subscribe(job_id, handlers);
   }
 
-  // --- 001 views: preset-served getters --------------------------------------------
-
-  const serve = <T>(endpoint: string, params: Record<string, unknown>): Promise<T> =>
-    presets.serve(endpoint, params) as Promise<T>;
-
-  function getVectorField(model_id: string, params: Record<string, unknown> = {}): Promise<VectorField> {
-    return serve("/api/vector_field", { model_id, ...params });
-  }
-
-  function getVectorFieldAnimation(
-    model_id: string,
-    params: Record<string, unknown> = {},
-  ): Promise<VectorFieldAnimation> {
-    return serve("/api/vector_field_animation", { model_id, ...params });
-  }
-
-  function getSankey(model_id: string, params: Record<string, unknown> = {}): Promise<SankeyData> {
-    return serve("/api/sankey", { model_id, ...params });
-  }
-
-  function getSankeyHighlight(
-    model_id: string,
-    params: Record<string, unknown> = {},
-  ): Promise<SankeyHighlightData> {
-    return serve("/api/sankey_highlight", { model_id, ...params });
-  }
-
-  function getManifold(model_id: string, params: Record<string, unknown> = {}): Promise<ManifoldData> {
-    return serve("/api/manifold", { model_id, ...params });
-  }
-
-  function getManifoldAnimation(
-    model_id: string,
-    params: Record<string, unknown> = {},
-  ): Promise<ManifoldAnimation> {
-    return serve("/api/manifold_animation", { model_id, ...params });
-  }
-
-  function getTokenCloud(model_id: string, seed = 0, spread_mu = 0.65): Promise<TokenCloud> {
-    return serve("/api/token_cloud", { model_id, seed, spread_mu });
-  }
-
-  function getDistribution(
-    model_id: string,
-    prefix_text: string,
-    temperature: number,
-    top_k?: number,
-  ): Promise<Distribution> {
-    return serve("/api/distribution", { model_id, prefix_text, temperature, top_k });
-  }
-
-  function getReduction2d(
-    model_id: string,
-    params: Record<string, unknown> = {},
-  ): Promise<Reduction2D> {
-    return serve("/api/reduction/2d", { model_id, ...params });
-  }
-
-  /** Preset hit when recorded; otherwise LIVE via the real HF tokenizer. */
-  async function tokenize(model_id: string, text: string): Promise<TokenizeResult> {
-    const hit = await presets.find("/api/tokenize", { model_id, text });
-    if (hit !== null) return hit as TokenizeResult;
+  /** LIVE: the model's real tokenizer files at the pinned revision (transformers.js). */
+  function tokenize(model_id: string, text: string): Promise<TokenizeResult> {
     return arch.tokenizeLive(model_id, text);
   }
 
@@ -263,21 +153,10 @@ export function createStaticClient(opts: StaticClientOptions = {}): StaticClient
   const staticClient: StaticClient = {
     listModels,
     resolveModel,
-    precompute,
     getJob,
-    getDistribution,
-    getReduction2d,
-    getVectorField,
-    getVectorFieldAnimation,
-    getSankey,
-    getSankeyHighlight,
-    getManifold,
-    getManifoldAnimation,
-    getTokenCloud,
     tokenize,
     pollJob,
     subscribeProgress,
-    ensureArtifact,
     // Geometry Lab: fully live in TypeScript (golden-tested geoEngine)
     getGeoSpec: (): Promise<GeoSpec> => geo.getGeoSpec(),
     geoTrain: (seed?: number): Promise<GeoTrainResult> => geo.geoTrain(seed),
@@ -307,10 +186,6 @@ export function createStaticClient(opts: StaticClientOptions = {}): StaticClient
     archGenerate: (body: ArchGenerateBody): Promise<ArchGenerateResult> => arch.archGenerate(body),
     // Static-only extras (views reach these via isStaticClient())
     staticMode: true,
-    staticPresets: async (view: PresetView): Promise<StaticPresetSummary[]> => {
-      const files = await presets.presetFiles(view);
-      return files.map((f) => ({ n: f.n, label: f.label, state: f.state }));
-    },
     staticArchTracePresets: (modelId: string): Promise<TraceIndexEntry[]> =>
       arch.tracePresets(modelId),
     staticRuntimeInfo: (): StaticRuntimeInfo => ({ mode: "static", generation: arch.runtimeInfo() }),

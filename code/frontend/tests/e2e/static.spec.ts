@@ -11,7 +11,7 @@ import path from "node:path";
 //
 // DATA-DRIVEN: expectations come from the export manifests in public/static-data
 // (the same files the build serves), so the suite passes against either a full
-// export or `scripts/export_static_assets.py --quick` (fewer presets, gpt2 only).
+// export or `scripts/export_static_assets.py --quick` (gpt2 only).
 
 const BASE = "/llm-geometry/";
 const DATA = path.join(
@@ -19,15 +19,8 @@ const DATA = path.join(
   "../../public/static-data",
 );
 
-interface PresetEntry {
-  n: number;
-  label: string;
-  file: string;
-}
 interface StaticIndex {
-  preset_model: string;
   arch_models: { model_id: string; slug: string; n_params: number }[];
-  presets: Record<"vector" | "sankey" | "manifold", PresetEntry[]>;
 }
 
 function readJson<T>(rel: string): T {
@@ -78,93 +71,6 @@ test("deep links under the base path serve the app", async ({ page }) => {
   await expect(page.getByTestId("view-tabs")).toBeVisible();
   await expect(page.getByTestId("static-badge")).toBeVisible();
 });
-
-// ---------------------------------------------------------------------------------
-// [e] the three 001 views on precomputed presets
-// ---------------------------------------------------------------------------------
-
-for (const view of ["vector", "sankey", "manifold"] as const) {
-  test(`001 ${view}: default preset renders, picker switches, off-preset shows the note`, async ({
-    page,
-  }) => {
-    const entries = index.presets[view];
-    expect(entries.length).toBeGreaterThan(0);
-
-    await page.goto(BASE);
-    await page.getByTestId(`tab-${view}`).click();
-    // Default state == preset 1 → renders without any interaction, from local assets.
-    await ready(page, `viz-${view}`, 30_000);
-    await expect(page.getByTestId(`viz-${view}-static-note`)).toHaveCount(0);
-
-    // The picker offers exactly the manifest's labeled presets and sits on preset 1.
-    const select = page.getByTestId(`static-preset-${view}`);
-    await expect(select).toBeVisible();
-    for (const e of entries) {
-      await expect(select.locator("option", { hasText: e.label })).toHaveCount(1);
-    }
-    await expect(select).toHaveValue("1");
-
-    // Switching presets applies the recorded state and re-renders from the export.
-    if (entries.length > 1) {
-      const target = entries[1];
-      const st = readJson<{ state: Record<string, unknown> }>(
-        `presets/${view}/${target.file}`,
-      ).state;
-      await select.selectOption(String(target.n));
-      await expect(select).toHaveValue(String(target.n));
-      await expect(page.getByTestId(`viz-${view}-static-note`)).toHaveCount(0, {
-        timeout: 30_000,
-      });
-      if (view === "vector" && !String(st.response_text ?? "").trim()) {
-        // caption reflects the preset's recorded readout layer
-        await expect(page.getByTestId("viz-vector")).toContainText(
-          `layer ${st.layer_to}`,
-          { timeout: 30_000 },
-        );
-      }
-    }
-
-    // A response-animation preset (if this export carries one) → key-frame mode.
-    if (view === "vector" || view === "manifold") {
-      const anim = entries.find((e) =>
-        String(
-          readJson<{ state: Record<string, unknown> }>(`presets/${view}/${e.file}`).state
-            .response_text ?? "",
-        ).trim(),
-      );
-      if (anim) {
-        await select.selectOption(String(anim.n));
-        await expect(page.getByTestId(`viz-${view}`)).toContainText(/key frames/, {
-          timeout: 60_000,
-        });
-        await expect(page.getByTestId(`viz-${view}-static-note`)).toHaveCount(0);
-      }
-    }
-
-    // Free-form input off the presets → the designed note (FR-203), never a blank
-    // panel, and re-picking a preset reverts cleanly.
-    await page.getByTestId("prefix-input").fill("this exact prompt was never precomputed zzz");
-    const note = page.getByTestId(`viz-${view}-static-note`);
-    await expect(note).toBeVisible({ timeout: 30_000 });
-    await expect(note).toContainText(/static demo/i);
-    await expect(note).toContainText(/preset/i);
-    await expect(note.locator("a")).toHaveAttribute(
-      "href",
-      /github\.com\/ContextLab\/llm-geometry/,
-    );
-    await select.selectOption("1");
-    const st1 = readJson<{ state: Record<string, unknown> }>(
-      `presets/${view}/${entries[0].file}`,
-    ).state;
-    await expect(page.getByTestId("prefix-input")).toHaveValue(String(st1.prefix_text));
-    await expect(note).toHaveCount(0, { timeout: 30_000 });
-    await ready(page, `viz-${view}`, 30_000);
-    await page.screenshot({
-      path: `tests/e2e/__screenshots__/static-${view}.png`,
-      fullPage: true,
-    });
-  });
-}
 
 // ---------------------------------------------------------------------------------
 // [b] Geometry Lab — fully live in the browser (US-1)

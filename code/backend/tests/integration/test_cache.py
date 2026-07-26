@@ -2,12 +2,13 @@
 
 import json
 import threading
+import uuid
 
 import numpy as np
 
-from llm_geometry import precompute
 from llm_geometry.cache.keys import make_cache_key
 from llm_geometry.cache.store import CacheStore
+from llm_geometry.jobs.registry import registry
 
 MODEL = "sshleifer/tiny-gpt2"
 
@@ -83,34 +84,32 @@ def test_concurrent_model_load_does_not_race():
     assert len(loaded) == 4 and all(m.model_id == "distilgpt2" for m in loaded)
 
 
-def test_single_flight_computes_once_under_concurrency():
-    params = {"source": "static", "reference_set_size": 50}
-    key = precompute.cache_key_for("embeddings", MODEL, params)
-    precompute.get_store().delete(key)
+def test_single_flight_creates_one_job_under_concurrency():
+    """FR-008: N concurrent requests for the same key produce ONE unit of work.
 
-    import llm_geometry.compute.embeddings as emod
+    Feature 004 removed the precompute pipeline; the single-flight primitive the
+    Geometry Lab's training and fine-tuning jobs ride on is the job registry's
+    get_or_create, so that is what this exercises — no patched functions, just the
+    real lock under real thread contention.
+    """
+    key = f"single-flight-probe-{uuid.uuid4().hex}"
+    created_flags: list[bool] = []
+    job_ids: list[str] = []
+    lock = threading.Lock()
+    start = threading.Barrier(8)
 
-    calls = {"n": 0}
-    original = emod.per_layer_embeddings
+    def work():
+        start.wait()  # maximize the overlap on the contended path
+        job, created = registry.get_or_create(key, phase="test")
+        with lock:
+            created_flags.append(created)
+            job_ids.append(job.job_id)
 
-    def counting(*args, **kwargs):
-        calls["n"] += 1
-        return original(*args, **kwargs)
+    threads = [threading.Thread(target=work) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
-    emod.per_layer_embeddings = counting
-    try:
-        results: list = []
-
-        def work():
-            results.append(precompute.get_or_compute_sync("embeddings", MODEL, params))
-
-        threads = [threading.Thread(target=work) for _ in range(4)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-    finally:
-        emod.per_layer_embeddings = original
-
-    assert calls["n"] == 1  # FR-008: four identical requests -> one real computation
-    assert len(results) == 4
+    assert sum(created_flags) == 1, "more than one thread believed it owned the work"
+    assert len(job_ids) == 8 and len(set(job_ids)) == 1  # everyone got the same job

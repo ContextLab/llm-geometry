@@ -1,18 +1,29 @@
-"""US1 — capability gate: unsupported models fail loudly, no fallback (T016)."""
+"""Capability gate: unsupported models fail loudly, no fallback (T016).
+
+Feature 004 removed the precompute pipeline, so the "nothing is created for a bad
+model, and no substitute is silently used" property is now asserted through the
+surviving path the Architecture Explorer actually calls: POST /api/models/resolve.
+"""
 
 import pytest
+from fastapi.testclient import TestClient
 
-from llm_geometry import precompute
+from llm_geometry.api.app import app
 from llm_geometry.errors import UnsupportedModelError
 from llm_geometry.models.loader import resolve_model
 
+client = TestClient(app)
 
-def test_unknown_model_raises_and_creates_no_artifact():
+
+def test_unknown_model_is_rejected_with_no_fallback():
     bad = "definitely-not-a-real-model-xyz-123"
-    with pytest.raises(UnsupportedModelError):
-        precompute.get_or_compute_sync("distribution", bad, {}, {"prefix_text": "x"})
-    # A failed resolve means no key/artifact was ever created; nothing to clean up,
-    # and crucially no fallback model was substituted (SC-007).
+    resp = client.post("/api/models/resolve", json={"model_id": bad})
+    assert resp.status_code == 422
+    err = resp.json()["error"]
+    assert err["type"] == "UnsupportedModelError"
+    assert err["message"]  # human-readable
+    # Crucially, no substitute model is handed back in place of the bad one (SC-007).
+    assert "model_id" not in err
 
 
 def test_model_loads_as_float32():

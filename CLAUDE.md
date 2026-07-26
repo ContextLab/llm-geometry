@@ -4,53 +4,58 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-`llm-geometry` studies LLMs through **geometric visualizations**. The deliverable described in `project_description.md` is a set of **interactive web pages** with smooth animations and responsive interactions that make the geometry of a transformer's embedding space explorable. The aesthetic bar is explicit: modern, striking, beautiful, clean, intuitive, and thoroughly documented. Anything expensive is **precomputed once and cached**, with an animated progress indicator while it runs.
+`llm-geometry` studies LLMs through **geometric visualizations** — interactive web pages
+with smooth animations and responsive interactions that make a transformer's internals
+explorable. The aesthetic bar is explicit: modern, striking, beautiful, clean, intuitive,
+thoroughly documented. Anything expensive is **computed once and cached**, with an
+animated progress indicator while it runs.
 
-Read `project_description.md` in full before designing anything — it is the source of truth for the science and the UX, and the snippets below only summarize it.
-
-### The three visualizations (core architecture)
-1. **Transformer layers as vector fields** — Reduce embeddings to 2D (UMAP/PCA), lay an *n×n* grid over the space, snap each grid vertex to its nearest token ("reference points"), then draw a quiver arrow from each reference token to the next token it predicts. Interactions: hover to reveal tokens, a layer slider, an editable prompt/context prefix, response shown as a colored trajectory, a temperature slider (>0 fans out into multiple semi-transparent vectors estimated over ~100 reps), and a model selector (incl. arbitrary open-weights HF models).
-2. **Token sequences as Sankey diagrams** — A particle swarm estimates the next-token distribution at each position. X = sequence position, Y = token ID. Start from a prompt, sample *n* particles from the position-0 distribution, advance each particle by conditioning on its own draw, combine per-particle distributions into the displayed distribution, and stop a particle once it emits end-of-stream. Same interaction palette (hover, context prefix, temperature, model selector).
-3. **Reachable "thoughts" as a manifold** — Reduce embeddings to 3D spherical coordinates (spherical MDS). Place all tokens on a radius-2 sphere and morph a unit sphere toward them, with displacement proportional to emission probability and neighbors dragged along via **RBF interpolation + Open3D `deform_as_rigid_as_possible` (ARAP)**. The order-invariance of combining per-token warps is an **open research question** flagged in the description — do not assume it is solved.
+`project_description.md` is the ORIGINAL vision document (three embedding-geometry
+visualizations: vector field, Sankey, manifold). Read it for the science and the
+aesthetic intent, but note that **feature 004 deliberately narrowed the deliverable**:
+those three views were removed in favor of the two explorer tabs below. Treat
+`project_description.md` as history plus design taste, not as a spec of what ships.
 
 ### Hard technical constraints
-- Token-level probability distributions are required, so the models must be **open-weights** (HuggingFace), not closed APIs.
-- Reductions and per-grid/per-token computations are heavy → design around a **precompute-and-cache** pipeline from the start, not as an afterthought.
+- Token-level probability distributions are required, so models must be **open-weights**
+  (HuggingFace), not closed APIs.
+- The static GitHub Pages build has no Python at runtime, so anything it shows is either
+  computed live in the browser, range-read from HuggingFace's CDN, or precomputed by the
+  real backend at build time — **never fabricated, never silently degraded**.
 
 ## Current state
 
-The **core machinery** (feature `001-core-machinery`) is implemented and verified with
-real models — the shared foundation all three visualizations will run on:
-- `code/backend/` — Python package `llm_geometry`: open-weights model loading +
-  capability detection (`models/`), real next-token distributions + per-layer embeddings
-  (`compute/`), 2D/grid/3D-spherical reductions (`reduce/`), integrity-checked
-  precompute-and-cache (`cache/`), single-flight job registry (`jobs/`), and a FastAPI
-  service with SSE progress (`api/`). Real-model tests in `code/backend/tests/`.
-- `code/frontend/` — Svelte + TypeScript + Vite shell: shared controls (model selector,
-  prompt prefix, temperature, layer), a cached-data client (`lib/dataClient.ts`), and a
-  minimal live preview. Vitest unit + Playwright e2e tests.
-- **All three visualizations are implemented** on top of the machinery and selectable
-  via the web app's view switcher: a **vector field** (D3 quiver of next-token arrows),
-  a **Sankey** diagram (d3-sankey over a particle swarm), and a **manifold** (Three.js
-  RBF-warped sphere). Backends live in `code/backend/src/llm_geometry/compute/`
-  (`vector_field.py`, `sankey.py`, `manifold.py`); frontends in `code/frontend/src/viz/`.
-- **Feature 002 (issue #1) adds two explorer tabs** on the same machinery:
-  an **Architecture Explorer** (`llm_geometry/arch/` + `api/routes_arch.py` +
-  `viz/arch/`) — traced-forward-pass graphs of real HF models (functional ops are
-  first-class nodes; tied weights aliased; pre-download size gate), weight-window
-  serving, live traces, and real generation — and a **Geometry Lab**
-  (`llm_geometry/geo/` + `api/routes_geo.py` + `viz/geo/`) — a from-scratch
-  `d_model=3` GeoTransformer really trained on a committed public-domain corpus,
-  with next-next + attention-force vector fields on a Three.js sphere, editable
-  weights via content-hash `weights_token`s, and real fine-tuning. The frozen HTTP
-  contract is `specs/002-interactive-model-explorer/contracts/api.md`; CI lives in
-  `.github/workflows/ci.yml` (all real models — no mocks anywhere).
+The app is a **two-tab explorer**, deployed at https://context-lab.com/llm-geometry/.
 
-The original paper-template scaffolding (`paper/` + its bibliography submodule,
-`code/notebooks/`, `data/`, `setup.sh`) has been removed; the repo is the web app.
-The Geometry Lab's training corpus ships as backend package data
-(`llm_geometry/geo/data/`), and the derived precompute cache lives at
-`.cache/llm-geometry/` (git-ignored; override with `LLM_GEOMETRY_CACHE_DIR`).
+- **Architecture Explorer** (`llm_geometry/arch/` + `api/routes_arch.py` + `viz/arch/`) —
+  traced-forward-pass graphs of real HF models (functional ops are first-class nodes;
+  tied weights aliased; pre-download size gate), weight-window serving, live traces, and
+  real generation. The model menu is **curated only** — the old "any open-weights HF id"
+  input was removed in 004 because the static build needs a community ONNX export that
+  most repos lack; expanding it is tracked in issue #4.
+- **Geometry Lab** (`llm_geometry/geo/` + `api/routes_geo.py` + `viz/geo/`) — a
+  from-scratch `d_model=3` GeoTransformer really trained on a committed public-domain
+  corpus, with next-next + attention-force vector fields on a Three.js sphere, editable
+  weights via content-hash `weights_token`s, real fine-tuning, from-scratch training on
+  arbitrary text or a real HuggingFace dataset, and file save/load.
+- **Static build** (feature 003) — a TypeScript port of the GeoTransformer
+  (`src/lib/geoEngine/`, golden-tested against the Python backend to ≤1e-5),
+  transformers.js generation, and safetensors HTTP Range reads. `VITE_DATA_MODE=static`
+  selects `src/lib/staticClient/`.
+
+The frozen HTTP contract is `specs/002-interactive-model-explorer/contracts/api.md` —
+**change it only in its own commit, with a note explaining why**. CI is
+`.github/workflows/ci.yml`; the Pages deploy is `.github/workflows/pages.yml` (both run
+real models — no mocks anywhere). CI pins **Python 3.10** (the lock file is frozen from a
+3.10 venv). CI caches MUST use run-id keys with `restore-keys` prefixes, never fixed keys:
+`actions/cache` entries are immutable, and a fixed key once froze an empty snapshot and
+made every run start cold.
+
+**Removed in feature 004** (`specs/004-two-tab-explorer/spec.md`): the vector-field,
+Sankey, and manifold views, plus `compute/{vector_field,sankey,manifold,token_cloud,
+distributions,printable,embeddings,context}.py`, `reduce/`, `precompute.py`, the shared
+control sidebar, and their tests/presets. Feature 001's spec is marked superseded rather
+than deleted so the history stays readable.
 
 ## How work happens here: Spec-Driven Development (Spec Kit)
 
@@ -71,17 +76,17 @@ This project is initialized with **Spec Kit** (`.specify/`, integration = `claud
 
 ## Repository layout
 
-- `code/backend/` — Python package `llm_geometry` (`src/llm_geometry/{models,compute,reduce,cache,jobs,api,arch,geo}`) + `tests/{unit,integration,contract}`; `pyproject.toml`, `requirements.txt`, pinned `requirements.lock`. The geo training corpus is package data (`geo/data/`).
-- `code/frontend/` — Svelte + TS + Vite app (`src/{viz,controls,lib,preview,styles}`) + `tests/{unit,e2e}`.
+- `code/backend/` — Python package `llm_geometry` (`src/llm_geometry/{models,cache,jobs,api,arch,geo}`) + `tests/{unit,integration,contract}`; `pyproject.toml`, `requirements.txt`, pinned `requirements.lock`. The geo training corpus is package data (`geo/data/`).
+- `code/frontend/` — Svelte + TS + Vite app (`src/{viz,controls,lib,styles}`) + `tests/{unit,e2e}`. `src/viz/{arch,geo}/` are the two tabs; each owns its controls.
 - `docs/screenshots/` — verification screenshots referenced from issue threads.
 - `notes/` — session notes and agent red-team/fix reports (`notes/agent-reports/`).
 - `scripts/dev.sh` — health-checked dev-stack launcher for both servers.
-- `.cache/llm-geometry/` — derived precompute artifacts (git-ignored, regenerable from model+params; `LLM_GEOMETRY_CACHE_DIR` overrides).
+- `.cache/llm-geometry/` — derived artifacts (git-ignored, regenerable; `LLM_GEOMETRY_CACHE_DIR` overrides).
 
 ## Commands
 
 ```bash
-# Backend (FastAPI + PyTorch/transformers + reductions)
+# Backend (FastAPI + PyTorch/transformers)
 cd code/backend && python -m venv .venv && . .venv/bin/activate && pip install -e ".[test]"
 uvicorn llm_geometry.api.app:app --port 8000          # JSON API on :8000
 pytest -q                                             # real-model tests (no mocks)
@@ -101,7 +106,7 @@ docker build -t llm-geometry . && docker run -it -p 8000:8000 llm-geometry
 sh scripts/dev.sh              # sh scripts/dev.sh stop
 ```
 
-Note: `.cache/llm-geometry/` holds derived precompute artifacts — git-ignored and
+Note: `.cache/llm-geometry/` holds derived artifacts (checkpoints, traced graphs) — git-ignored and
 regenerable from `(model + params)`; delete it freely to force a rebuild
 (`LLM_GEOMETRY_CACHE_DIR` overrides the location).
 
@@ -110,12 +115,10 @@ Note: the `Dockerfile` builds the real dual stack (python:3.11-slim + Node 20,
 and the requirements files in sync with what the code actually imports.
 
 <!-- SPECKIT START -->
-Active feature: **001-core-machinery** — Core Project Machinery (the shared
-backend+frontend foundation all three visualizations run on). For technologies,
-project structure, and commands, read the current plan and its artifacts:
-- Plan: `specs/001-core-machinery/plan.md`
-- Spec: `specs/001-core-machinery/spec.md`
-- Research / data model / API contract / quickstart:
-  `specs/001-core-machinery/{research.md,data-model.md,contracts/api.md,quickstart.md}`
-- Tasks: `specs/001-core-machinery/tasks.md`
+Active feature: **004-two-tab-explorer** — removals, defect fixes, and real
+from-scratch training. Read the spec before changing either tab:
+- Spec: `specs/004-two-tab-explorer/spec.md`
+- Frozen API contract (both tabs):
+  `specs/002-interactive-model-explorer/contracts/api.md`
+- Superseded: `specs/001-core-machinery/` (the three removed views)
 <!-- SPECKIT END -->

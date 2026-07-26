@@ -1,8 +1,8 @@
 """Integration test for scripts/export_static_assets.py (feature 003, agent 003-A).
 
 Runs the REAL exporter in ``--quick`` mode (geo assets in full; arch graph + tiles +
-2 traces for gpt2; one small preset per 001 view) into a tmp dir, then validates the
-emitted artifacts against the live backend (FastAPI TestClient, no mocks):
+2 traces for gpt2) into a tmp dir, then validates the emitted artifacts against the
+live backend (FastAPI TestClient, no mocks):
 
 - every emitted .json parses;
 - golden.json carries the coordinated schema (cases/weight_edits/finetune) with the
@@ -250,25 +250,6 @@ def test_arch_graph_meta_and_traces(export_dir: Path, client: TestClient) -> Non
         assert trace["node_activations"], "trace must carry per-node activations"
 
 
-def test_presets_match_live_routes(export_dir: Path, client: TestClient) -> None:
-    for view in ("vector", "sankey", "manifold"):
-        preset = _load(export_dir / "presets" / view / "1.json")
-        assert preset["view"] == view and preset["label"] and preset["state"]
-        assert preset["requests"], f"{view} preset has no recorded requests"
-        for req in preset["requests"]:
-            assert set(req.keys()) == {"endpoint", "params", "response"}
-            live = client.get(req["endpoint"], params=req["params"])
-            assert (
-                live.status_code == 200
-            ), f"{req['endpoint']} {req['params']}: {live.text[:300]}"
-            assert (
-                live.json() == req["response"]
-            ), f"{view} preset response drifted from the live route {req['endpoint']}"
-    cloud = _load(export_dir / "presets" / "token_cloud.json")
-    assert set(cloud.keys()) == {"endpoint", "params", "response"}
-    assert {"coords", "token_ids", "token_strs"} <= set(cloud["response"].keys())
-
-
 def test_index_manifest(export_dir: Path) -> None:
     index = _load(export_dir / "index.json")
     assert index["git_sha"] == "test-sha"
@@ -290,4 +271,3 @@ def test_index_manifest(export_dir: Path) -> None:
         assert p.stat().st_size == size, f"manifest size drifted for {rel}"
     assert index["total_bytes"] == sum(index["files"].values())
     assert [m["model_id"] for m in index["arch_models"]] == ["gpt2"]
-    assert set(index["presets"].keys()) == {"vector", "sankey", "manifold"}

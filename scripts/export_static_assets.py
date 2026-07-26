@@ -14,9 +14,9 @@ Usage (from the backend venv):
 
     python scripts/export_static_assets.py --quick --out /tmp/static-data ...
 
-``--quick`` (integration-test mode): geo assets in full; arch graph + tiles + 2
-traces for gpt2 only; one small preset per 001 view (gpt2). Everything still comes
-from the real backend — quick only shrinks model/param coverage, never fabricates.
+``--quick`` (integration-test mode): geo assets in full; arch graph + tiles + 2 traces
+for gpt2 only. Everything still comes from the real backend — quick only shrinks
+model/param coverage, never fabricates.
 """
 
 from __future__ import annotations
@@ -44,18 +44,6 @@ ARCH_MODELS_FULL = [
 ]
 ARCH_MODELS_QUICK = ["gpt2"]
 
-PRESET_MODEL_FULL = "Qwen/Qwen2.5-0.5B-Instruct"
-PRESET_MODEL_QUICK = "gpt2"
-
-# The frontend's default shared state (code/frontend/src/lib/stores.ts) + per-view
-# constants (viz/VectorField.svelte GRID_N/REF/SEED, viz/Manifold.svelte MARKERS,
-# viz/Sankey.svelte SEED). Preset 1 of each view IS the default state so the tab
-# renders instantly in static mode.
-DEFAULT_PREFIX = "The capital of France is"
-VECTOR_GRID_N = 24
-VECTOR_REF = 400
-VECTOR_ANIM_REF = 576
-MANIFOLD_MARKERS = 2000
 SEED = 0
 
 # 6 example prompts for the precomputed Architecture-Explorer trace dropdown
@@ -463,415 +451,6 @@ def export_arch_model(
     }
 
 
-# --- 001 presets ------------------------------------------------------------------------
-
-
-def _req(client: Any, endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "endpoint": endpoint,
-        "params": params,
-        "response": get_json(client, endpoint, params),
-    }
-
-
-def _vector_static(
-    client: Any,
-    mid: str,
-    prefix: str,
-    temp: float,
-    layer: int,
-    fanout: int,
-    grid_n: int,
-    ref: int,
-) -> dict[str, Any]:
-    return _req(
-        client,
-        "/api/vector_field",
-        {
-            "model_id": mid,
-            "prefix_text": prefix,
-            "response_text": "",
-            "response_step": 0,
-            "temperature": temp,
-            "layer_from": layer,
-            "layer_to": layer,
-            "grid_n": grid_n,
-            "fanout": fanout,
-            "reference_set_size": ref,
-            "seed": SEED,
-        },
-    )
-
-
-def preset_specs(model_id: str, quick: bool) -> dict[str, list[dict[str, Any]]]:
-    """The labeled preset configs per 001 view (preset 1 = the view's default state)."""
-    if quick:
-        # Quick mode trims COUNTS (1 preset per view, fewer particles/steps — those are
-        # state-carried, so the UI requests them once the preset state is applied) but
-        # MUST keep the request constants the views hard-code (VectorField GRID_N/REF,
-        # Manifold MARKERS): a preset recorded with different grid_n/reference_set_size
-        # can never be matched by a real view request (staticClient serves only exact
-        # param-dict hits), which would make quick exports invisible to the UI and to
-        # the static e2e suite (003-D).
-        return {
-            "vector": [
-                {
-                    "label": "Default (quick)",
-                    "state": {
-                        "prefix_text": DEFAULT_PREFIX,
-                        "temperature": 1.0,
-                        "layer_from": 0,
-                        "layer_to": 0,
-                        "fanout": 2,
-                        "response_text": "",
-                    },
-                    "kind": "static",
-                },
-            ],
-            "sankey": [
-                {
-                    "label": "Default (quick)",
-                    "state": {
-                        "prefix_text": DEFAULT_PREFIX,
-                        "temperature": 1.0,
-                        "n_particles": 40,
-                        "n_steps": 4,
-                        "response_text": "",
-                    },
-                },
-                # Response-bearing preset: records the tokenize + highlight requests
-                # the unit tests (and response UIs) exercise — quick mode must not
-                # leave those request kinds untested.
-                {
-                    "label": "Response (quick)",
-                    "state": {
-                        "prefix_text": DEFAULT_PREFIX,
-                        "temperature": 1.0,
-                        "n_particles": 40,
-                        "n_steps": 4,
-                        "response_text": " Paris",
-                    },
-                },
-            ],
-            "manifold": [
-                {
-                    "label": "Default (quick)",
-                    "state": {
-                        "prefix_text": DEFAULT_PREFIX,
-                        "temperature": 1.0,
-                        "width": 0.18,
-                        "response_text": "",
-                    },
-                },
-                {
-                    "label": "Response (quick)",
-                    "state": {
-                        "prefix_text": DEFAULT_PREFIX,
-                        "temperature": 1.0,
-                        "width": 0.18,
-                        "response_text": " Paris",
-                    },
-                    "kind": "animation",
-                },
-            ],
-        }
-    return {
-        "vector": [
-            {
-                "label": "Default · layer 0",
-                "state": {
-                    "prefix_text": DEFAULT_PREFIX,
-                    "temperature": 1.0,
-                    "layer_from": 0,
-                    "layer_to": 0,
-                    "fanout": 2,
-                    "response_text": "",
-                },
-                "kind": "static",
-            },
-            {
-                "label": "Final layer, deterministic (T=0)",
-                "state": {
-                    "prefix_text": DEFAULT_PREFIX,
-                    "temperature": 0.0,
-                    "layer_from": 23,
-                    "layer_to": 23,
-                    # fanout 1: the backend clamps fan-out at temperature 0, so a
-                    # recorded 2 only creates a control-vs-caption contradiction
-                    # (red-team static F3).
-                    "fanout": 1,
-                    "response_text": "",
-                },
-                "kind": "static",
-            },
-            {
-                "label": "Response animation · “Once upon a time”",
-                "state": {
-                    "prefix_text": "Once upon a time",
-                    "temperature": 1.0,
-                    "layer_from": 0,
-                    "layer_to": 0,
-                    "fanout": 2,
-                    "response_text": " there was a princess",
-                },
-                "kind": "animation",
-            },
-            {
-                "label": "Hot fan-out (T=1.5, 4 arrows)",
-                "state": {
-                    "prefix_text": DEFAULT_PREFIX,
-                    "temperature": 1.5,
-                    "layer_from": 0,
-                    "layer_to": 0,
-                    "fanout": 4,
-                    "response_text": "",
-                },
-                "kind": "static",
-            },
-        ],
-        "sankey": [
-            {
-                "label": "Default swarm",
-                "state": {
-                    "prefix_text": DEFAULT_PREFIX,
-                    "temperature": 1.0,
-                    "n_particles": 1000,
-                    "n_steps": 10,
-                    "response_text": "",
-                },
-            },
-            {
-                "label": "Cool swarm (T=0.3)",
-                "state": {
-                    "prefix_text": DEFAULT_PREFIX,
-                    "temperature": 0.3,
-                    "n_particles": 1000,
-                    "n_steps": 10,
-                    "response_text": "",
-                },
-            },
-            {
-                "label": "“Once upon a time”",
-                "state": {
-                    "prefix_text": "Once upon a time",
-                    "temperature": 1.0,
-                    "n_particles": 1000,
-                    "n_steps": 10,
-                    "response_text": "",
-                },
-            },
-            {
-                "label": "Response highlight · “ Paris”",
-                "state": {
-                    "prefix_text": DEFAULT_PREFIX,
-                    "temperature": 1.0,
-                    "n_particles": 1000,
-                    "n_steps": 10,
-                    "response_text": " Paris",
-                },
-            },
-        ],
-        "manifold": [
-            {
-                "label": "Default manifold",
-                "state": {
-                    "prefix_text": DEFAULT_PREFIX,
-                    "temperature": 1.0,
-                    "width": 0.18,
-                    "response_text": "",
-                },
-            },
-            {
-                "label": "Tight caps (width 0.10)",
-                "state": {
-                    "prefix_text": DEFAULT_PREFIX,
-                    "temperature": 1.0,
-                    "width": 0.10,
-                    "response_text": "",
-                },
-            },
-            {
-                "label": "Wide caps (width 0.30)",
-                "state": {
-                    "prefix_text": DEFAULT_PREFIX,
-                    "temperature": 1.0,
-                    "width": 0.30,
-                    "response_text": "",
-                },
-            },
-            {
-                "label": "Response animation · “ Paris”",
-                "state": {
-                    "prefix_text": DEFAULT_PREFIX,
-                    "temperature": 1.0,
-                    "width": 0.18,
-                    "response_text": " Paris",
-                },
-            },
-        ],
-    }
-
-
-def export_presets(
-    client: Any, out: Path, model_id: str, quick: bool
-) -> dict[str, Any]:
-    specs = preset_specs(model_id, quick)
-    labels: dict[str, list[dict[str, Any]]] = {}
-
-    def tokenize_req(text: str) -> dict[str, Any]:
-        # ResponseAnimator calls /api/tokenize for the response text in these flows.
-        return _req(client, "/api/tokenize", {"model_id": model_id, "text": text})
-
-    for n, spec in enumerate(specs["vector"], start=1):
-        log(f"presets/vector/{n}: {spec['label']}")
-        st = spec["state"]
-        grid_n = spec.get("grid_n", VECTOR_GRID_N)
-        requests: list[dict[str, Any]] = []
-        if spec.get("kind") == "animation":
-            requests.append(
-                _req(
-                    client,
-                    "/api/vector_field_animation",
-                    {
-                        "model_id": model_id,
-                        "prefix_text": st["prefix_text"],
-                        "response_text": st["response_text"],
-                        "temperature": st["temperature"],
-                        "layer_to": st["layer_to"],
-                        "reference_set_size": VECTOR_ANIM_REF,
-                        "grid_n": grid_n,
-                        "seed": SEED,
-                    },
-                )
-            )
-            requests.append(tokenize_req(st["response_text"]))
-        else:
-            requests.append(
-                _vector_static(
-                    client,
-                    model_id,
-                    st["prefix_text"],
-                    st["temperature"],
-                    st["layer_from"],
-                    st["fanout"],
-                    grid_n,
-                    spec.get("ref", VECTOR_REF),
-                )
-            )
-        size = write_json(
-            out / "presets" / "vector" / f"{n}.json",
-            {
-                "schema_version": SCHEMA_VERSION,
-                "view": "vector",
-                "n": n,
-                "label": spec["label"],
-                "model_id": model_id,
-                "state": st,
-                "requests": requests,
-            },
-        )
-        labels.setdefault("vector", []).append(
-            {"n": n, "label": spec["label"], "file": f"{n}.json", "bytes": size}
-        )
-
-    for n, spec in enumerate(specs["sankey"], start=1):
-        log(f"presets/sankey/{n}: {spec['label']}")
-        st = spec["state"]
-        requests = [
-            _req(
-                client,
-                "/api/sankey",
-                {
-                    "model_id": model_id,
-                    "prefix_text": st["prefix_text"],
-                    "temperature": st["temperature"],
-                    "n_particles": st["n_particles"],
-                    "n_steps": st["n_steps"],
-                    "seed": SEED,
-                },
-            )
-        ]
-        if st["response_text"]:
-            requests.append(
-                _req(
-                    client,
-                    "/api/sankey_highlight",
-                    {
-                        "model_id": model_id,
-                        "prefix_text": st["prefix_text"],
-                        "response_text": st["response_text"],
-                        "temperature": st["temperature"],
-                        "n_steps": st["n_steps"],
-                    },
-                )
-            )
-            requests.append(tokenize_req(st["response_text"]))
-        size = write_json(
-            out / "presets" / "sankey" / f"{n}.json",
-            {
-                "schema_version": SCHEMA_VERSION,
-                "view": "sankey",
-                "n": n,
-                "label": spec["label"],
-                "model_id": model_id,
-                "state": st,
-                "requests": requests,
-            },
-        )
-        labels.setdefault("sankey", []).append(
-            {"n": n, "label": spec["label"], "file": f"{n}.json", "bytes": size}
-        )
-
-    for n, spec in enumerate(specs["manifold"], start=1):
-        log(f"presets/manifold/{n}: {spec['label']}")
-        st = spec["state"]
-        markers = spec.get("markers", MANIFOLD_MARKERS)
-        base_params = {
-            "model_id": model_id,
-            "prefix_text": st["prefix_text"],
-            "temperature": st["temperature"],
-            "seed": SEED,
-            "reference_set_size": markers,
-            "width": st["width"],
-        }
-        if st["response_text"]:
-            requests = [
-                _req(
-                    client,
-                    "/api/manifold_animation",
-                    {**base_params, "response_text": st["response_text"]},
-                ),
-                tokenize_req(st["response_text"]),
-            ]
-        else:
-            requests = [_req(client, "/api/manifold", base_params)]
-        size = write_json(
-            out / "presets" / "manifold" / f"{n}.json",
-            {
-                "schema_version": SCHEMA_VERSION,
-                "view": "manifold",
-                "n": n,
-                "label": spec["label"],
-                "model_id": model_id,
-                "state": st,
-                "requests": requests,
-            },
-        )
-        labels.setdefault("manifold", []).append(
-            {"n": n, "label": spec["label"], "file": f"{n}.json", "bytes": size}
-        )
-
-    # The shared full-vocab token cloud at the frontend's default (seed=0, spread_mu=0.65).
-    log("presets: token_cloud (default seed/spread)")
-    cloud = _req(
-        client,
-        "/api/token_cloud",
-        {"model_id": model_id, "seed": SEED, "spread_mu": 0.65},
-    )
-    write_json(out / "presets" / "token_cloud.json", cloud)
-    return labels
-
-
 # --- manifest ---------------------------------------------------------------------------
 
 
@@ -879,7 +458,6 @@ def build_index(
     out: Path,
     args: argparse.Namespace,
     arch_meta: list[dict[str, Any]],
-    preset_labels: dict[str, Any],
     geo_meta: dict[str, Any],
 ) -> None:
     files: dict[str, int] = {}
@@ -903,8 +481,6 @@ def build_index(
         geo_meta = prior["geo"]
     if not arch_meta and prior.get("arch_models"):
         arch_meta = prior["arch_models"]
-    if not preset_labels and prior.get("presets"):
-        preset_labels = prior["presets"]
 
     write_json(
         out / "index.json",
@@ -915,8 +491,6 @@ def build_index(
             "quick": bool(args.quick),
             "geo": geo_meta,
             "arch_models": arch_meta,
-            "preset_model": args.preset_model,
-            "presets": preset_labels,
             "files": files,
             "total_bytes": sum(files.values()),
         },
@@ -945,17 +519,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--only",
-        default="geo,arch,presets",
-        help="comma list of sections to export (geo,arch,presets)",
-    )
-    parser.add_argument(
-        "--preset-model", default=None, help="override the 001 preset model id"
+        default="geo,arch",
+        help="comma list of sections to export (geo,arch)",
     )
     args = parser.parse_args(argv)
 
     sections = {s.strip() for s in args.only.split(",") if s.strip()}
-    if args.preset_model is None:
-        args.preset_model = PRESET_MODEL_QUICK if args.quick else PRESET_MODEL_FULL
     arch_models = ARCH_MODELS_QUICK if args.quick else ARCH_MODELS_FULL
     n_traces = 2 if args.quick else len(TRACE_PROMPTS)
 
@@ -969,7 +538,6 @@ def main(argv: list[str] | None = None) -> int:
 
     geo_meta: dict[str, Any] = {}
     arch_meta: list[dict[str, Any]] = []
-    preset_labels: dict[str, Any] = {}
     with TestClient(app) as client:
         if "geo" in sections:
             geo_meta = export_geo(client, out)
@@ -989,10 +557,8 @@ def main(argv: list[str] | None = None) -> int:
                         out / "arch" / _slug(bf16_mid) / "meta.json",
                         _safetensors_meta(bf16_mid, ref["revision"]),
                     )
-        if "presets" in sections:
-            preset_labels = export_presets(client, out, args.preset_model, args.quick)
 
-    build_index(out, args, arch_meta, preset_labels, geo_meta)
+    build_index(out, args, arch_meta, geo_meta)
     log(f"done in {time.time() - t0:.1f}s -> {out}")
     return 0
 

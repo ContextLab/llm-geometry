@@ -17,18 +17,9 @@ import type {
 } from "../../src/lib/dataClient";
 import { ApiError } from "../../src/lib/dataClient";
 import { createStaticClient, isStaticClient } from "../../src/lib/staticClient";
-import { paramsMatch } from "../../src/lib/staticClient/presets";
 import { dequantizeTile } from "../../src/lib/staticClient/arch";
 import type { ArchRuntime } from "../../src/lib/staticClient/runtimeTypes";
 import { fsStaticFetch, readStaticJson } from "./staticTestUtils";
-
-interface PresetFileJson {
-  n: number;
-  label: string;
-  model_id: string;
-  state: Record<string, unknown>;
-  requests: { endpoint: string; params: Record<string, unknown>; response: unknown }[];
-}
 
 interface TilesJson {
   bin: string;
@@ -50,144 +41,6 @@ function makeClient(runtime?: ArchRuntime) {
     runtimeLoader: runtime ? async () => runtime : undefined,
   });
 }
-
-const stripModel = (params: Record<string, unknown>): Record<string, unknown> => {
-  const { model_id: _drop, ...rest } = params;
-  return rest;
-};
-
-describe("paramsMatch", () => {
-  it("normalizes numbers/booleans like the live query string", () => {
-    expect(paramsMatch({ t: 1, s: "x", b: true }, { t: 1.0, s: "x", b: "true" })).toBe(true);
-    expect(paramsMatch({ t: 1, u: undefined, n: null }, { t: "1" })).toBe(true);
-    expect(paramsMatch({ t: 1 }, { t: 2 })).toBe(false);
-    expect(paramsMatch({ t: 1, extra: 0 }, { t: 1 })).toBe(false);
-    expect(paramsMatch({ t: 1 }, { t: 1, extra: 0 })).toBe(false);
-  });
-});
-
-describe("001 view presets (real preset files)", () => {
-  it("serves getVectorField for the exact recorded params", async () => {
-    const preset = await readStaticJson<PresetFileJson>("presets/vector/1.json");
-    const req = preset.requests.find((r) => r.endpoint === "/api/vector_field");
-    expect(req).toBeDefined();
-    const c = makeClient();
-    const out = await c.getVectorField(preset.model_id, stripModel(req!.params));
-    expect(out).toEqual(req!.response);
-  });
-
-  it("refuses non-preset params with a StaticModeError naming the presets", async () => {
-    const preset = await readStaticJson<PresetFileJson>("presets/vector/1.json");
-    const req = preset.requests.find((r) => r.endpoint === "/api/vector_field")!;
-    const c = makeClient();
-    const err = await c
-      .getVectorField(preset.model_id, { ...stripModel(req.params), temperature: 0.123 })
-      .then(
-        () => null,
-        (e: unknown) => e as ApiError,
-      );
-    expect(err).toBeInstanceOf(ApiError);
-    expect(err!.type).toBe("StaticModeError");
-    expect(err!.message).toContain(preset.label);
-    expect(err!.message).toContain("full stack");
-  });
-
-  // Manifest-driven: scan every exported preset for the first one carrying each
-  // endpoint (full and --quick exports both must supply all four request kinds —
-  // hard-coded file indices broke under --quick, where fewer presets exist).
-  async function findPresetWith(
-    view: "sankey" | "manifold",
-    endpoint: string,
-  ): Promise<PresetFileJson> {
-    const manifest = await readStaticJson<{ presets: Record<string, { n: number }[]> }>(
-      "index.json",
-    );
-    for (const entry of manifest.presets[view] ?? []) {
-      const preset = await readStaticJson<PresetFileJson>(`presets/${view}/${entry.n}.json`);
-      if (preset.requests.some((r) => r.endpoint === endpoint)) return preset;
-    }
-    throw new Error(`no exported ${view} preset carries ${endpoint} — export coverage gap`);
-  }
-
-  it("serves sankey, sankey_highlight, manifold and manifold_animation presets", async () => {
-    const c = makeClient();
-    for (const [view, endpoint, method] of [
-      ["sankey", "/api/sankey", c.getSankey],
-      ["sankey", "/api/sankey_highlight", c.getSankeyHighlight],
-      ["manifold", "/api/manifold", c.getManifold],
-      ["manifold", "/api/manifold_animation", c.getManifoldAnimation],
-    ] as const) {
-      const preset = await findPresetWith(view, endpoint);
-      const req = preset.requests.find((r) => r.endpoint === endpoint)!;
-      const out = await method(preset.model_id, stripModel(req.params));
-      expect(out).toEqual(req.response);
-    }
-  });
-
-  it("serves recorded tokenize calls from presets without any live runtime", async () => {
-    const preset = await findPresetWith("sankey", "/api/tokenize");
-    const req = preset.requests.find((r) => r.endpoint === "/api/tokenize")!;
-    const c = makeClient(); // no runtime injected: a live fallback would throw
-    const out = await c.tokenize(preset.model_id, req.params.text as string);
-    expect(out).toEqual(req.response);
-  });
-
-  it("serves the token cloud for its exported (seed, spread_mu) and refuses others", async () => {
-    const tc = await readStaticJson<{ params: Record<string, unknown>; response: unknown }>(
-      "presets/token_cloud.json",
-    );
-    const c = makeClient();
-    const out = await c.getTokenCloud(
-      tc.params.model_id as string,
-      tc.params.seed as number,
-      tc.params.spread_mu as number,
-    );
-    expect(out).toEqual(tc.response);
-    await expect(
-      c.getTokenCloud(tc.params.model_id as string, 1, 0.65),
-    ).rejects.toMatchObject({ type: "StaticModeError" });
-  });
-
-  it("getDistribution (no presets exist) is an honest StaticModeError", async () => {
-    const c = makeClient();
-    await expect(c.getDistribution("gpt2", "Hello", 1.0)).rejects.toMatchObject({
-      type: "StaticModeError",
-    });
-  });
-
-  it("precompute/ensureArtifact behave as cache hits for preset-backed artifacts", async () => {
-    const preset = await readStaticJson<PresetFileJson>("presets/sankey/1.json");
-    const req = preset.requests.find((r) => r.endpoint === "/api/sankey")!;
-    const c = makeClient();
-    const pre = await c.precompute("sankey", preset.model_id, stripModel(req.params));
-    expect(pre.ready).toBe(true);
-    expect(pre.job_id).toBeNull();
-    const progress: number[] = [];
-    const key = await c.ensureArtifact("sankey", preset.model_id, stripModel(req.params), {}, (p) =>
-      progress.push(p),
-    );
-    expect(key).toBe(pre.cache_key);
-    expect(progress).toEqual([1]);
-    await expect(c.precompute("sankey", preset.model_id, { temperature: 9 })).rejects.toMatchObject({
-      type: "StaticModeError",
-    });
-  });
-
-  it("staticPresets exposes {n, label, state} matching the manifest", async () => {
-    const c = makeClient();
-    expect(isStaticClient(c)).toBe(true);
-    const idx = await readStaticJson<{ presets: Record<string, { n: number; label: string }[]> }>(
-      "index.json",
-    );
-    for (const view of ["vector", "sankey", "manifold"] as const) {
-      const got = await c.staticPresets(view);
-      expect(got.map((p) => ({ n: p.n, label: p.label }))).toEqual(
-        idx.presets[view].map((p) => ({ n: p.n, label: p.label })),
-      );
-      for (const p of got) expect(p.state).toBeTypeOf("object");
-    }
-  });
-});
 
 describe("model catalog", () => {
   it("lists exactly the exported models with real graph capabilities", async () => {

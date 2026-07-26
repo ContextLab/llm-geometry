@@ -1,3 +1,9 @@
+> **SUPERSEDED by feature 004 (2026-07-26).** The three visualizations specified
+> here — vector field, Sankey, manifold — were removed from the app, along with
+> their backend compute modules, the reduction stack, and the precompute pipeline.
+> This document is kept for history. What ships now is the two-tab explorer:
+> see `specs/004-two-tab-explorer/spec.md`.
+
 # Feature Specification: Core Project Machinery
 
 **Feature Branch**: `001-core-machinery`

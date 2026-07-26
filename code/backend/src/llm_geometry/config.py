@@ -1,19 +1,22 @@
-"""Central configuration: paths, defaults, seeds, and performance budgets.
+"""Central configuration: paths, the cache schema version, and the model menu.
 
-Everything that downstream modules need to agree on (cache location, default model,
-the cache schema version, reproducibility seeds, and the feature's measurable
-performance budgets) lives here so there is a single source of truth (Constitution II).
+Everything downstream modules must agree on (cache location, the curated model menu,
+the cache schema version) lives here so there is a single source of truth
+(Constitution II).
+
+Feature 004 removed the three embedding-geometry views; the reduction defaults,
+reference-set sizing, and per-view performance budgets that existed only for them
+went with the code they configured.
 """
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 from pathlib import Path
 
 # Bump whenever any cached artifact's on-disk format changes. Reads of artifacts
 # tagged with a different schema version are treated as cache misses (FR-007).
-SCHEMA_VERSION = 14  # 14: manifold reference sets union true top emitters; true probs shipped
+SCHEMA_VERSION = 14
 
 # Repo root resolved from this file:
 # .../code/backend/src/llm_geometry/config.py -> parents[4] == repo root
@@ -30,42 +33,23 @@ def _default_cache_dir() -> Path:
 # Derived cache of precomputed artifacts (git-ignored, regenerable — Constitution II/III).
 CACHE_DIR = _default_cache_dir()
 
-# Default app model + curated menu (id -> display name). Arbitrary open-weights
-# HuggingFace ids are also accepted at runtime (FR-001); the menu is just a
-# convenience starting point.
+# The Architecture Explorer's curated menu (id -> display name).
+#
+# Curated ONLY (feature 004, FR-412): the app no longer offers an "any open-weights
+# HuggingFace id" affordance, because the static build's live path needs a community
+# ONNX export that most repos do not have — promising arbitrary ids was a claim the
+# deployed demo could not keep. Growing this list (or filtering the Hub for genuinely
+# loadable repos) is tracked in GitHub issue #4.
+#
+# Entries are instruct-tuned unless marked otherwise; a base model has no chat
+# template and completes text rather than answering, which the UI states outright.
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 CURATED_MODELS: dict[str, str] = {
     "Qwen/Qwen2.5-0.5B-Instruct": "Qwen2.5 0.5B Instruct (default)",
-    "Qwen/Qwen2.5-1.5B-Instruct": "Qwen2.5 1.5B Instruct",
-    "HuggingFaceTB/SmolLM2-1.7B-Instruct": "SmolLM2 1.7B Instruct",
-    "openai-community/gpt2-large": "GPT-2 Large (774M)",
-    "gpt2": "GPT-2 (124M)",
-    "distilgpt2": "DistilGPT-2 (82M, fast)",
+    "HuggingFaceTB/SmolLM2-360M-Instruct": "SmolLM2 360M Instruct",
+    "HuggingFaceTB/SmolLM2-135M-Instruct": "SmolLM2 135M Instruct (smallest)",
+    "gpt2": "GPT-2 124M (base — completes text)",
 }
-
-# Reproducibility: a single fixed default seed keeps reductions deterministic (FR-013).
-DEFAULT_SEED = 0
-
-# Dimensionality-reduction defaults.
-DEFAULT_GRID_N = 25
-DEFAULT_2D_METHOD = "pca"
-# pca3 is the default 3D method: fast and deterministic (reproducible cache, SC-002).
-# Metric MDS is available as an opt-in alternative.
-DEFAULT_3D_METHOD = "pca3"
-
-# Manifold RBF cap width on the UNIT sphere (smaller = tighter, more localized domes toward
-# likely tokens). Exposed in the UI; this is the default a fresh session starts from.
-DEFAULT_RBF_WIDTH = 0.18
-
-# Embedding "reference set": the tokens we compute embeddings for. The full vocab is
-# free for the static (input-embedding) source but costs one forward pass per token
-# for contextual layers, so the default caps the set for tractability and snappy
-# demos (spec Assumption: "vocabulary or a documented, configurable subset"). Set to
-# None to use the full vocabulary.
-DEFAULT_REFERENCE_SET_SIZE: int | None = 2000
-
-# Batch size for the contextual-embedding forward passes.
-EMBED_BATCH_SIZE = 64
 
 # --- Architecture Explorer (feature 002, /api/arch/*) ------------------------------
 # Hard parameter ceiling: larger models are rejected BEFORE any download (FR-107).
@@ -81,16 +65,12 @@ ARCH_WEIGHTS_MAX_CELLS = 4096
 # Hard cap on tokens generated per /api/arch/generate call.
 ARCH_MAX_NEW_TOKENS = 128
 
-
-@dataclass(frozen=True)
-class PerfBudget:
-    """The feature's measurable performance budgets (spec Success Criteria)."""
-
-    cache_hit_ms: float = 100.0  # SC-001: backend cache-hit response
-    full_roundtrip_ms: float = 1000.0  # SC-001: control change -> preview updated
-    target_fps: float = 60.0  # SC-004: shell animations
-    first_precompute_s: float = 180.0  # SC-003: first default-model precompute
-    progress_min_hz: float = 1.0  # SC-003: progress updates per second
-
-
-PERF = PerfBudget()
+# --- Decoding defaults (feature 004, FR-405) ---------------------------------------
+# Unfiltered full-vocab sampling (top_k=0, top_p=1.0) was the primary cause of poor
+# replies: at T>0 the long tail gets drawn constantly, which small models cannot
+# survive. These are the standard constraints, and the transformers.js runtime in
+# code/frontend/src/lib/staticClient/transformersRuntime.ts MUST mirror them so the
+# static build and the full stack decode the same way.
+ARCH_TOP_P = 0.9
+ARCH_TOP_K = 50
+ARCH_REPETITION_PENALTY = 1.1
