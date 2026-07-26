@@ -109,3 +109,26 @@ https://github.com/ContextLab/llm-geometry/issues/1#issuecomment-5071465097
       traces); HF CDN allows CORS Range reads of safetensors (exact windows,
       bf16>>16 decode); geo model ports to ~300 lines TS (<1s finetune);
       vite base /llm-geometry/; deploy-pages@v5 flow.
+
+## Round 3: feature 003 (static Pages build)
+- [x] 003-A exporter (49.97MB static-data, git-ignored; pages.yml regenerates) ·
+      003-B TS GeoEngine (golden-verified 1e-5; bit-identical weight tokens) ·
+      003-C staticClient (transformers.js live gen; safetensors Range reads
+      byte-exact; presets; StaticModeError honesty) · 003-D static UX + e2e
+      (8 specs, both playwright projects; ci.yml exports --quick).
+- [x] Static red team (2 agents, production base path): geoarch 3 MAJOR (T=0
+      tooltip contradiction; backend-flavored offline copy; silent edit loss on
+      reload) + presets 1 HIGH (Recompute permanently blanks 001 views behind a
+      false notice; lastRefresh init bug latent in backend mode too) — ALL FIXED
+      (5b444b6) + exporter --only manifest-clobber bug fixed.
+- [x] PR #3 open (003 -> main). After merge: pages.yml deploys to
+      https://context-lab.com/llm-geometry/ — verify live, then final comment.
+- [x] CI hardening en route to green (3 real findings): frontend job lacked
+      static-data (now exports --quick); golden sources needed per-checkpoint
+      pairing (platform-divergent training); cancellation atol floor 2e-6->5e-6
+      (Linux excursion 2.57e-6). PR #3 merged (main).
+- [x] Pages deploy #1 crawled 60min and was cancelled by Jeremy: fixed-key
+      actions/cache entries are IMMUTABLE -> a 212MB/0MB early snapshot froze,
+      every run re-downloaded cold. Fixed: run-id keys + restore-keys prefix
+      (accumulating), stale v1 entries deleted, pages timeout 120min for the
+      one-time warm-up. Deploy #2 running.
