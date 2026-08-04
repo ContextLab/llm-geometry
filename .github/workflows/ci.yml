@@ -17,6 +17,21 @@ concurrency:
 
 env:
   HF_HUB_DISABLE_TELEMETRY: "1"
+  # Authenticates every Hub call in this workflow. `huggingface_hub` and
+  # `transformers` both read HF_TOKEN from the environment, so nothing in the code
+  # needs to know about it.
+  #
+  # Why it is here: unauthenticated CI gets rate-limited hard, and three builds
+  # across two sessions died on 429s. The failure is not cosmetic — when
+  # `model_info` cannot resolve a revision to a commit sha, `export_static_assets.py`
+  # REFUSES to publish rather than emit weight URLs pinned to a moving `main`
+  # (issue #5). That refusal is correct, so the fix belongs here rather than in a
+  # looser guard.
+  #
+  # The secret is optional by design: forks and PRs from forks get an empty string,
+  # which `huggingface_hub` treats as anonymous — exactly today's behaviour, with
+  # today's retries. Nothing breaks without it; it is only more likely to succeed.
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
 jobs:
   backend:

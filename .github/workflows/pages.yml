@@ -20,6 +20,14 @@ concurrency:
 
 env:
   HF_HUB_DISABLE_TELEMETRY: "1"
+  # Read by `huggingface_hub` and `transformers` directly; no code change needed.
+  # This job is the one that most needs it: it runs the REAL backend as a build tool
+  # and resolves every curated model's revision to a commit sha. On a 429 that
+  # resolution fails, and `export_static_assets.py` refuses to publish rather than
+  # ship weight URLs pointing at a moving `main` (issue #5) — so an unauthenticated
+  # rate limit does not degrade the deploy, it blocks it. Optional: absent, the
+  # value is empty and the Hub is called anonymously, exactly as before.
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
 jobs:
   build-and-deploy:
