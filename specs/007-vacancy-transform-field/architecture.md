@@ -275,8 +275,14 @@ stream selects, so reordering silently changes every nonce):
 
 - `ONSETS` — 47 entries, `b … sq`
 - `NUCLEI` — 19 entries, `a … er`
-- `CODAS` — 49 entries, beginning with the empty string
+- `CODAS` — **46** entries, `"" … zzle`
 - `UNSTRESSED_TAILS` — 13 entries, `y … ing`
+
+An earlier draft said `CODAS` had 49. It has 46 — I miscounted. Both implementations copied the
+source verbatim, flagged the discrepancy, and correctly took "verbatim" over the tally, so
+nothing diverged. **The lists are normative; the counts here are commentary.** If they ever
+disagree again, the source lists win, because a nonce is a function of the strings and their
+indices and not of a number in a document.
 - unstressed-onset prefixes — `["a", "be", "re", "de", "un", "en"]`
 - reduced coda set for unstressed syllables — `["", "", "l", "n", "r", "s"]` (the duplicated
   empty string doubles its weight; keep it)
@@ -603,6 +609,7 @@ buys structural rather than argued cross-language equality.
 
 ```
 typesTotal, typesEligible, typesVacated,
+stemsTotal, stemsVacated,
 tokensTotal, tokensVacated,
 meanSyllablesBefore, meanSyllablesAfter,
 meanAnapestBefore,  meanAnapestAfter,
@@ -613,6 +620,21 @@ bijective, imageSize, remintRounds
 ```
 
 Both stacks compute these from the same definitions; the golden fixture (§11) pins them.
+
+**Counting, pinned.** The two implementations agreed on `tokensVacated` to the token (8 202 at
+`p = 1`) while reporting different type counts — 1 922 against 1 665 — which is a definitional
+gap in this section, not a disagreement about the transform. The definitions are:
+
+- `typesTotal` — distinct lowercased types in the **domain** (corpus types ∪ budget words)
+- `typesEligible` — domain types whose **stem** is eligible per §2.2
+- `typesVacated` — domain types whose transformed output differs from the input at this `p`
+- `stemsTotal` — distinct eligible stems, i.e. the size of the map
+- `stemsVacated` — stems with `u(stem) < p`
+- `tokensTotal` / `tokensVacated` — over the **corpus** token stream, not the domain
+
+`typesEligible ≥ stemsTotal` always, since inflected forms share a stem. At `p = 1` every
+eligible stem vacates, because `u ∈ [0, 1)` by construction, so `stemsVacated == stemsTotal` and
+`typesVacated == typesEligible` — an identity worth asserting, since it caught this.
 
 **Where each token's stress came from.** The first draft asked for a single
 `stressTableCoverage`, which is ambiguous the moment minted forms exist: read literally it counts
