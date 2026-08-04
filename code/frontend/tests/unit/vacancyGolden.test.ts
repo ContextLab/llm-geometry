@@ -90,6 +90,7 @@ import {
   mapVocabWords,
   stemAndSuffix,
   transformWord,
+  typeCounts,
   vacancyDomain,
   vacancyParams,
   vacancyStats,
@@ -118,6 +119,8 @@ interface GoldenMap {
   label: string;
   seed: number;
   matchProsody: boolean;
+  mint: "nonce" | "swap";
+  injectiveAtEveryP: boolean;
   remintRounds: number;
   bijective: boolean;
   imageSize: number;
@@ -160,6 +163,7 @@ interface GoldenCase {
     matchProsody: boolean;
     revealAfter: number;
     keep: string[];
+    mint: "nonce" | "swap";
   };
   head400: string;
   vacatedSha256: string;
@@ -205,6 +209,8 @@ const CORPUS_ASSET = path.resolve(__dirname, "../../public/static-data/lex/corpu
 const CORPUS = (JSON.parse(fs.readFileSync(CORPUS_ASSET, "utf-8")) as LexCorpusAsset).text;
 const CORPUS_TYPES = new Set(tokenize(CORPUS));
 const DOMAIN = vacancyDomain(CORPUS_TYPES);
+/** The corpus's per-type occurrence counts — the frequency source `mint = "swap"` ranks by. */
+const COUNTS = typeCounts(tokenize(CORPUS));
 const BUDGET_WORDS = dolchBudget("full");
 
 const sha256 = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
@@ -223,6 +229,7 @@ function paramsOf(c: GoldenCase): VacancyParams {
     matchProsody: c.params.matchProsody,
     revealAfter: c.params.revealAfter,
     keep: c.params.keep,
+    mint: c.params.mint,
   });
 }
 
@@ -234,7 +241,12 @@ function paramsOf(c: GoldenCase): VacancyParams {
  * proves that reuse is irrelevant in the mapped condition.
  */
 function mapFor(params: VacancyParams): VacancyMap {
-  return buildVacancyMap(DOMAIN, params);
+  // `typeCounts` is passed unconditionally. `mint = "nonce"` ignores it — the nonce map is a
+  // pure function of `(domain, seed, matchProsody)`, and every pre-existing case in this
+  // fixture proves it by still matching — while `mint = "swap"` needs it and throws without
+  // it. Passing it always is what keeps the two call sites from differing by what one of
+  // them remembered, which is §5.2's whole objection to an optional `avoid`.
+  return buildVacancyMap(DOMAIN, params, COUNTS);
 }
 
 /** The fixture's own reading of a field a `knownDivergence` block names. */
@@ -294,7 +306,7 @@ const FLOAT_STATS = [
 
 describe("the fixture is the one this test was written against", () => {
   it("declares its format, contract, tolerance and provenance", () => {
-    expect(golden.format).toBe("vacancy-golden-v1");
+    expect(golden.format).toBe("vacancy-golden-v2");
     expect(golden.contract).toBe("specs/007-vacancy-transform-field/architecture.md");
     expect(golden.command).toBe("python scripts/export_vacancy_golden.py");
     expect(golden.git_sha).toMatch(/^[0-9a-f]{40}$/);
@@ -358,6 +370,7 @@ describe("the stem -> nonce map (§5.2)", () => {
       const params = vacancyParams({
         seed: gm.seed,
         matchProsody: gm.matchProsody,
+        mint: gm.mint,
         // The control labels differ from the mapped condition only in knobs that do not
         // reach minting, so the map is a pure function of (domain, seed, matchProsody);
         // building it from the seed and the flag alone is itself part of the claim.
@@ -365,6 +378,7 @@ describe("the stem -> nonce map (§5.2)", () => {
       const vmap = mapFor(params);
       expect(vmap.remintRounds).toBe(gm.remintRounds);
       expect(vmap.bijective).toBe(gm.bijective);
+      expect(vmap.injectiveAtEveryP).toBe(gm.injectiveAtEveryP);
       expect(vmap.imageSize).toBe(gm.imageSize);
       expect(vmap.domain.size).toBe(gm.domainSize);
       expect(vmap.mapping.size).toBe(gm.mappingSize);

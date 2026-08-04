@@ -47,6 +47,17 @@ The properties that make a `p`-sweep interpretable are structural here rather th
 for: `u` depends only on `(seed, stem)`, so vacated sets are **nested** in `p`; the map is
 built independently of `p`, so a stem's nonce is **stable** across the whole sweep.
 
+**Two minting strategies** (``VacancyParams.mint``, contract §8.3). ``"nonce"`` invents the
+replacement; ``"swap"`` draws a REAL English word from the domain's own open-class types by
+frequency rank, which is the control that separates *wrong content* from *unknown form* for
+the pretrained arm. They differ in exactly one property, and §5.2a proves the difference is
+forced rather than a shortcoming of this implementation: a swap map's images ARE domain
+types, so a vacated word can land on one that has not moved, and no `p`-stable such map is
+injective at intermediate `p` unless it is the identity. Swap is therefore a bijection of
+the domain at full vacancy — where the pretrained arm measures, and where the invariance
+theorem holds for it exactly as for nonce — and :func:`map_vocab_words` refuses the rest
+rather than manufacturing a vocabulary with two words on one row.
+
 Two defects that the first implementation of this contract exposed are now fixed in the
 contract itself, and each is covered by a named test here:
 
@@ -219,6 +230,27 @@ MINT_MAX_SALT = 1200
 
 #: Contract §5.2/§7.3: injectivity is verified, not assumed, and re-minted on collision.
 MAX_REMINT_ROUNDS = 8
+
+# --- the swap control (contract §8.3) ----------------------------------------------------
+
+#: Half-width of the frequency-rank window a swap replacement is drawn from: attempt `a`
+#: proposes ``pool[(r + delta) % len(pool)]`` for ``delta`` in ``[-w, -1] | [1, w]``.
+SWAP_WINDOW = 32
+
+#: The window doubles every this many attempts, up to the whole pool — the same deterministic
+#: relaxation §5.5 uses, and necessary for the same reason: "anything already used" depletes a
+#: fixed window for the stems late in canonical order.
+SWAP_WIDEN_EVERY = 64
+
+#: Attempt at which the prosody filter is dropped, mirroring :data:`MINT_RELAX_SYLLABLES_SALT`.
+SWAP_RELAX_PROSODY = 1024
+
+#: Reaching this many attempts raises rather than looping — the pool is finite, so unlike
+#: minting this bound is reachable in principle and we want to know if it ever is.
+SWAP_MAX_ATTEMPTS = 4096
+
+#: The two minting strategies of contract §7.1 / §8.3.
+MINT_STRATEGIES: tuple[str, ...] = ("nonce", "swap")
 
 #: Contract §5.8: a re-mint jumps to a fresh region of the byte stream deterministically.
 REMINT_SALT_STRIDE = 1000
@@ -418,8 +450,10 @@ class _ByteStream:
 
     __slots__ = ("_prefix", "_counter", "_block", "_offset")
 
-    def __init__(self, seed: int, stem: str, salt: int) -> None:
-        self._prefix = f"{seed}:mint:{stem}:{salt}:"
+    def __init__(self, seed: int, stem: str, salt: int, tag: str = "mint") -> None:
+        #: `tag` separates the minting stream from the swap-draw stream of §8.3. It is part
+        #: of the hashed prefix, so the two can never alias however the salts line up.
+        self._prefix = f"{seed}:{tag}:{stem}:{salt}:"
         self._counter = 0
         self._block = hashlib.sha256(f"{self._prefix}0".encode("utf-8")).digest()
         self._offset = 0
@@ -499,6 +533,143 @@ def _mint(
     )
 
 
+def type_counts(tokens: Iterable[str]) -> dict[str, int]:
+    """Occurrences per lowercased type — the frequency source the swap control ranks by.
+
+    Takes the TOKEN STREAM (``tokenize(text)``), not the type set: a set has no frequencies,
+    and ``mint="swap"`` needs them. Passing the deduplicated domain here would silently rank
+    every type equally and give a map that is alphabetical rather than frequency-matched, so
+    :func:`build_vacancy_map` requires this to be passed explicitly and raises without it
+    rather than inventing a fallback.
+    """
+    _reject_bare_str(tokens, "type_counts", "tokens")
+    counts: dict[str, int] = {}
+    for t in tokens:
+        key = t.lower()
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def swap_pool(domain: Iterable[str], counts: Mapping[str, int], keep: frozenset[str]) -> list[str]:
+    """The replacement pool of contract §8.3: the domain's open-class TYPES by frequency rank.
+
+    Ordered by ``(count descending, type ascending)`` — the tie rule
+    :func:`~llm_geometry.lex.vocab.frequency_budget` already uses, so "frequency rank" means
+    one thing in this codebase. A type absent from the corpus (the 22 Dolch-only words) has
+    count 0 and ranks last, alphabetically among its equals.
+
+    **Types, not stems.** The stem set is exactly the set of keys the map assigns, so drawing
+    from it would consume the pool exactly and leave an A-collision with nowhere to move. On
+    the shipped corpus the pool is 1944 types against 1680 stems, which is the slack the
+    re-draw rounds spend.
+    """
+    return sorted(
+        {t.lower() for t in domain if is_eligible(stem_and_suffix(t)[0], keep)},
+        key=lambda t: (-counts.get(t, 0), t),
+    )
+
+
+def swap_rank(
+    stem: str, family: Iterable[str], pool: Sequence[str], counts: Mapping[str, int]
+) -> int:
+    """Where `stem` sits in the frequency-ranked pool (contract §8.3).
+
+    Not ``pool.index(stem)``: 375 of the shipped corpus's 1680 eligible stems are not domain
+    types at all — `hang` and `gum` reach the map only as the stems of `hanged` and `gums` —
+    so a lookup would raise on a fifth of them. The rank is instead the position the stem's
+    own key would take in the pool's order, with the stem's frequency taken over its whole
+    INFLECTIONAL FAMILY: `hang` is as frequent as `hanged` + `hanging` make it, which is the
+    frequency a reader of the corpus actually meets.
+
+    Defined as the number of pool entries whose key sorts strictly before the stem's, so it
+    is a plain count and cannot be read two ways; the binary search is only how it is
+    computed. Ties fall to the stem's own alphabetical position, exactly as the pool order
+    does.
+    """
+    freq = sum(counts.get(t, 0) for t in family)
+    key = (-freq, stem)
+    lo, hi = 0, len(pool)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        other = pool[mid]
+        if (-counts.get(other, 0), other) < key:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+def _draw_swap(
+    stem: str,
+    seed: int,
+    match_prosody: bool,
+    pool: Sequence[str],
+    rank: Mapping[str, int],
+    used: frozenset[str] | set[str],
+    suffixes: Sequence[str],
+    claimed: frozenset[str] | set[str],
+    barred: frozenset[str] | set[str],
+    start_salt: int = 0,
+) -> tuple[str, int, list[str]]:
+    """Draw one real-word replacement for `stem` (contract §8.3).
+
+    Returns ``(word, salt, surface forms)`` — the forms the stem now owns, one per suffix it
+    occurs with, so the caller can claim them.
+
+    Deterministic in ``(seed, stem, pool, used, claimed, start_salt)`` and independent of `p`,
+    exactly as :func:`_mint` is, so §5.6's stability property survives the swap control.
+
+    Attempt `a` widens the window every :data:`SWAP_WIDEN_EVERY` attempts and drops the
+    prosody filter at :data:`SWAP_RELAX_PROSODY`; both relaxations are functions of `a` alone,
+    never of how many stems happen to have been assigned first. The byte stream carries the
+    ``swap`` tag, so it can never alias the ``mint`` stream at the same salt.
+
+    **Conditions A and B₁ are enforced here, at draw time, not only checked afterwards.** A
+    candidate is rejected if any of the surfaces it would produce is already claimed by an
+    earlier stem, is an ineligible domain type, or equals the very type it replaces. Checking
+    only afterwards costs 29 collision rounds on the shipped corpus at seed 0 and does not
+    converge inside the 8 §5.2 allows: the pool holds inflected types, so a bare stem drawing
+    `years` and a suffixed one drawing `year` land on the same surface, and re-drawing one of
+    them at random walks into the next such pair. Enforcing at draw time makes the map
+    correct by construction and the verification loop below a check rather than a search.
+    """
+    n = len(pool)
+    if n == 0:
+        raise ComputeError(
+            "the swap pool is empty — no domain type has an eligible stem, so there is no "
+            "real word to draw (contract §8.3)",
+            {"stem": stem, "seed": seed},
+        )
+    r = rank[stem]
+    pattern = stress(stem) if match_prosody else None
+    family = {stem + suffix for suffix in suffixes}
+    for attempt in range(SWAP_MAX_ATTEMPTS):
+        salt = start_salt + attempt
+        # The doubling is capped at 20 before the min, not because 20 is meaningful but
+        # because JavaScript's `<<` takes its shift count modulo 32: an uncapped
+        # `attempt // 64` reaches 63 at the give-up bound and the two stacks would compute
+        # different widths from the same attempt. 32 << 20 already exceeds any pool.
+        width = min(SWAP_WINDOW << min(attempt // SWAP_WIDEN_EVERY, 20), n)
+        offset = _ByteStream(seed, stem, salt, tag="swap").u32() % (2 * width)
+        delta = offset - width if offset < width else offset - width + 1
+        candidate = pool[(r + delta) % n]
+        if candidate == stem or candidate in used or candidate in family:
+            continue
+        if pattern is not None and attempt < SWAP_RELAX_PROSODY and stress(candidate) != pattern:
+            continue
+        forms = [surface_form(candidate, stem, suffix, seed) for suffix in suffixes]
+        if any(f in claimed or f in barred or f in family for f in forms):
+            continue
+        if len(set(forms)) != len(forms):
+            continue
+        return candidate, salt, forms
+    raise ComputeError(
+        f"could not draw a swap replacement for {stem!r} in {SWAP_MAX_ATTEMPTS} attempts — "
+        "the pool is finite, so report this rather than raising the bound",
+        {"stem": stem, "seed": seed, "pool": n, "used": len(used), "start_salt": start_salt},
+    )
+
+
 def _seam_fix(nonce: str, suffix: str, stem: str, seed: int) -> str:
     """Repair a seam like ``wee`` + ``er`` -> ``weeer`` (contract §5.7).
 
@@ -560,6 +731,13 @@ class VacancyParams:
     #: Extra words added to the closed class. The effective set is
     #: ``FUNCTION_WORDS | lower(keep)`` — see :attr:`keep_set`.
     keep: frozenset[str] = frozenset()
+    #: How a replacement is produced (contract §8.3). ``"nonce"`` invents a phonotactically
+    #: legal form; ``"swap"`` draws a REAL English word from the domain's own open-class types
+    #: by frequency rank, so the passage stays equally nonsensical while every form remains a
+    #: known word with ordinary tokenization. That is the control that separates "wrong
+    #: content" from "unknown form" in the pretrained arm — and §5.2a proves it can only be
+    #: injective at full vacancy, which is where the pretrained arm measures.
+    mint: str = "nonce"
 
     _keep_set: frozenset[str] = field(default=frozenset(), repr=False, compare=False)
 
@@ -579,6 +757,18 @@ class VacancyParams:
             raise InvalidParamError(
                 f"reveal_after must be >= 0, got {self.reveal_after}",
                 {"reveal_after": self.reveal_after},
+            )
+        if self.mint not in MINT_STRATEGIES:
+            raise InvalidParamError(
+                f"mint must be one of {list(MINT_STRATEGIES)}, got {self.mint!r}",
+                {"mint": self.mint},
+            )
+        if self.mint == "swap" and not self.consistent:
+            raise InvalidParamError(
+                "mint='swap' requires consistent=True: the inconsistent control needs a fresh "
+                "type per occurrence and the corpus has 1680 open-class stems against 8202 "
+                "vacated tokens, so there is no supply of real words to draw (contract §8.3)",
+                {"mint": self.mint, "consistent": self.consistent},
             )
         # Same trap as `vacancy_domain`: `keep="little"` would quietly protect six letters.
         _reject_bare_str(self.keep, "VacancyParams", "keep")
@@ -604,6 +794,11 @@ class _RewriteState:
 
     ``consistent=True, reveal_after=0`` — the condition the invariance theorem is stated for —
     touches nothing here except the counter, and the counter never changes an output.
+
+    `used` is seeded from the map's STORED :attr:`VacancyMap.forbidden` (§5.8) — the domain
+    plus every nonce ever handed out, superseded ones included — not from
+    ``mapping.values()``, which drops the superseded ones and is the reconstruction the two
+    stacks disagreed on.
     """
 
     __slots__ = ("counts", "used")
@@ -644,6 +839,18 @@ class VacancyMap:
     bijective: bool
     #: How many collision-driven re-mint rounds were needed. Expected to be 0.
     remint_rounds: int
+    #: Every replacement ever handed out, PLUS the whole domain — including nonces a re-mint
+    #: round superseded (contract §5.8). STORED, never reconstructed as
+    #: ``domain | mapping.values()``: that reconstruction silently drops the superseded ones
+    #: (`wak` at seed 7), and the per-occurrence path of the ``consistent=False`` control
+    #: draws against this set, so reusing a form that was rejected for cause can recreate the
+    #: very collision the re-mint resolved.
+    forbidden: frozenset[str]
+    #: Is the map injective at EVERY `p`, or only at full vacancy? ``True`` for
+    #: ``mint="nonce"``, where condition B keeps every image out of the domain; ``False`` for
+    #: ``mint="swap"``, whose images ARE domain types — §5.2a proves no `p`-stable swap can do
+    #: better, and :func:`map_vocab_words` refuses the cases where it matters.
+    injective_at_every_p: bool
 
     @property
     def type_count(self) -> int:
@@ -661,7 +868,7 @@ class VacancyMap:
         text goes through :func:`vacate_text`, which threads the occurrence counters that
         ``reveal_after`` and ``consistent=False`` need.
         """
-        return self._transform(word, params, _RewriteState(set(self.mapping.values())))
+        return self._transform(word, params, _RewriteState(set(self.forbidden)))
 
     def _transform(self, word: str, params: VacancyParams, state: _RewriteState) -> str:
         stem, suffix = stem_and_suffix(word)
@@ -704,11 +911,15 @@ class VacancyMap:
             # control whose vacancy rate is not the stated rate is not a control. Adding the
             # stem to `forbidden` puts it through §5.5's ordinary re-mint loop, so the
             # replacement is held to the same quality bar as any other nonce.
+            # `state.used` starts as the map's STORED `forbidden` (domain + every nonce ever
+            # handed out, superseded ones included — §5.8), so this is exactly the set the
+            # TypeScript control draws against. `{key}` is not redundant with it: a stem need
+            # not be a type.
             nonce, pattern, _salt = _mint(
                 f"{key}#{seen - 1}",
                 params.seed,
                 params.match_prosody,
-                self.domain | state.used | {key},
+                state.used | {key},
                 stem=key,
             )
             state.used.add(nonce)
@@ -758,7 +969,11 @@ def vacancy_domain(types: Iterable[str]) -> list[str]:
     return sorted({t.lower() for t in types} | {w.lower() for w in dolch_budget("full")})
 
 
-def build_vacancy_map(types: Iterable[str], params: VacancyParams) -> VacancyMap:
+def build_vacancy_map(
+    types: Iterable[str],
+    params: VacancyParams,
+    counts: Mapping[str, int] | None = None,
+) -> VacancyMap:
     """Assign every eligible stem a nonce, once, in canonical order (contract §5.2).
 
     `types` is the domain — pass :func:`vacancy_domain(corpus_types)`, which pins it to the
@@ -794,31 +1009,90 @@ def build_vacancy_map(types: Iterable[str], params: VacancyParams) -> VacancyMap
     On violation only the LOSING stem is re-minted — the one later in ASCII-ascending order
     among those involved — at salt ``1000 * round + previousSalt + 1``, so a re-mint never
     cascades (§5.8).
+
+    **Under ``mint="swap"`` the replacement is a real English word and B cannot apply**, since
+    the replacement is a domain type by construction. §5.2a works out what B was standing in
+    for and what swap can therefore satisfy: A unchanged, and **B₁** — no surface form equals
+    an INELIGIBLE domain type, and none equals its own source type. That makes the map a
+    bijection of the domain at full vacancy, which is where the pretrained arm measures, and
+    §5.2a proves no `p`-stable swap can do better. :attr:`VacancyMap.injective_at_every_p`
+    records which regime the map is in and :func:`map_vocab_words` refuses the rest.
+
+    `counts` is the corpus's per-type occurrence count (:func:`type_counts`), REQUIRED by
+    ``mint="swap"`` and unused by ``mint="nonce"`` — the nonce map stays a pure function of
+    ``(domain, seed, match_prosody)``, asserted in the tests. Swap raises without it rather
+    than falling back to an alphabetical rank, which would be a frequency match in name only.
     """
     _reject_bare_str(types, "build_vacancy_map", "types")
     keep = params.keep_set
     type_set = {t.lower() for t in types}
+    swapping = params.mint == "swap"
+    if swapping and counts is None:
+        raise InvalidParamError(
+            "mint='swap' needs the corpus's type counts to rank the replacement pool by "
+            "frequency (contract §8.3); pass counts=type_counts(tokenize(text))",
+            {"mint": params.mint},
+        )
 
     pairs: list[tuple[str, str]] = []
     stem_set: set[str] = set()
-    for t in sorted(type_set):
+    families: dict[str, set[str]] = {}
+    suffixes: dict[str, list[str]] = {}
+    eligible_types: set[str] = set()
+    for t in sorted(type_set):  # ASCII order, so `suffixes[stem]` is canonical
         stem, suffix = stem_and_suffix(t)
         if not is_eligible(stem, keep):
             continue
         pairs.append((stem.lower(), suffix.lower()))
         stem_set.add(stem.lower())
+        families.setdefault(stem.lower(), set()).add(t)
+        suffixes.setdefault(stem.lower(), []).append(suffix.lower())
+        eligible_types.add(t)
+
+    # Condition B's scope: EVERY domain type under `nonce`, and only the types that can never
+    # be vacated under `swap` — §5.2a's B₁, which is what full-vacancy injectivity needs and
+    # all a map drawing from the domain can possibly satisfy.
+    barred = type_set - eligible_types if swapping else type_set
 
     mapping: dict[str, str] = {}
     minted_stress: dict[str, str] = {}
     salts: dict[str, int] = {}
-    # `forbidden = used ∪ domain` — the domain, always, with nothing left to the caller.
+    # `forbidden = used ∪ domain` — the domain, always, with nothing left to the caller. It
+    # accumulates and is never pruned, so a superseded nonce stays out of circulation (§5.8),
+    # and it is STORED on the map rather than reconstructed from `mapping.values()`.
     forbidden: set[str] = set(type_set)
-    for stem in sorted(stem_set):
-        nonce, pattern, salt = _mint(stem, params.seed, params.match_prosody, forbidden)
-        forbidden.add(nonce)
-        mapping[stem] = nonce
-        minted_stress[nonce] = pattern
-        salts[stem] = salt
+    pool: list[str] = []
+    rank: dict[str, int] = {}
+    if swapping:
+        assert counts is not None  # narrowed by the guard above
+        pool = swap_pool(type_set, counts, keep)
+        rank = {s: swap_rank(s, families[s], pool, counts) for s in sorted(stem_set)}
+        used: set[str] = set()
+        claimed_forms: set[str] = set()
+        for stem in sorted(stem_set):
+            word, salt, forms = _draw_swap(
+                stem,
+                params.seed,
+                params.match_prosody,
+                pool,
+                rank,
+                used,
+                suffixes[stem],
+                claimed_forms,
+                barred,
+            )
+            used.add(word)
+            claimed_forms.update(forms)
+            forbidden.add(word)
+            mapping[stem] = word
+            salts[stem] = salt
+    else:
+        for stem in sorted(stem_set):
+            nonce, pattern, salt = _mint(stem, params.seed, params.match_prosody, forbidden)
+            forbidden.add(nonce)
+            mapping[stem] = nonce
+            minted_stress[nonce] = pattern
+            salts[stem] = salt
 
     rounds = 0
     while True:
@@ -826,7 +1100,7 @@ def build_vacancy_map(types: Iterable[str], params: VacancyParams) -> VacancyMap
         losers: set[str] = set()
         for stem, suffix in pairs:
             form = surface_form(mapping[stem], stem, suffix, params.seed)
-            if form in type_set:  # condition B
+            if form in barred or form == stem + suffix:  # condition B (B₁ under swap)
                 losers.add(stem)
             if form in claimed:  # condition A
                 losers.add(max(stem, claimed[form]))
@@ -837,19 +1111,49 @@ def build_vacancy_map(types: Iterable[str], params: VacancyParams) -> VacancyMap
         if rounds >= MAX_REMINT_ROUNDS:
             raise ComputeError(
                 f"vacancy map still collides after {MAX_REMINT_ROUNDS} re-mint rounds",
-                {"stems": sorted(losers)[:20], "rounds": rounds},
+                {"stems": sorted(losers)[:20], "rounds": rounds, "mint": params.mint},
             )
         rounds += 1
         for stem in sorted(losers):
             others = {n for s, n in mapping.items() if s != stem}
+            start_salt = REMINT_SALT_STRIDE * rounds + salts[stem] + 1
+            if swapping:
+                # A superseded REPLACEMENT returns to the pool — unlike a superseded nonce,
+                # which stays forbidden forever. The pool is finite (1944 real words against
+                # 1680 stems on the shipped corpus), so retiring words permanently would
+                # starve later rounds; and a real word cannot "recreate the collision it was
+                # rejected for" the way a nonce can, because the collision was with a
+                # different stem's surface, which has itself moved.
+                elsewhere = {
+                    surface_form(mapping[s], s, suffix, params.seed)
+                    for s, suffix in pairs
+                    if s != stem
+                }
+                word, salt, _forms = _draw_swap(
+                    stem,
+                    params.seed,
+                    params.match_prosody,
+                    pool,
+                    rank,
+                    others,
+                    suffixes[stem],
+                    elsewhere,
+                    barred,
+                    start_salt=start_salt,
+                )
+                forbidden.add(word)
+                mapping[stem] = word
+                salts[stem] = salt
+                continue
             nonce, pattern, salt = _mint(
                 stem,
                 params.seed,
                 params.match_prosody,
-                type_set | others,
-                start_salt=REMINT_SALT_STRIDE * rounds + salts[stem] + 1,
+                forbidden,
+                start_salt=start_salt,
             )
             minted_stress.pop(mapping[stem], None)
+            forbidden.add(nonce)
             mapping[stem] = nonce
             minted_stress[nonce] = pattern
             salts[stem] = salt
@@ -864,6 +1168,8 @@ def build_vacancy_map(types: Iterable[str], params: VacancyParams) -> VacancyMap
         image_size=len(seen),
         bijective=len(seen) == len(type_set),
         remint_rounds=rounds,
+        forbidden=frozenset(forbidden),
+        injective_at_every_p=not swapping,
     )
 
 
@@ -880,7 +1186,7 @@ def vacate_text(text: str, vmap: VacancyMap, params: VacancyParams) -> str:
     because line breaks are untouched the ``<eos>``-per-line rule produces the same number of
     ``<eos>`` in the same places.
     """
-    state = _RewriteState(set(vmap.mapping.values()))
+    state = _RewriteState(set(vmap.forbidden))
     return WORD_RE.sub(lambda m: vmap._transform(m.group(0), params, state), text)
 
 
@@ -903,7 +1209,19 @@ def map_vocab_words(words: Sequence[str], vmap: VacancyMap, params: VacancyParam
             "every other condition rebuilds the budget from the vacated corpus",
             {"consistent": params.consistent, "reveal_after": params.reveal_after},
         )
-    state = _RewriteState(set(vmap.mapping.values()))
+    if not vmap.injective_at_every_p and 0.0 < params.p < 1.0:
+        # §5.2a: swap's images ARE domain types, so at intermediate `p` a vacated type can
+        # land on an un-vacated one and two budget words would share a row. That is not a
+        # defect to be re-drawn away — the theorem there shows no `p`-stable swap avoids it —
+        # so the mapped vocabulary is refused, exactly as it is for the two controls above.
+        raise InvalidParamError(
+            f"mint='swap' has no mapped vocabulary at p={params.p}: its replacements are "
+            "domain types, so a vacated type can collide with an un-vacated one and the map "
+            "is injective only at full vacancy (contract §5.2a). Use p=0 or p=1, or rebuild "
+            "the budget from the vacated corpus",
+            {"mint": params.mint, "p": params.p},
+        )
+    state = _RewriteState(set(vmap.forbidden))
     return [vmap._transform(w, params, state) for w in words]
 
 

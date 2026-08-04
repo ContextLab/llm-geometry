@@ -28,7 +28,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { DOLCH_ORDER, WORD_RE, dolchBudget, splitLines, tokenize } from "../../src/lib/lexEngine";
+import { DOLCH_ORDER, LexVocab, WORD_RE, dolchBudget, splitLines, tokenize } from "../../src/lib/lexEngine";
 import {
   CODAS,
   DEFAULT_VACANCY_PARAMS,
@@ -48,6 +48,7 @@ import {
   stress,
   syllables,
   transformWord,
+  typeCounts,
   vacancyDomain,
   vacancyParams,
   vacancyStats,
@@ -86,6 +87,23 @@ function mapFor(seed: number): VacancyMap {
   const m = MAPS.get(seed);
   if (m === undefined) throw new Error(`no map for seed ${seed}`);
   return m;
+}
+
+/** The map as a sorted array of pairs, so two maps compare by value. */
+function mappingEntries(vmap: VacancyMap): [string, string][] {
+  return [...vmap.mapping].sort((a, b) => (a[0] < b[0] ? -1 : 1));
+}
+
+/** The source types whose surface actually changed, measured from the two texts. */
+function changedTypes(original: string, rewritten: string): Set<string> {
+  const before = original.match(new RegExp(WORD_RE.source, "g")) ?? [];
+  const after = rewritten.match(new RegExp(WORD_RE.source, "g")) ?? [];
+  expect(before.length).toBe(after.length);
+  const out = new Set<string>();
+  for (let i = 0; i < before.length; i++) {
+    if (before[i] !== after[i]) out.add(before[i].toLowerCase());
+  }
+  return out;
 }
 
 /** The stems the map would vacate at this `p`, as a set. */
@@ -908,5 +926,165 @@ describe("§10 statistics", () => {
     // eslint-disable-next-line no-console
     console.log(["", "vacancy transform, measured on The Real Mother Goose:", ...rows, ""].join("\n"));
     expect(rows.length).toBe(SEEDS.length * P_GRID.length);
+  });
+});
+
+// --- `forbidden`, §5.8 ----------------------------------------------------------------
+
+describe("`forbidden` is stored, and keeps superseded re-mint nonces (§5.8)", () => {
+  it("carries `wak`, the nonce seed 7's re-mint of `hang` replaced", () => {
+    // THE CASE THAT DISTINGUISHES a stored set from `domain ∪ mapping.values()`, and the
+    // only one the shipped corpus produces: at seed 7 the stem `hang` first minted `wak`,
+    // whose surface `wak` + `ed` is the real English word `waked`; condition B rejected it
+    // and the re-mint returned `smeeg`. `wak` is now no stem's nonce, so a reconstruction
+    // drops it — but it must stay forbidden, because it was rejected for cause and the
+    // `consistent = false` control draws against this very set.
+    const vmap = mapFor(7);
+    expect(vmap.mapping.get("hang")).toBe("smeeg");
+    expect(vmap.remintRounds).toBe(1);
+    expect(vmap.forbidden.has("wak")).toBe(true);
+    expect([...vmap.mapping.values()]).not.toContain("wak"); // what a rebuild would lose
+    expect(vmap.domain.has("waked")).toBe(true); // ... and why it was superseded
+  });
+
+  it("contains the whole domain and every nonce, at both seeds", () => {
+    for (const seed of SEEDS) {
+      const vmap = mapFor(seed);
+      for (const t of vmap.domain) expect(vmap.forbidden.has(t)).toBe(true);
+      for (const n of vmap.mapping.values()) expect(vmap.forbidden.has(n)).toBe(true);
+      expect(vmap.forbidden.size).toBe(
+        vmap.domain.size + new Set(vmap.mapping.values()).size + (seed === 7 ? 1 : 0),
+      );
+    }
+  });
+
+  it("keeps the superseded nonce out of the inconsistent control's output", () => {
+    const p = params({ p: 1, seed: 7, consistent: false });
+    const text = vacateText(CORPUS, buildVacancyMap(DOMAIN, p), p);
+    expect(new Set(tokenize(text)).has("wak")).toBe(false);
+  });
+});
+
+// --- the swap control, §8.3 / §5.2a ---------------------------------------------------
+
+const COUNTS = typeCounts(tokenize(CORPUS));
+const SWAP_MAPS = new Map<number, VacancyMap>(
+  SEEDS.map((seed) => [seed, buildVacancyMap(DOMAIN, params({ seed, mint: "swap" }), COUNTS)]),
+);
+function swapMapFor(seed: number): VacancyMap {
+  const m = SWAP_MAPS.get(seed);
+  if (m === undefined) throw new Error(`no swap map for seed ${seed}`);
+  return m;
+}
+
+describe("mint = 'swap' draws a real English word (§8.3)", () => {
+  it("replaces every stem with a word the corpus or the budget already had", () => {
+    const real = new Set<string>([...CORPUS_TYPES, ...BUDGET.map((w) => w.toLowerCase())]);
+    for (const seed of SEEDS) {
+      const vmap = swapMapFor(seed);
+      expect(vmap.mapping.size).toBeGreaterThan(0);
+      for (const [stem, word] of vmap.mapping) {
+        expect(real.has(word), `${seed}: ${stem} -> ${word}`).toBe(true);
+        expect(word).not.toBe(stem); // a stem keeping its form is a word that failed to vacate
+      }
+    }
+  });
+
+  it("needs the frequency counts, and says so rather than ranking alphabetically", () => {
+    expect(() => buildVacancyMap(DOMAIN, params({ mint: "swap" }))).toThrow(/type counts/);
+  });
+
+  it("refuses the inconsistent control — there is no supply of fresh real words", () => {
+    expect(() =>
+      buildVacancyMap(DOMAIN, params({ mint: "swap", consistent: false }), COUNTS),
+    ).toThrow(/consistent/);
+  });
+
+  it("leaves the nonce map a pure function of (domain, seed, matchProsody)", () => {
+    for (const seed of SEEDS) {
+      const withCounts = buildVacancyMap(DOMAIN, params({ seed }), COUNTS);
+      expect([...withCounts.mapping]).toEqual([...mapFor(seed).mapping]);
+      expect(withCounts.remintRounds).toBe(mapFor(seed).remintRounds);
+    }
+  });
+
+  it("registers no minted stress — the replacements are real English words", () => {
+    for (const seed of SEEDS) expect(swapMapFor(seed).mintedStress.size).toBe(0);
+  });
+
+  it("is stable in (seed, stem): rebuilding gives the same map (SC-702)", () => {
+    for (const seed of SEEDS) {
+      const again = buildVacancyMap(DOMAIN, params({ seed, p: 1, mint: "swap" }), COUNTS);
+      expect(mappingEntries(again)).toEqual(mappingEntries(swapMapFor(seed)));
+    }
+  });
+
+  it("is nested in `p` — the `u(stem) < p` decision is untouched (SC-701)", () => {
+    let previous = new Set<string>();
+    for (const p of P_GRID) {
+      const text = vacateText(CORPUS, swapMapFor(0), params({ p, seed: 0, mint: "swap" }));
+      const changed = changedTypes(CORPUS, text);
+      for (const t of previous) expect(changed.has(t), `p=${p}: ${t}`).toBe(true);
+      previous = changed;
+    }
+  });
+
+  it("is a bijection of the domain at full vacancy (A + B₁ of §5.2a)", () => {
+    for (const seed of SEEDS) {
+      const vmap = swapMapFor(seed);
+      expect(vmap.bijective).toBe(true);
+      expect(vmap.imageSize).toBe(vmap.domain.size);
+      expect(vmap.remintRounds).toBe(0);
+      expect(vmap.injectiveAtEveryP).toBe(false);
+    }
+  });
+});
+
+describe("the invariance theorem under mint = 'swap' (SC-703 / §5.2a)", () => {
+  it("holds at p ∈ {0, 1}, exactly as it does for mint = 'nonce'", () => {
+    const base = new LexVocab(BUDGET, "dolch", "full");
+    const reference = base.encode(tokenize(CORPUS));
+    for (const seed of SEEDS) {
+      for (const p of [0, 1]) {
+        const ps = params({ p, seed, mint: "swap" });
+        const vmap = swapMapFor(seed);
+        const text = vacateText(CORPUS, vmap, ps);
+        const words = mapVocabWords(BUDGET, vmap, ps);
+        expect(new Set(words).size).toBe(words.length);
+        const mapped = new LexVocab(words, "dolch", "full");
+        expect(mapped.rows).toBe(base.rows);
+        expect(mapped.encode(tokenize(text))).toEqual(reference);
+      }
+    }
+  });
+
+  it("refuses the mapped vocabulary at intermediate p rather than duplicating a row", () => {
+    // §5.2a: no `p`-stable map whose images are domain types is injective at 0 < p < 1
+    // unless it is the identity. That is a theorem, not a defect to be re-drawn away, so
+    // the mapped vocabulary is refused exactly as it is for the two controls.
+    for (const p of [0.25, 0.5, 0.75]) {
+      expect(() =>
+        mapVocabWords(BUDGET, swapMapFor(0), params({ p, seed: 0, mint: "swap" })),
+      ).toThrow(/full vacancy/);
+    }
+  });
+
+  it("measures WHY: a vacated type lands on a word that has not moved", () => {
+    // Pinned so the refusal above can never be mistaken for over-caution. If a future change
+    // makes swap injective at p = 0.5, this fails and the contract is wrong.
+    const vmap = swapMapFor(0);
+    const ps = params({ p: 0.5, seed: 0, mint: "swap" });
+    const images = new Map<string, string>();
+    let collisions = 0;
+    for (const t of [...vmap.domain].sort()) {
+      const image = transformWord(t, vmap, ps).toLowerCase();
+      if (images.has(image)) collisions++;
+      images.set(image, t);
+    }
+    expect(collisions).toBeGreaterThan(0);
+
+    const full = params({ p: 1, seed: 0, mint: "swap" });
+    const atOne = new Set([...vmap.domain].map((t) => transformWord(t, vmap, full).toLowerCase()));
+    expect(atOne.size).toBe(vmap.domain.size);
   });
 });

@@ -143,7 +143,7 @@
       id: "swap",
       label: "swap",
       title:
-        "Contract §8.3: draw a real, frequency-rank-matched English word instead. Not implemented in either stack yet.",
+        "Contract §8.3: draw a real, frequency-rank-matched English word instead. Both engines implement it; this control is not wired to them yet.",
       enabled: false,
     },
   ];
@@ -627,8 +627,13 @@
   <p class="note" data-testid="lex-vacancy-mint-note">
     <b>swap</b> — draw a real, frequency-rank-matched English word instead of an invented one
     (contract §8.3) — is the control that separates <i>wrong content</i> from
-    <i>unknown form</i> for the pretrained arm. Neither stack implements it yet, so it is
-    offered here <b>disabled</b> rather than silently falling back to <code>nonce</code>.
+    <i>unknown form</i> for the pretrained arm. <b>Both engines now implement it</b>, and they
+    agree word for word; this panel is not wired to them yet, so it is offered
+    <b>disabled</b> rather than silently falling back to <code>nonce</code>. One thing it will
+    have to say when it is: a swap map is injective only at <b>p = 0 or p = 1</b>. Its
+    replacements are real corpus words, so at an intermediate <i>p</i> a vacated word can land
+    on one that has <i>not</i> moved — and contract §5.2a proves no stable swap avoids that.
+    The engines refuse the mapped vocabulary there rather than duplicate a row.
   </p>
 
   <!-- ---- the corpus, live (ui.md §1.2) -------------------------------------------- -->

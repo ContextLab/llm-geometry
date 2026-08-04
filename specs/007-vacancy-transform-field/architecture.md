@@ -294,6 +294,53 @@ disjoint, injectivity holds **simultaneously for every `p`** rather than at `p =
 On violation, re-mint the offending stems at a higher salt in canonical order and re-check;
 raise after 8 rounds.
 
+### 5.2a What A and B are standing in for, and what `mint = "swap"` can therefore satisfy
+
+B is **sufficient, not necessary**. Writing the necessary condition out is what makes the swap
+control of §8.3 statable at all, because swap draws its replacements *from* the domain and so
+violates B by construction.
+
+Fix `p` and let `T_p` be the type map: `T_p(t) = surface(t)` when `t`'s stem is eligible and
+`u(stem(t)) < p`, and `T_p(t) = t` otherwise. `T_p` is injective for **every** `p` iff both:
+
+- **A.** the surface forms are pairwise distinct — unchanged; and
+- **B′.** for domain types `t₁` (eligible stem) and `t₃`, if `surface(t₁) = t₃` then `t₃`'s stem
+  is eligible **and** `u(stem(t₃)) < u(stem(t₁))`.
+
+*Why.* The only way two types can merge is that one moved onto another that had not: an image
+`surface(t₁)` colliding with an un-vacated `t₃`. That is possible at some `p` exactly when
+`u(stem(t₁)) < p ≤ u(stem(t₃))`, i.e. exactly when `u(stem(t₃)) ≥ u(stem(t₁))` — which B′ forbids.
+The case `t₃ = t₁` is included, so B′ also rules out a type that silently fails to vacate (the
+`tak → tak` defect of §5.8). Image-on-image collisions are A.
+
+**B ⟹ B′ vacuously** (B makes B′'s premise unsatisfiable), so nothing about the nonce strategy
+changes and nothing in this document about it is weakened. B stays the *enforced* rule for
+`mint = "nonce"`: it is cheaper to check, it costs one re-mint on the shipped corpus, and it is
+the reason §7.3 holds simultaneously at every `p`.
+
+**Theorem (why `swap` cannot have that).** Suppose the map is stable in `p` (§5.6) and every
+image is a domain type — both true of swap by construction. `T_p` injective for every `p` forces
+`T_p` to be a bijection of the domain onto itself, hence to map the vacated set `V_p` onto `V_p`.
+The `V_p` are nested and grow one *stem family* at a time, so a bijection mapping every `V_p`
+onto itself maps each stem family onto itself: `u(stem(σ(s))) = u(stem(s))`, hence `σ = id`.
+**So no non-trivial swap is injective at intermediate `p`.** Measured, to make it concrete rather
+than merely proved: the frequency-rank swap below produces 191 / 246 / 190 colliding types at
+`p = 0.25 / 0.5 / 0.75` on the shipped corpus, and 0 at `p ∈ {0, 1}`.
+
+What swap *can* satisfy, and does, is the condition at **full vacancy**, where the un-vacated set
+is exactly the ineligible types:
+
+- **B₁.** no surface form equals an **ineligible** domain type, and no surface form equals its own
+  source type.
+
+A + B₁ make `T_1` a bijection of the domain, so the invariance theorem of §7.3 holds for
+`mint = "swap"` at `p ∈ {0, 1}` — and *provably cannot* hold at `0 < p < 1`. The engine therefore
+**refuses** the mapped vocabulary of §7.2 for `swap` at intermediate `p`, with a typed error
+naming this theorem, rather than shipping a vocabulary with two words on one row. `vacateText`
+itself is unrestricted: the pretrained arm of §8.3 measures a passage, and a passage does not
+need an injective map. `VacancyMap.injectiveAtEveryP` reports which of the two regimes a map is
+in — `true` for nonce, `false` for swap — so no caller has to infer it.
+
 ### 5.3 The deterministic byte stream
 
 `random.Random` is replaced by a sha256 counter stream, which is trivially identical in both
@@ -439,6 +486,11 @@ These were gaps, not choices. Both stacks do it this way or the golden fixture f
   per-occurrence path of the `consistent = false` control now *draws against* `forbidden`, so it
   is one unlucky hash away from mattering. Superseded nonces stay forbidden because they were
   rejected for a reason: reusing one can recreate the very collision the re-mint resolved.
+  **Both stacks now store it**, and both assert `"wak" ∈ forbidden` at seed 7 — the superseded
+  nonce of `hang`, which re-minted to `smeeg`. It is the one case the shipped corpus produces, so
+  it is the one the test names; a reconstruction from `mapping.values()` fails that assertion.
+  The re-mint loop draws against the same accumulated set, so a re-mint can never hand a stem a
+  form some other stem has already given up.
 - **`VacancyMap`'s stem→nonce field is `mapping` in both stacks.** TypeScript called it `map`
   and Python `mapping`, which is the third naming asymmetry this feature produced (after the
   missing `vacancyDomain` helper and the `avoid` default) and cost a debugging round for
@@ -516,6 +568,7 @@ lines that produce at least one token.
 | `matchProsody` | bool | `true` | nonce carries the stem's syllable count and stress |
 | `revealAfter` | int | `0` | first N occurrences of a vacated stem keep the English form |
 | `keep` | set | `{}` | extra words added to the closed class |
+| `mint` | `"nonce"` \| `"swap"` | `"nonce"` | invent the replacement, or draw a real word (§8.3) |
 
 `consistent = false` derives the nonce from `(stem, occurrenceIndex)` in document order, so
 every occurrence is a fresh type. This condition deliberately has **no** stability property;
@@ -627,11 +680,34 @@ when content words are vacated:
 Only (1) is "location". A caveat cannot separate them; a control can.
 
 **Swap.** Mint by drawing a *real English word* instead of a nonce form — same eligibility, same
-`u(stem) < p` decision, same suffix handling, same map-injectivity guarantee. The replacement is
-drawn deterministically from the corpus's own open-class types by **frequency rank**: the stem's
-rank `r` among open-class types selects a replacement from a deterministic window around `r`,
-excluding the stem itself and anything already used. So the swapped passage is equally
-nonsensical, but every form is a known word with ordinary tokenization.
+`u(stem) < p` decision, same suffix handling, and the injectivity §5.2a shows is available to it.
+The replacement is drawn deterministically from the domain's own open-class **types** by
+**frequency rank**: rank the eligible types by `(corpus count descending, type ascending)` — the
+tie rule `frequencyBudget` already uses — and let `r` be the stem's rank. Attempt `a` draws an
+offset `δ ∈ [-w, -1] ∪ [1, w]` from the byte stream of §5.3 under the tag `swap` (never `mint`, so
+the two streams can never alias), and proposes `pool[(r + δ) mod |pool|]`; `w` starts at 32 and
+doubles every 64 attempts up to `|pool|`, which is the same deterministic relaxation §5.5 uses and
+is needed because "anything already used" depletes a window. A candidate is accepted iff it is not
+already used, is not the stem itself, is not a type of the stem's own family, and — while
+`a < 1024` and `matchProsody` — carries the stem's stress pattern. So the swapped passage is
+equally nonsensical, but every form is a known word with ordinary tokenization.
+
+Two consequences of drawing from a *finite* pool, stated rather than hidden. The pool is 1 944
+types against 1 680 stems on the shipped corpus, so the tail of the canonical order draws from
+what is left and its frequency match degrades; and a source type that carries a suffix may receive
+an already-inflected replacement, giving a doubly-inflected surface. 66 % of eligible types are
+suffix-free and receive a bare real word.
+
+The pool must be the *types*, not the stems: the stem set is exactly the set of keys, so drawing
+from it would consume the pool exactly and leave a collision with nowhere to move.
+
+Because the replacements are real English words, they are **not** registered in `mintedStress` —
+their stress comes from the table or the rule like any other English word, so `stressFromMinted`
+is 0 on both sides of a swap and `stressFromTable`/`stressFromRule` say what they always say.
+
+`consistent = false` is **refused** under `swap`: that control needs a fresh type per occurrence,
+and the corpus has 1 680 open-class stems against 8 202 vacated tokens, so there is no supply. It
+raises rather than quietly reusing words and reporting a rate it is not achieving.
 
 This makes the minting strategy a parameter:
 
@@ -649,10 +725,16 @@ UI must report it as *that difference*, never `nll(nonce) − nll(english)` alon
 not separable without a tokenizer-level control and the UI must say so rather than pretend the
 remainder is pure location.
 
-`mint: "swap"` preserves every property of §7: the map is still injective (verified the same
-way), still nested in `p`, still stable in `(seed, stem)`. The invariance theorem of §7.3
-therefore holds for `swap` exactly as for `nonce` — the tiny model is equally blind to both,
-which is itself the check that the swap control is implemented correctly.
+`mint: "swap"` is still **nested** in `p` (the `u(stem) < p` decision is untouched) and still
+**stable** in `(seed, stem)` (the map is built once, in canonical order, independently of `p`).
+Injectivity is where it and `nonce` part company, and §5.2a proves why they must: an earlier draft
+of this paragraph claimed swap "preserves every property of §7", and that claim is false — a map
+whose images are domain types and which does not depend on `p` cannot be injective at intermediate
+`p` unless it is the identity. So the invariance theorem of §7.3 holds for `swap` at `p ∈ {0, 1}`,
+where it is asserted exactly as for `nonce`, and the mapped vocabulary is refused in between. At
+full vacancy the tiny model is exactly as blind to `swap` as to `nonce`, which is the check that
+the control is implemented correctly; the pretrained arm measures at full vacancy, so nothing the
+control exists for is lost.
 
 ### 8.3a What was measured, and what the static build may therefore say
 

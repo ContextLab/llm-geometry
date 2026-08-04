@@ -48,6 +48,14 @@ What §11 requires pinned, and where it lives in the document:
    as DATA rather than as an assertion written twice, once per language.
 8. Both control conditions (``consistent = false``, ``revealAfter > 0``) and both
    ``matchProsody`` settings — the ``control-*`` and ``noprosody-*`` cases.
+9. The swap control of §8.3 — the ``swap-*`` maps and cases. Four maps (both seeds × both
+   ``matchProsody`` settings) pinned by digest and 24 samples, and three cases per seed at
+   ``p in {0, 0.7, 1}``. The endpoints carry a real ``idStream``: SC-703 holds for
+   ``mint="swap"`` exactly as for ``mint="nonce"`` wherever a swap map can be injective.
+   ``swap-*-p0.7`` carries ``idStream: null`` and ``mapVocabWordsRejects: true``, which is
+   §5.2a's theorem pinned as data — a map whose images are domain types and which does not
+   depend on `p` cannot be injective at intermediate `p` unless it is the identity, so the
+   mapped vocabulary does not exist there and BOTH stacks refuse it.
 
 MEASURED, and recorded here because the fixture's shape depends on it: the mapped
 vocabulary of §7.2 is defined ONLY for ``consistent = true, revealAfter = 0``; both stacks
@@ -125,6 +133,7 @@ from llm_geometry.lex.vacancy import (  # noqa: E402
     is_eligible,
     map_vocab_words,
     stem_and_suffix,
+    type_counts,
     vacancy_domain,
     vacancy_stats,
     vacancy_u,
@@ -135,7 +144,7 @@ DEFAULT_OUT = (
     REPO_ROOT / "code" / "frontend" / "tests" / "fixtures" / "vacancy-golden.json"
 )
 
-FORMAT = "vacancy-golden-v1"
+FORMAT = "vacancy-golden-v2"
 
 #: Both stacks compute the vacancy transform in float64 and in the same order, so the only
 #: floats that can differ at all are the prosody means (a sum over the same tokens in the
@@ -251,6 +260,7 @@ def params_json(params: VacancyParams) -> dict[str, Any]:
         "matchProsody": params.match_prosody,
         "revealAfter": params.reveal_after,
         "keep": sorted(params.keep),
+        "mint": params.mint,
     }
 
 
@@ -281,6 +291,19 @@ def vacated_stems(vmap: VacancyMap, seed: int, p: float) -> list[str]:
     return sorted(stem for stem in vmap.mapping if vacancy_u(stem, seed) < p)
 
 
+def _mapped_condition(vmap: VacancyMap, params: VacancyParams) -> bool:
+    """Is the MAPPED vocabulary of §7.2 defined for this (map, params) pair?
+
+    Three ways it is not, and both stacks raise on each: the inconsistent-assignment control
+    and ``reveal_after > 0`` (§7.2 — a source type no longer has a single image), and
+    ``mint="swap"`` at intermediate `p` (§5.2a — swap's replacements are domain types, so a
+    vacated type can land on an un-vacated one and no `p`-stable swap avoids it).
+    """
+    if not params.consistent or params.reveal_after:
+        return False
+    return vmap.injective_at_every_p or params.p in (0.0, 1.0)
+
+
 def id_stream_block(
     vacated: str, budget_words: list[str], vmap: VacancyMap, params: VacancyParams
 ) -> dict[str, Any] | None:
@@ -293,7 +316,7 @@ def id_stream_block(
     ``None`` for the control conditions, where the mapped vocabulary is undefined and both
     stacks raise — see the module docstring.
     """
-    if not params.consistent or params.reveal_after:
+    if not _mapped_condition(vmap, params):
         return None
     mapped = map_vocab_words(budget_words, vmap, params)
     vocab_p = LexVocab(tuple(mapped), source="dolch", budget_name="full")
@@ -323,7 +346,7 @@ def build_case(
     """
     vacated = vacate_text(corpus, vmap, params)
     stats = vacancy_stats(corpus, vacated, vmap, params)
-    mapped_condition = params.consistent and not params.reveal_after
+    mapped_condition = _mapped_condition(vmap, params)
     return {
         "label": label,
         "map": map_label,
@@ -337,9 +360,13 @@ def build_case(
         # controls have DELIBERATELY no stability property, so there is nothing to pin
         # there and both stacks say so in their own way (TypeScript's single-word
         # `transformWord` refuses an order-dependent condition outright).
+        # Stability (§11) is stated for the ORDER-INDEPENDENT conditions, which is a weaker
+        # requirement than the mapped vocabulary's: `mint="swap"` at intermediate `p` has no
+        # mapped vocabulary (§5.2a) but its map is still built once and still stable, so its
+        # surface forms are pinned here exactly as the nonce strategy's are.
         "stemForms": (
             {stem: vmap.apply_word(stem, params) for stem in PINNED_STEMS}
-            if mapped_condition
+            if params.consistent and not params.reveal_after
             else None
         ),
         "idStream": id_stream_block(vacated, budget_words, vmap, params),
@@ -408,6 +435,7 @@ def build_document(generated: str) -> dict[str, Any]:
             "characters in Python and JavaScript — re-derive the excerpt before shipping"
         )
     corpus_types = set(tokenize(corpus))
+    counts = type_counts(tokenize(corpus))
     budget_words = list(dolch_budget("full"))
     domain = vacancy_domain(corpus_types)
     domain_set = set(domain)
@@ -425,6 +453,8 @@ def build_document(generated: str) -> dict[str, Any]:
                 "label": f"seed{seed}",
                 "seed": seed,
                 "matchProsody": True,
+                "mint": "nonce",
+                "injectiveAtEveryP": vmap.injective_at_every_p,
                 "remintRounds": vmap.remint_rounds,
                 "bijective": vmap.bijective,
                 "imageSize": vmap.image_size,
@@ -456,6 +486,8 @@ def build_document(generated: str) -> dict[str, Any]:
             "label": "seed0-noprosody",
             "seed": 0,
             "matchProsody": False,
+            "mint": "nonce",
+            "injectiveAtEveryP": noprosody.injective_at_every_p,
             "remintRounds": noprosody.remint_rounds,
             "bijective": noprosody.bijective,
             "imageSize": noprosody.image_size,
@@ -480,6 +512,56 @@ def build_document(generated: str) -> dict[str, Any]:
             )
         )
 
+    # --- the swap control (§8.3), on its own maps ------------------------------------
+    # `mint="swap"` draws a REAL English word from the domain's open-class types by
+    # frequency rank, so it needs the corpus's counts and it produces a different map at
+    # every (seed, matchProsody). Pinned by digest plus the 24 sample replacements, like the
+    # noprosody map above: a sha256 over the canonical form is exactly as strong a check.
+    #
+    # The `p` grid here is deliberately {0, 0.7, 1}. §5.2a proves that a map whose images are
+    # domain types and which does not depend on `p` CANNOT be injective at intermediate `p`
+    # unless it is the identity, so `swap-p0.7` carries `idStream: null` and
+    # `mapVocabWordsRejects: true` — measured, and the same refusal both stacks make. The two
+    # endpoints carry a real id stream, which is SC-703 holding for swap exactly as it does
+    # for nonce wherever a swap map can be injective at all.
+    for seed in (0, 7):
+        for prosody in (True, False):
+            label = f"swap-seed{seed}" + ("" if prosody else "-noprosody")
+            base = VacancyParams(seed=seed, mint="swap", match_prosody=prosody)
+            swap_map = build_vacancy_map(domain, base, counts)
+            maps.append(
+                {
+                    "label": label,
+                    "seed": seed,
+                    "matchProsody": prosody,
+                    "mint": "swap",
+                    "injectiveAtEveryP": swap_map.injective_at_every_p,
+                    "remintRounds": swap_map.remint_rounds,
+                    "bijective": swap_map.bijective,
+                    "imageSize": swap_map.image_size,
+                    "domainSize": len(swap_map.domain),
+                    "mappingSize": len(swap_map.mapping),
+                    "mappingSha256": mapping_sha256(dict(swap_map.mapping)),
+                    "mapping": None,
+                    "sampleNonces": {
+                        stem: swap_map.mapping.get(stem) for stem in PINNED_STEMS
+                    },
+                }
+            )
+            if not prosody:
+                continue
+            for p in (0.0, 0.7, 1.0):
+                cases.append(
+                    build_case(
+                        f"swap-seed{seed}-p{p}",
+                        label,
+                        corpus,
+                        swap_map,
+                        VacancyParams(seed=seed, p=p, mint="swap"),
+                        budget_words,
+                    )
+                )
+
     # --- the two control conditions (§7.1), each on its OWN map -----------------------
     # `consistent = false` writes to `minted_stress`; sharing a map across cases would let
     # one case's minted patterns score another case's text.
@@ -502,6 +584,8 @@ def build_document(generated: str) -> dict[str, Any]:
                 "label": label,
                 "seed": params.seed,
                 "matchProsody": params.match_prosody,
+                "mint": params.mint,
+                "injectiveAtEveryP": fresh.injective_at_every_p,
                 "remintRounds": fresh.remint_rounds,
                 "bijective": fresh.bijective,
                 "imageSize": fresh.image_size,

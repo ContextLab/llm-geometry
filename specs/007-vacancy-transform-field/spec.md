@@ -148,11 +148,24 @@ separate instrument; none is needed for T4.
   exactly for strings and id streams.
 - **SC-707** The pretrained arm produces a `ΔnllPreserved` whose sign and magnitude are
   reported from a real model run, next to the tiny arm's exact zero.
-- **SC-707a** The swap control satisfies the invariance theorem exactly as the nonce strategy
-  does (contract §8.3) — the tiny model is equally blind to both. This is the check that the
-  control is implemented correctly, and it is asserted, not assumed. The decomposition
-  `nll(swap) − nll(english)` and `nll(nonce) − nll(swap)` is reported from a real model run
-  **in the full stack**, where fp32 makes it measurable.
+- **SC-707a** ~~The swap control satisfies the invariance theorem exactly as the nonce strategy
+  does — the tiny model is equally blind to both.~~ **This claim was false and is retracted.**
+  It cannot hold, and the reason is a theorem rather than a bug (contract §5.2a): a map that is
+  stable in `p` and whose images are *domain types* is injective at every `p` only if it is the
+  identity. `swap` draws its replacements from the domain by construction, so at intermediate
+  `p` a swapped word can collide with a word not yet vacated — measured at 191 / 246 / 190
+  colliding types for `p` = 0.25 / 0.5 / 0.75.
+
+  The corrected criterion, and what is actually asserted: `swap` satisfies the invariance
+  theorem at **`p ∈ {0, 1}`** — 48 of the 120 SC-703 cases — and the remaining 72 are
+  **refused with a typed error citing §5.2a**, never silently computed. `nonce` remains
+  120/120. The refusal is the deliverable: an instrument that declines the configurations it
+  cannot support is sound, one that quietly returns a non-injective map is not.
+
+  This costs the pretrained arm nothing, which is the point worth checking rather than
+  assuming: it scores at full vacancy, where `swap` *is* a bijection of the domain.
+- **SC-707c** The decomposition `nll(swap) − nll(english)` and `nll(nonce) − nll(swap)` is
+  reported from a real model run **in the full stack**, where fp32 makes it measurable.
 - **SC-707b** The measured 2×2 is reported: a word's form is worth **exactly 0** to the tiny
   model and **10–20 % of ~1.0 nats** to a pretrained one (contract §8.3a). The static build
   either states a measured uncertainty for the dtype it ran, or refuses — verified by driving

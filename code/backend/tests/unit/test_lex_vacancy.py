@@ -44,12 +44,13 @@ from llm_geometry.lex.vacancy import (
     stress,
     stress_source,
     syllables,
+    type_counts,
     vacancy_domain,
     vacancy_stats,
     vacancy_u,
     vacate_text,
 )
-from llm_geometry.lex.vocab import WORD_RE, LexVocab, tokenize
+from llm_geometry.lex.vocab import WORD_RE, LexVocab, frequency_budget, tokenize
 
 P_GRID = (0.0, 0.25, 0.5, 0.75, 1.0)
 SEEDS = (0, 7)
@@ -987,3 +988,273 @@ def test_a_stem_outside_the_maps_domain_is_a_compute_error(maps):
     """The map's domain must include the budget's words as well as the corpus's types."""
     with pytest.raises(ComputeError):
         maps[0].apply_word("zzzqqqx", VacancyParams(p=1.0, seed=0))
+
+
+# --- `forbidden`, contract §5.8 ---------------------------------------------------------
+
+
+def test_forbidden_is_stored_and_keeps_superseded_remint_nonces(maps, domain):
+    """§5.8: `forbidden` is STORED, not rebuilt as `domain | mapping.values()`.
+
+    THE CASE THAT DISTINGUISHES THEM, and the only one the shipped corpus produces: at
+    seed 7 the stem `hang` first minted `wak`, whose surface `wak` + `ed` is the real English
+    word `waked`; condition B rejected it and the re-mint returned `smeeg`. `wak` is now no
+    stem's nonce, so a reconstruction from `mapping.values()` drops it — but it must stay
+    forbidden, because it was rejected for cause and the `consistent=False` control draws
+    against this very set.
+    """
+    seed7 = maps[7]
+    assert seed7.mapping["hang"] == "smeeg"
+    assert seed7.remint_rounds == 1
+    assert "wak" in seed7.forbidden
+    assert "wak" not in set(seed7.mapping.values())  # exactly what a rebuild would lose
+    assert "waked" in seed7.domain  # ... and why it was superseded
+
+    # The rest of the field, so "stored" cannot decay into "stored but wrong".
+    for seed, vmap in maps.items():
+        assert vmap.domain <= vmap.forbidden, seed
+        assert set(vmap.mapping.values()) <= vmap.forbidden, seed
+    assert maps[0].forbidden == maps[0].domain | set(maps[0].mapping.values())  # 0 re-mints
+    assert maps[7].forbidden == maps[7].domain | set(maps[7].mapping.values()) | {"wak"}
+
+
+def test_the_inconsistent_control_draws_against_the_stored_forbidden_set(corpus, maps):
+    """The per-occurrence path must never hand out a superseded nonce (§5.8)."""
+    params = VacancyParams(p=1.0, seed=7, consistent=False)
+    text = vacate_text(corpus, maps[7], params)
+    assert "wak" not in {w.lower() for w in WORD_RE.findall(text)}
+
+
+# --- the swap control, contract §8.3 / §5.2a --------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def counts(corpus: str) -> dict[str, int]:
+    """The corpus's per-type occurrence counts — the frequency source swap ranks by."""
+    return type_counts(tokenize(corpus))
+
+
+@pytest.fixture(scope="module")
+def swap_maps(domain: list[str], counts: dict[str, int]) -> dict[int, VacancyMap]:
+    return {
+        seed: build_vacancy_map(domain, VacancyParams(seed=seed, mint="swap"), counts)
+        for seed in SEEDS
+    }
+
+
+def test_swap_replaces_stems_with_real_corpus_words(swap_maps, corpus_types, budget):
+    """The whole point of the control: every replacement is a word English already had."""
+    real = {t.lower() for t in corpus_types} | {w.lower() for w in budget}
+    for seed, vmap in swap_maps.items():
+        assert vmap.mapping, seed
+        assert set(vmap.mapping.values()) <= real, seed
+        # ... and no stem keeps its own form, which would be a word that failed to vacate.
+        assert all(stem != word for stem, word in vmap.mapping.items()), seed
+
+
+def test_swap_needs_the_frequency_counts_and_says_so(domain):
+    """No silent fallback to an alphabetical rank, which would be frequency in name only."""
+    with pytest.raises(InvalidParamError):
+        build_vacancy_map(domain, VacancyParams(mint="swap"))
+
+
+def test_swap_refuses_the_inconsistent_control(domain):
+    """1680 open-class stems against 8202 vacated tokens — there is no supply (§8.3)."""
+    with pytest.raises(InvalidParamError):
+        VacancyParams(mint="swap", consistent=False)
+
+
+def test_an_unknown_mint_strategy_is_rejected():
+    with pytest.raises(InvalidParamError):
+        VacancyParams(mint="real-words")
+
+
+def test_counts_do_not_reach_the_nonce_map(domain, counts, maps):
+    """The nonce map stays a pure function of `(domain, seed, match_prosody)` (§5.2)."""
+    for seed in SEEDS:
+        with_counts = build_vacancy_map(domain, VacancyParams(seed=seed), counts)
+        assert with_counts.mapping == maps[seed].mapping
+        assert with_counts.remint_rounds == maps[seed].remint_rounds
+
+
+def test_swap_is_stable_in_seed_and_stem(domain, counts, swap_maps, corpus):
+    """SC-702 for swap: the map is built once, independently of `p` (§5.6)."""
+    for seed in SEEDS:
+        again = build_vacancy_map(domain, VacancyParams(p=1.0, seed=seed, mint="swap"), counts)
+        assert again.mapping == swap_maps[seed].mapping
+    # ... and a stem's surface is byte-identical at every `p` at which it is vacated.
+    forms: dict[str, set[str]] = {}
+    for p in P_GRID:
+        params = VacancyParams(p=p, seed=0, mint="swap")
+        for stem in ("little", "moon", "crown"):
+            if vacancy_u(stem, 0) < p:
+                forms.setdefault(stem, set()).add(swap_maps[0].apply_word(stem, params))
+    assert forms and all(len(v) == 1 for v in forms.values())
+
+
+def test_swap_is_nested_in_p(corpus, swap_maps):
+    """SC-701 for swap: `u(stem) < p` is untouched, so the vacated sets are still nested."""
+    previous: set[str] = set()
+    for p in P_GRID:
+        text = vacate_text(corpus, swap_maps[0], VacancyParams(p=p, seed=0, mint="swap"))
+        changed = _changed_types(corpus, text)
+        assert previous <= changed, p
+        previous = changed
+
+
+def test_swap_is_a_bijection_of_the_domain_at_full_vacancy(swap_maps):
+    """A + B₁ of §5.2a, which is what the invariance theorem needs at `p = 1`."""
+    for seed, vmap in swap_maps.items():
+        assert vmap.bijective, seed
+        assert vmap.image_size == vmap.type_count, seed
+        assert vmap.remint_rounds == 0, seed
+        assert vmap.injective_at_every_p is False, seed
+
+
+def test_swap_satisfies_the_invariance_theorem_where_it_is_defined(corpus, budget, swap_maps):
+    """SC-703 for swap, at the `p` where §5.2a proves a swap map CAN be injective.
+
+    At `p in {0, 1}` the id stream is element-for-element identical to the untransformed
+    stream, exactly as it is for `mint="nonce"` — the tiny model is exactly as blind to a
+    real-word swap as to an invented form, which is the check that the control is right.
+    """
+    base = LexVocab(tuple(budget), source="dolch", budget_name="full")
+    reference = base.encode(tokenize(corpus))
+    for seed in SEEDS:
+        for p in (0.0, 1.0):
+            params = VacancyParams(p=p, seed=seed, mint="swap")
+            text = vacate_text(corpus, swap_maps[seed], params)
+            words = map_vocab_words(budget, swap_maps[seed], params)
+            assert len(set(words)) == len(words)
+            mapped = LexVocab(tuple(words), source="dolch", budget_name="full")
+            assert mapped.rows == base.rows
+            assert mapped.encode(tokenize(text)) == reference
+
+
+def test_swap_refuses_the_mapped_vocabulary_at_intermediate_p(budget, swap_maps):
+    """§5.2a: no `p`-stable swap into the domain is injective at `0 < p < 1`, so the mapped
+    vocabulary does not exist there and is refused rather than silently duplicated."""
+    for p in (0.25, 0.5, 0.75):
+        with pytest.raises(InvalidParamError):
+            map_vocab_words(budget, swap_maps[0], VacancyParams(p=p, seed=0, mint="swap"))
+
+
+def test_why_swap_cannot_be_injective_at_intermediate_p(corpus, swap_maps):
+    """The theorem of §5.2a, measured rather than merely proved.
+
+    A vacated type lands on a real English word; at intermediate `p` that word's own
+    occurrences may not have moved, so two source types share one surface. This pins the
+    collision count so the refusal above can never be mistaken for over-caution — if a future
+    change makes swap injective at `p = 0.5`, this test fails and the contract is wrong.
+    """
+    params = VacancyParams(p=0.5, seed=0, mint="swap")
+    vmap = swap_maps[0]
+    images: dict[str, str] = {}
+    collisions = 0
+    for t in sorted(vmap.domain):
+        image = vmap.apply_word(t, params).lower()
+        if image in images:
+            collisions += 1
+        images[image] = t
+    assert collisions > 0
+    # ... whereas at full vacancy there are none, which is what B₁ buys.
+    full = VacancyParams(p=1.0, seed=0, mint="swap")
+    assert len({vmap.apply_word(t, full).lower() for t in vmap.domain}) == len(vmap.domain)
+
+
+def test_swap_honours_match_prosody(domain, counts, swap_maps):
+    """`matchProsody` is a real filter under swap, and — unlike minting — it is a filter over
+    a FINITE pool, so it cannot always be honoured.
+
+    Measured at seed 0: 1586 of 1680 stems get a stress-matched real word, i.e. 94.4 %. The
+    other 94 exhaust the 1024 attempts of :data:`SWAP_RELAX_PROSODY` because their pattern is
+    rare in the corpus and the few words carrying it are already used — the relaxation of
+    §5.5, applied to a pool that can genuinely run out. Minting has no such limit, which is
+    exactly the difference between inventing a form and borrowing one, so the bound here is
+    the measurement rather than a claim of exactness.
+    """
+    matched = swap_maps[0].mapping
+    hits = sum(1 for stem, word in matched.items() if stress(word) == stress(stem))
+    assert hits / len(matched) > 0.9
+    flat = build_vacancy_map(
+        domain, VacancyParams(seed=0, mint="swap", match_prosody=False), counts
+    )
+    assert flat.mapping != matched
+    flat_hits = sum(1 for stem, word in flat.mapping.items() if stress(word) == stress(stem))
+    assert flat_hits < hits
+
+
+def test_swap_replacements_are_not_registered_as_minted_stress(swap_maps):
+    """They are real English words: their stress comes from the table or the rule, so
+    `stressFromMinted` must stay 0 on both sides of a swap (§8.3)."""
+    for seed, vmap in swap_maps.items():
+        assert vmap.minted_stress == {}, seed
+
+
+def test_swap_statistics_report_the_same_vacancy_rate_as_nonce(corpus, maps, swap_maps):
+    """The control holds the vacancy rate fixed and changes only what replaces the word."""
+    for seed in SEEDS:
+        nonce = vacancy_stats(
+            corpus,
+            vacate_text(corpus, maps[seed], VacancyParams(p=1.0, seed=seed)),
+            maps[seed],
+            VacancyParams(p=1.0, seed=seed),
+        )
+        params = VacancyParams(p=1.0, seed=seed, mint="swap")
+        swap = vacancy_stats(
+            corpus, vacate_text(corpus, swap_maps[seed], params), swap_maps[seed], params
+        )
+        for field in ("corpusTypesVacated", "tokensVacated", "stemsVacated", "stemsTotal"):
+            assert swap[field] == nonce[field], (seed, field)
+
+
+def test_sc703_over_the_full_grid_for_both_mint_strategies(corpus, domain, counts):
+    """SC-703 as the spec states it, for BOTH minting strategies.
+
+    The grid the spec names: all five Dolch budgets plus a frequency budget,
+    ``p in {0, 0.25, 0.5, 0.75, 1}``, ``seed in {0, 7}``, both ``match_prosody`` settings —
+    120 cases.
+
+    ``mint="nonce"`` passes all 120: condition B keeps every image out of the domain, so the
+    map is injective at every `p` and the id stream is element-for-element unchanged.
+
+    ``mint="swap"`` passes 48 — every case at `p in {0, 1}` — and REFUSES the other 72. That
+    is not a weaker test of the same claim; it is the claim §5.2a proves. A swap map's images
+    are domain types, so at intermediate `p` a vacated type can land on one that has not
+    moved, and no `p`-stable map avoids it short of the identity. Where a swap map can be
+    injective at all it is exactly as invisible to the model as an invented form, which is
+    what makes the control trustworthy. The counts are asserted, so neither number can drift
+    without this failing.
+    """
+    budgets = {name: list(dolch_budget(name)) for name in DOLCH_ORDER}
+    budgets["frequency-top300"] = frequency_budget(corpus, 300)
+    assert len(budgets) == 6
+
+    passed = {"nonce": 0, "swap": 0}
+    refused = {"nonce": 0, "swap": 0}
+    for mint in ("nonce", "swap"):
+        for seed in SEEDS:
+            for match_prosody in (True, False):
+                vmap = build_vacancy_map(
+                    domain,
+                    VacancyParams(seed=seed, mint=mint, match_prosody=match_prosody),
+                    counts,
+                )
+                for p in P_GRID:
+                    params = VacancyParams(p=p, seed=seed, mint=mint, match_prosody=match_prosody)
+                    text = vacate_text(corpus, vmap, params)
+                    for words in budgets.values():
+                        base = LexVocab(tuple(words), source="dolch", budget_name="full")
+                        try:
+                            mapped_words = map_vocab_words(words, vmap, params)
+                        except InvalidParamError:
+                            refused[mint] += 1
+                            continue
+                        assert len(set(mapped_words)) == len(mapped_words), (mint, seed, p)
+                        mapped = LexVocab(tuple(mapped_words), source="dolch", budget_name="full")
+                        assert mapped.rows == base.rows
+                        assert mapped.encode(tokenize(text)) == base.encode(tokenize(corpus))
+                        passed[mint] += 1
+
+    assert (passed["nonce"], refused["nonce"]) == (120, 0)
+    assert (passed["swap"], refused["swap"]) == (48, 72)
