@@ -217,9 +217,20 @@ buildVacancyMap(types, seed, matchProsody, avoid) -> Map<stem, nonce>
         used.add(nonce); map[stem] = nonce
 ```
 
-`types` is the union of the corpus's type set and the budget's word list (§7.2 explains why the
-budget must be in the domain). The source accepts an `avoid` parameter and then never passes
-one, which lets a minted form silently merge with an English type.
+**The domain is `corpus types ∪ the full Dolch list`** — the *full* list, always, never the
+active budget. §7.2 explains why budget words must be in the domain at all; the reason it is the
+full list is that the domain must not depend on which budget the reader has selected, or
+switching budgets would re-mint the corpus in front of them and the stability the panel is
+demonstrating would look false. A frequency budget needs no special case, since its words are
+corpus types by construction.
+
+Measured: the map is in fact identical across all five Dolch domains (`gum → thrern` and
+`hang → smeeg` at seed 7 for every one), because minting is keyed on `(seed, stem)` and the
+extra words provoke no new collisions. That is a property worth **asserting in a test** rather
+than relying on — a future change to `avoid` or to the canonical order could break it silently.
+
+The source accepts an `avoid` parameter and then never passes one, which lets a minted form
+silently merge with an English type.
 
 **The check is over surface forms, not bare nonces, and it must hold at every `p`.** This is
 the second defect the first implementation exposed. A bare-nonce check is not enough:
