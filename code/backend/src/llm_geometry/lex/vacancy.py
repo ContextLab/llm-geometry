@@ -643,14 +643,14 @@ def swap_pools(
         grouped.setdefault(stem_and_suffix(lower)[1], set()).add(lower)
 
     # A class of one cannot be permuted without a fixed point, and on a PASSAGE-sized domain
-    # that is the common case, not a corner: of the six shipped Architecture passages, five
+    # that is the common case, not a corner: ALL SIX of the shipped Architecture passages
     # have a suffix class with exactly one member (`ing` in three of them). Such a class is
     # merged into the bare class, which the full Dolch list keeps at 194 members or more.
     #
     # This is the one place the inflection match bends, and it bends in the only direction
     # that keeps the property the control exists for: the replacement is still a REAL domain
     # word — it is simply an uninflected one, so `singing` may come back as `garden`. Refusing
-    # instead would refuse five of the six shipped passages; assembling a form would put a
+    # instead would refuse all six shipped passages; assembling a form would put a
     # non-word back into the arm whose whole claim is that every form is known. The merge is
     # visible in this function's return value, which is why it returns the pools rather than
     # hiding them inside the builder.

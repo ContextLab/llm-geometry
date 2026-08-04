@@ -755,9 +755,12 @@ where the class has nothing left, and a real word of the wrong stress is a far s
 than a form that is not a word. Measured at seed 0 on the shipped corpus: 1 918 of 1 940 types
 (98.9 %) get a stress-matched real word.
 
-Because each class is permuted onto itself, every image is a real domain word **and carries the
-same inflection as the word it replaces**, so the morphology a reader parses (`-ed`, `-ing`,
-`-'s`) is as intact in the swap arm as in the nonce arm. §3's spelling heuristic becomes harmless
+Because each class is permuted onto itself, every image is a real domain word, and — **except for
+the merged singleton classes described below** — it carries the same inflection as the word it
+replaces, so the morphology a reader parses (`-ed`, `-ing`, `-'s`) is as intact in the swap arm as
+in the nonce arm. Measured over the six shipped Architecture passages at `p = 1, seed = 0`: 767
+vacated words, 0 outside the domain, 21 (2.74 %) in a different suffix class, every one of them
+from a merged singleton. §3's spelling heuristic becomes harmless
 here: `November → Novemb + er` is never re-assembled, it only puts `November` in the `er` class.
 
 **Why not stems.** The first implementation drew a replacement for the STEM and re-attached the
@@ -781,11 +784,11 @@ swap arm may too. What it can never contain is a form the source text did not.
 
 **A class of one is merged into the bare class.** A class with a single member cannot be permuted
 without a fixed point, and on a PASSAGE-sized domain that is the common case rather than a corner:
-five of the six shipped Architecture passages have such a class (`ing` in three of them). Those
+all six shipped Architecture passages have such a class (`ing` in three of them). Those
 types join the bare class, which the full Dolch list keeps at ≥ 194 members. This is the one place
 the inflection match bends, and it bends in the only direction that keeps the property the control
 exists for — the replacement is still a real domain word, merely an uninflected one. Refusing
-instead would refuse five of the six shipped passages; assembling a form would put a non-word back
+instead would refuse all six shipped passages; assembling a form would put a non-word back
 into the arm whose whole claim is that every form is known. If even the bare class cannot be
 permuted, the engine **raises**.
 

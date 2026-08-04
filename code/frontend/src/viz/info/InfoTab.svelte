@@ -559,11 +559,16 @@
   <p class="para">
     A word list belongs to a <i>derivation</i>, not to a training run: fine-tuning or editing the
     weights of a from-scratch model produces a new model whose ids still mean <b>that</b> model's
-    words, and both stacks carry the vocabulary along every such hop. The digests cannot police
-    this on their own — a writer that substituted the shipped word list would also compute
-    <code>vocab_sha256</code> over the substituted list, and the file would verify. So where a
-    vocabulary cannot be recovered, saving is <b>refused</b> rather than completed with the wrong
-    words. That serialization is pinned byte-for-byte in both builds (keys sorted, compact
+    words, and both stacks carry the vocabulary along every such hop. The two digests could not
+    police this on their own: a writer that substituted the shipped word list would also compute
+    <code>vocab_sha256</code> over the substituted list, and the file would verify. So the content
+    hash covers the <b>word list as well as the weights</b> — a model's identity is its numbers
+    <i>and</i> what its ids mean — and a file whose vocabulary was swapped after the fact no longer
+    hashes to the model it names. Where a vocabulary cannot be recovered at all, saving is
+    <b>refused</b> rather than completed with the wrong words. One limit remains, and it is a limit
+    of digests rather than of this format: a file whose author recomputes <i>every</i> digest is
+    self-consistent by construction and describes whatever model it claims to. What is now
+    impossible is our own writer producing one. That serialization is pinned byte-for-byte in both builds (keys sorted, compact
     separators, non-ASCII escaped), so a model saved by the browser and the same model saved by the
     Python backend are the same file.
   </p>
@@ -888,8 +893,8 @@
     match degrades there. And a class with a single member cannot be permuted without leaving that
     word where it was, so such a class is folded into the bare class — the one place the inflection
     match bends, and it bends toward an uninflected real word rather than toward an invented
-    surface. That is common on a <i>passage</i>-sized domain (five of the six default passages have
-    one) and does not arise on the shipped corpus, whose smallest class holds 8 types.
+    surface. That is common on a <i>passage</i>-sized domain (all six default passages have one) and
+    does not arise on the shipped corpus, whose smallest class holds 7 types.
   </p>
   <p class="para">
     <b>A swap map is injective only at <code>p = 0</code> and <code>p = 1</code>, and that is a

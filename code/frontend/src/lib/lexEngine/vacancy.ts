@@ -661,7 +661,7 @@ export function swapPools(
   // This is the one place the inflection match bends, and it bends in the only direction that
   // keeps the property the control exists for: the replacement is still a REAL domain word —
   // it is simply an uninflected one, so `singing` may come back as `garden`. Refusing instead
-  // would refuse five of the six shipped passages; assembling a form would put a non-word
+  // would refuse all six shipped passages; assembling a form would put a non-word
   // back into the arm whose whole claim is that every form is known.
   let bare = grouped.get("");
   if (bare === undefined) {
