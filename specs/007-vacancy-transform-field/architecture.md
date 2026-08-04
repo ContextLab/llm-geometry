@@ -239,10 +239,18 @@ switching budgets would re-mint the corpus in front of them and the stability th
 demonstrating would look false. A frequency budget needs no special case, since its words are
 corpus types by construction.
 
-Measured: the map is in fact identical across all five Dolch domains (`gum → thrern` and
-`hang → smeeg` at seed 7 for every one), because minting is keyed on `(seed, stem)` and the
-extra words provoke no new collisions. That is a property worth **asserting in a test** rather
-than relying on — a future change to `avoid` or to the canonical order could break it silently.
+Making the domain the forbidden set (below) turns this from a convenience into a requirement,
+and the earlier draft of this paragraph is now wrong in an instructive way. It said the map was
+"identical across all five Dolch domains" — true when `avoid` was a caller-passed corpus type
+set independent of the domain, false now. A **smaller domain forbids less**, so it mints
+differently: building over `corpus ∪ dolch_budget(name)` for any name below `full` moves exactly
+one stem, `jam → floor` instead of `scirmp`, because `floor` is a full-list Dolch word that
+never occurs in *Mother Goose* and so is only forbidden when the full list is in the domain.
+
+That is a *reason* the domain must be the full list rather than a coincidence that it may be.
+`vacancyDomain` makes the smaller domains unreachable, and the test asserts the property that
+actually matters — **the map does not move when the active budget changes** — rather than the
+stronger claim that happened to hold before.
 
 The source accepts an `avoid` parameter and then never passes one, which lets a minted form
 silently merge with an English type. We do not repeat that by making it optional — see above.
