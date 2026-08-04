@@ -133,21 +133,55 @@ export function wordSpans(text: string, wordRe: RegExp): WordSpan[] {
 }
 
 /**
- * A run of characters a READER would call one word — Unicode letters plus the internal
- * apostrophes and hyphens `WORD_RE` allows. Only used to find runs `WORD_RE` mangles.
+ * Characters that BIND two letters into one written word without being letters.
+ *
+ * MIRROR of `WORD_JOINER_CHARS` + `WORD_JOINER_CATEGORIES` (Python). This is a class, not
+ * the one character that was reported: `WORD_RE` accepts exactly two joiners (ASCII `'`
+ * and `-`), and every other one used to END a wordlike run, leaving two runs `WORD_RE`
+ * matched in full — so `fragmentedWords` found nothing, the transform rewrote half a word
+ * and the score came back 200. Observed: `don’t` → `big’t` (U+2019, what every smart-quotes
+ * editor emits), `co<SHY>operate` → `co<SHY>wood`, `cat<ZWJ>sat` → `want<ZWJ>wish`.
+ *
+ *  - `\p{Pd}` — dash punctuation: hyphens of every width (U+002D, U+2010 hyphen, U+2011
+ *    non-breaking hyphen, U+2012–U+2015, the fullwidth and small forms);
+ *  - `\p{Cf}` — invisible format characters: U+00AD soft hyphen, U+200B–U+200F (ZWSP,
+ *    ZWNJ, ZWJ, the bidi marks), U+2060 word joiner, U+FEFF;
+ *  - the apostrophes and word-internal points listed literally, which carry no property
+ *    that separates them from ordinary quotation marks.
+ *
+ * Combining marks are not joiners — a mark belongs to the letter it sits on — so they are
+ * part of the letter atom `\p{L}\p{M}*` below. NFC composes most of them away, but only
+ * most: `k` + U+0301 has no precomposed form, so `wor`+U+0301+`d` stayed two `WORD_RE`
+ * words and was rewritten as a fragment.
  */
-const WORDLIKE_RE = /\p{L}+(?:['\-]\p{L}+)*/gu;
+const WORD_JOINER_CLASS = "\\p{Pd}\\p{Cf}'‘’ʹʼ՚′＇·‧−";
+
+/**
+ * A run of characters a READER would call one word.
+ *
+ * Grammar: `(L M*)+ ( J+ (L M*)+ )*` — letters with the marks that sit on them, then any number of
+ * joiner-separated continuations. A trailing joiner is punctuation and is left out (the
+ * group requires a letter after it); a trailing mark is part of its letter. MIRROR of
+ * `wordlike_runs` (Python), which scans rather than matches because Python's `re` has
+ * neither `\p{Pd}` nor `\p{Cf}` nor `\p{M}`. Both suites carry the same case table.
+ */
+const LETTER_RUN = "(?:\\p{L}\\p{M}*)+";
+const WORDLIKE_RE = new RegExp(
+  `${LETTER_RUN}(?:[${WORD_JOINER_CLASS}]+${LETTER_RUN})*`,
+  "gu",
+);
 
 /**
  * Words of `text` that `wordRe` splits or truncates, in order of appearance.
  *
  * MIRROR of `fragmented_words` (Python). The transform's `WORD_RE` is
- * `[A-Za-z]+(?:['-][A-Za-z]+)*` — ASCII letters only — so `café` is the word `caf` to it
- * and `naïvely` is the two words `na` + `vely`. Vacating those rewrites a fragment: "a
- * café" became "a washé", which the full stack RETURNED as a score. Runs `wordRe` matches
- * entirely (`don't`, `good-bye`) are fine, and so are runs it never touches (CJK, emoji):
- * those are never vacated, are byte-identical in all three variants, and are attributed
- * to no word — the same treatment punctuation gets.
+ * `[A-Za-z]+(?:['-][A-Za-z]+)*` — ASCII letters joined by the ASCII apostrophe and hyphen
+ * only — so `café` is the word `caf` to it, `naïvely` is the two words `na` + `vely`, and
+ * `don’t` is `don` + `t`. Vacating those rewrites a fragment: "a café" became "a washé"
+ * and "don’t" became "big’t", both of which the full stack RETURNED as a score. Runs
+ * `wordRe` matches entirely (`don't`, `good-bye`) are fine, and so are runs it never
+ * touches (CJK, emoji): those are never vacated, are byte-identical in all three variants,
+ * and are attributed to no word — the same treatment punctuation gets.
  */
 export function fragmentedWords(text: string, wordRe: RegExp): string[] {
   const runs = new RegExp(WORDLIKE_RE.source, "gu");
@@ -172,12 +206,14 @@ export function checkWordAlphabet(text: string, wordRe: RegExp, index?: number):
   if (bad.length === 0) return;
   const where = index === undefined ? "" : `passage ${index}: `;
   throw invalidParamError(
-    `${where}the vacancy transform's word alphabet is ASCII letters only ` +
-      `(WORD_RE = [A-Za-z]+(?:['-][A-Za-z]+)*), so it does not see these words as words ` +
-      `and would rewrite a fragment of each instead: ${bad.map((w) => JSON.stringify(w)).join(", ")}. ` +
+    `${where}the vacancy transform's word alphabet is ASCII letters joined by the ASCII ` +
+      `apostrophe and hyphen only (WORD_RE = [A-Za-z]+(?:['-][A-Za-z]+)*), so it does not ` +
+      `see these words as words and would rewrite a fragment of each instead: ` +
+      `${bad.map((w) => JSON.stringify(w)).join(", ")}. ` +
       "Refusing rather than scoring text the transform mangles — 'a café' vacates to " +
-      "'a washé', and a single BPE piece can then cover both a preserved and a vacated " +
-      "fragment. Use a passage written in the ASCII alphabet (emoji and CJK are fine: " +
+      "'a washé' and 'don’t' (curly apostrophe) to 'big’t', and a single BPE piece can " +
+      "then cover both a preserved and a vacated fragment. Use a passage written in the " +
+      "ASCII alphabet, with straight apostrophes and hyphens (emoji and CJK are fine: " +
       "they are never vacated and are identical in all three variants). Widening the " +
       "alphabet is a change to the shared transform and its contract, not to this panel.",
   );

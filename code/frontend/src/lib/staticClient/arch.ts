@@ -473,8 +473,10 @@ export const VACANCY_UNKNOWN_FORM_REFUSAL: ArchVacancyRefusal = {
 /**
  * What the quantized static build MAY say about the two differences it computed
  * (contract §8.3a, FR-720a). Pure policy, separated from the measurement so it can be
- * asserted directly: pooled `swap − english` and `nonce − english` carry a stated,
- * MEASURED quantization uncertainty; `nonce − swap` carries a refusal and no number.
+ * asserted directly: pooled `swap − english` and `nonce − english` carry a stated
+ * quantization uncertainty — a bound RETAINED from an earlier measurement, not one taken on
+ * the shipped swap, see `VACANCY_Q8_UNCERTAINTY_NATS` and the label the panel prints
+ * (`QUANTIZATION_TERM`) — while `nonce − swap` carries a refusal and no number.
  *
  * The refusal is not squeamishness about a wide error bar. q8's error on `nonce − swap`
  * is 14–23 % of an effect whose true value is 0.06–0.21 nats, and it flips sign on one
@@ -484,19 +486,27 @@ export const VACANCY_UNKNOWN_FORM_REFUSAL: ArchVacancyRefusal = {
 export function staticVacancyDifferences(
   swapMinusEnglish: { nats: number; se: number; nPairs: number },
   nonceMinusEnglish: { nats: number; se: number; nPairs: number },
-  identity = false,
+  identity: { identical: boolean; p: number } = { identical: false, p: 1 },
 ): ArchVacancyDifference[] {
-  // At p = 0 nothing is vacated, so all three variants are the same string and every
-  // difference is exactly 0 by construction. A genuine null control, but an identity
-  // rather than a measurement, and the flag travels with the numbers so the panel says
-  // which one it has instead of printing "0.000 ± 0.000 nats (sampling, …)".
-  const nullControl = identity
+  // An identity is "the three variants are the same string" — tested on the texts, not on
+  // `p === 0`, which is only the commonest way to reach it. A passage of nothing but
+  // closed-class scaffolding has nothing to vacate at any p and comes out identical too;
+  // on the `p` test that rendered as a measurement of 0 ± 0 with the advice to score more
+  // text. MIRROR of `identity` in `vacancy_score.score_vacancy`, note included.
+  const nullControl = identity.identical
     ? {
         identity: true,
         identityNote:
-          "At p = 0 no stem is vacated, so english, swap and nonce are the same string " +
-          "character for character and every difference is exactly 0 by construction. " +
-          "This is the instrument's null control, not a measurement of anything.",
+          identity.p === 0
+            ? "At p = 0 no stem is vacated, so english, swap and nonce are the same " +
+              "string character for character and every difference is exactly 0 by " +
+              "construction. This is the instrument's null control, not a measurement " +
+              "of anything."
+            : "This text has no word the transform vacates — every one of them is " +
+              "closed-class scaffolding — so english, swap and nonce are the same string " +
+              "character for character and every difference is exactly 0 by construction. " +
+              "That is an identity, not a measurement: no amount of extra text of this " +
+              "kind changes it. Score a passage with content words in it.",
       }
     : { identity: false };
   return [
@@ -804,12 +814,13 @@ export class ArchSection {
    *   - `nonce − swap` is refused — its true value is 0.06–0.21 nats and q8's error on it
    *     is 14–23 % pooled with sign flips, so quantization eats exactly the contrast that
    *     makes the result mean something;
-   *   - pooled `swap − english` and `nonce − english` are reported, with the measured
+   *   - pooled `swap − english` and `nonce − english` are reported, with the
    *     `VACANCY_Q8_UNCERTAINTY_NATS` quantization uncertainty stated beside the sampling
-   *     standard error. (This line said "±0.1" until that constant was re-derived on the
-   *     configuration that actually ships and came out at 0.2 — see its own comment. A
-   *     number written twice is a number that drifts, so it is named here rather than
-   *     retyped.)
+   *     standard error — a bound RETAINED from a measurement whose variant texts the swap
+   *     rewrite replaced, not one taken on the shipped swap, which is what the panel's
+   *     label now says. (This line said "±0.1" until that constant was re-derived and came
+   *     out at 0.2 — see its own comment. A number written twice is a number that drifts,
+   *     so it is named here rather than retyped.)
    *
    * A dtype with no measured bound is refused outright rather than given a ± copied from
    * a different dtype: a stated error bar that was never measured is a fabrication, and
@@ -919,7 +930,12 @@ export class ArchSection {
     const differences = staticVacancyDifferences(
       pairedDifference(scored.english, preservedIdx.english, scored.swap, preservedIdx.swap),
       pairedDifference(scored.english, preservedIdx.english, scored.nonce, preservedIdx.nonce),
-      p === 0,
+      {
+        identical: prepared.every(
+          ({ texts }) => texts.english === texts.swap && texts.swap === texts.nonce,
+        ),
+        p,
+      },
     );
 
     return {

@@ -94,6 +94,16 @@ separate instrument; none is needed for T4.
   the fields of contract §8.1.
 - **FR-718** Token→word alignment is verified by reconstruction; a mismatch raises rather than
   mis-attributing (contract §8.2).
+- **FR-718a** A passage whose words the transform's `WORD_RE` would **split or truncate** is
+  refused up front, by name, in both stacks — scoring it would rewrite a fragment of a word and
+  return a plausible number, which is worse than any crash. `WORD_RE` is ASCII letters joined by
+  the ASCII apostrophe and hyphen, so the refusal covers both halves of that alphabet: non-ASCII
+  **letters** (`café` → the word `caf`) and every non-ASCII **joiner** — curly and modifier
+  apostrophes, hyphens of every width, soft hyphen, ZWSP/ZWNJ/ZWJ/word joiner/ZWNBSP, combining
+  marks (`don’t` → the words `don` + `t`, rewritten to `big’t`). The joiner half is enumerated as
+  a Unicode class, not as the characters that were reported. Emoji, CJK and other scripts that
+  `WORD_RE` never matches at all are **not** refused: they are never vacated and are identical in
+  all three variants.
 - **FR-719** The entropy confound is stated in the UI, and the tiny arm's exact zero is shown
   next to the pretrained delta so the number is interpretable (contract §8.4).
 - **FR-719a** A **swap control** exists (`mint: "nonce" | "swap"`, contract §8.3): the same
@@ -105,12 +115,26 @@ separate instrument; none is needed for T4.
   dtype**. They do not at the dtypes actually shipped, which is a measured fact, not an
   assumption (contract §8.3a): ONNX fp32 ≡ torch to 5.3e-4 nats, but q8 shifts absolute
   `nllPreserved` by −0.19 nats on gpt2 and +0.40 on SmolLM2-135M.
-- **FR-720a** The static build reports a quantity **only** where a measured error bound exists
-  for the dtype it actually ran. Pooled `nonce − english` and `swap − english` qualify under q8
-  (|Δ| ≤ 0.054 nats). `nonce − swap` and every per-passage delta do **not** and are refused with
-  a typed error naming the full stack. If the running dtype has no measured bound, the panel
-  refuses — a stated ± that was never measured is a fabricated error bar and is worse than no
-  number.
+- **FR-720a** The static build reports a quantity **only** where an error bound exists for the
+  dtype it actually ran, and it states that bound's real standing. Pooled `nonce − english` and
+  `swap − english` qualify under q8; `nonce − swap` and every per-passage delta do **not** and
+  are refused with a typed error naming the full stack. If the running dtype has no bound at
+  all, the panel refuses — a stated ± that was never measured is a fabricated error bar and is
+  worse than no number. **The q8 bound in force is RETAINED, not current** (2026-08-04,
+  architecture.md §8.3a): the |Δ| ≤ 0.054 nats it comes from, and this build's own 0.073 /
+  0.110, were all measured on the PROTOTYPE swap's variant texts, which the swap rewrite
+  replaced; the fp32 arm has been re-measured on the shipped transform and the q8 arm cannot be
+  without a real browser. `VACANCY_Q8_UNCERTAINTY_NATS = 0.2` is therefore kept because it
+  exceeds every gap ever observed here — not because it has been re-derived — and **no surface
+  may call it "measured on the shipped swap"**: the label the panel renders is part of the
+  claim this requirement governs, not a decoration on it.
+- **FR-720b** A difference that is **0 by construction** is reported as an identity, never as a
+  measurement that came back zero. The condition is that the three variant texts are the same
+  string — not `p = 0`, which is only the commonest way to reach it: a passage whose every word
+  is closed-class scaffolding has nothing to vacate at any `p`. Where the payload says
+  `identity`, no sampling ± is printed beside the number, no "upper bound" caption is claimed,
+  and no advice to score more text is given — more text of the same kind cannot change an
+  identity.
 
 ### API and static build
 

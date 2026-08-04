@@ -961,8 +961,8 @@
       and one measured case was wrong by more than its own value.
     </li>
     <li>
-      <b>A pool below 700 preserved tokens: refused</b> — that is the size at which the bound was
-      measured, and below it the honest answer is no number.
+      <b>A pool below 700 preserved tokens: refused</b> — that is the size at which the retained
+      bound was measured, and below it the honest answer is no number.
     </li>
     <li>
       <b>Any dtype without a measured bound: refused outright.</b> A stated ± that was never
@@ -972,7 +972,8 @@
       <b>What it does report</b> — pooled <code>swap − english</code> and
       <code>nonce − english</code> — carries <b>±0.2</b> nats of quantization uncertainty stated
       beside the sampling standard error, quoted to one decimal place because that is all the
-      measurement supports.
+      measurement supports. The panel labels it what it is — a <i>retained</i> bound, not
+      re-measured since the swap rewrite — for the reason in Known limits below.
     </li>
   </ul>
   <p class="para">

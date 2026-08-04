@@ -9,6 +9,7 @@
     formSharePercent,
     nats,
     num,
+    quantizationNote,
     secondaryLine,
     upperBoundLabel,
     verdictKind,
@@ -94,6 +95,14 @@
   const formShare = $derived(formSharePercent(unknownForm, total));
   /** Whether the closing ordering claim is one THIS run supports. */
   const formCostsLess = $derived(formCostsLessThanContent(unknownForm, wrongContent));
+  /**
+   * What the quantization term beside a number actually is. The term used to call itself
+   * "measured"; it is a bound retained from a measurement whose texts the swap rewrite
+   * replaced, and the reader gets told that where the number is, not only in the Info tab.
+   */
+  const qNote = $derived(
+    quantizationNote((result?.differences ?? []).find((d) => d.quantizationUncertaintyNats)),
+  );
 
   let seq = 0;
   async function score(): Promise<void> {
@@ -285,6 +294,10 @@
         </div>
       </div>
 
+      {#if qNote}
+        <p class="qnote" data-testid="arch-vac-quantization-note">{qNote}</p>
+      {/if}
+
       <p class="twobytwo" data-testid="arch-vac-verdict">
         That juxtaposition is the whole result: a word's form is worth <b>exactly nothing</b> to a
         model trained from scratch with no lexical entries, and
@@ -302,9 +315,10 @@
           <b>{nats(unknownForm.nats)} nats</b> to one that has them — which is
           <b>negative</b>, and a cost cannot be. It says the nonce variant was <i>easier</i> to
           predict than the swap variant, so on this sample the contrast ran backwards and no
-          conclusion is drawn from it. That happens at intermediate <code>p</code> and on short
-          passages, where the swap variant's own replacements can be rarer than the nonce forms
-          that replace them; it is not the measured configuration. Score the pooled corpus
+          conclusion is drawn from it. That happens on short passages, where the swap variant's
+          own replacements can be rarer than the nonce forms that replace them; it is not the
+          measured configuration. (Intermediate <code>p</code> used to be the other way in, and
+          is now refused outright, so it cannot be the cause of this one.) Score the pooled corpus
           excerpts at <code>p = 1</code> — the run the reference numbers come from — before
           reading a direction into this.
         {:else}
@@ -650,6 +664,15 @@
     font-size: 0.8rem;
     line-height: 1.6;
     max-width: 78ch;
+  }
+  .qnote {
+    margin: 0;
+    font-size: 0.72rem;
+    line-height: 1.55;
+    max-width: 78ch;
+    color: var(--text-dim);
+    border-left: 2px solid var(--border);
+    padding-left: 0.6rem;
   }
   .rows {
     border-collapse: collapse;

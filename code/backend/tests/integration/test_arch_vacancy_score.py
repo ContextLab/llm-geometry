@@ -203,13 +203,50 @@ def test_intermediate_p_is_refused_end_to_end() -> None:
 
 def test_a_diacritic_passage_is_refused_before_any_number_is_computed() -> None:
     """Red team F6, through the endpoint. `café` used to score and return `washé`."""
-    with pytest.raises(InvalidParamError, match="ASCII letters only"):
+    with pytest.raises(InvalidParamError, match="ASCII letters joined by"):
         vacancy_score(
             MODEL,
             ["The dog and the cat sat on the mat with a café and a résumé on the table."],
             p=1.0,
             seed=0,
         )
+
+
+def test_a_curly_apostrophe_is_refused_through_the_endpoint_too() -> None:
+    """Red team F2 (round 3), through the endpoint.
+
+    This exact request returned HTTP 200 with a full score and the swap preview
+    ``"The want’s big’t wish and the cat clean’t go to the park…"`` — ``don’t`` split into
+    ``don`` + ``t``, and the transform rewrote the half. A silent wrong answer on the
+    apostrophe every browser and phone keyboard produces.
+    """
+    for passage in (
+        "The cat’s don’t stop and the dog won’t go to the tree in the park today okay.",
+        "The dog and the cat co­operate on the mat in the park today and did not go.",
+        "The cat‍sat on the mat and the dog did not go to the park in the tree today.",
+    ):
+        with pytest.raises(InvalidParamError, match="word alphabet") as exc:
+            vacancy_score(MODEL, [passage], p=1.0, seed=0)
+        assert exc.value.http_status == 400
+        assert exc.value.detail["words"], "the refusal must name the offending word"
+
+
+def test_an_all_closed_class_passage_is_an_identity_not_a_measurement() -> None:
+    """Red team F3 (round 3). `identity` was `p == 0`, so this passage — every word of
+    which is closed-class scaffolding, hence nothing to vacate at any p — came back with
+    `identity=False` and rendered `0.000 ± 0.000 (sampling, 20 paired tokens)`, an
+    "upper bound" caption and the advice to "score more text". The three variants are one
+    string; no amount of extra text of this kind changes that.
+    """
+    passage = "the of and a to in is it you that he was for on are with as I his they be"
+    result = vacancy_score(MODEL, [passage], p=1.0, seed=0)
+    assert len({v["preview"] for v in result["variants"]}) == 1, "not actually identical"
+    for d in result["differences"]:
+        assert d["nats"] == pytest.approx(0.0, abs=1e-9)
+        assert d["identity"] is True, d["id"]
+        # …and the note explains THIS route to the identity, not the p = 0 one.
+        assert "no word the transform vacates" in d["identityNote"]
+        assert "not a measurement" in d["identityNote"]
 
 
 def test_bad_parameters_raise_typed_errors() -> None:

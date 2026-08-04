@@ -23,6 +23,7 @@ from llm_geometry.arch.vacancy_score import (
     token_byte_spans,
     variant_texts,
     word_spans,
+    wordlike_runs,
 )
 from llm_geometry.errors import ComputeError, InvalidParamError
 
@@ -155,7 +156,7 @@ def test_a_diacritic_word_is_refused_by_name_rather_than_mangled() -> None:
     assert [w.word for w in word_spans("a café")] == ["a", "caf"]
 
     for text in ("The dog sat by a café.", "He did it naïvely.", "a résumé"):
-        with pytest.raises(InvalidParamError, match="ASCII letters only") as exc:
+        with pytest.raises(InvalidParamError, match="ASCII letters joined by") as exc:
             check_word_alphabet(text, 0)
         assert exc.value.detail["words"], "the refusal must name the offending word"
 
@@ -164,6 +165,69 @@ def test_a_diacritic_word_is_refused_by_name_rather_than_mangled() -> None:
     for ok in ("don't good-bye o'clock", "The cat sat. 🙂🙂 The dog ran.", "the 猫が座った cat"):
         assert fragmented_words(ok) == []
         check_word_alphabet(ok, 0)
+
+
+#: The joiner CLASS, not the character that was reported. Duplicated verbatim in
+#: `code/frontend/tests/unit/archVacancy.test.ts` (`JOINER_CASES`) so the two stacks are
+#: pinned to the same answers on it.
+JOINER_CASES = [
+    ("The cat’s don’t stop.", "’ U+2019 right single quote — the default pasted apostrophe"),
+    ("The ‘cat‘s ran.", "‘ U+2018 left single quote"),
+    ("He said itʼs fine.", "ʼ U+02BC modifier letter apostrophe"),
+    ("The catʹs paw.", "ʹ U+02B9 modifier letter prime"),
+    ("The cat′s paw.", "′ U+2032 prime"),
+    ("The co­operate dog ran.", "U+00AD soft hyphen — invisible"),
+    ("The cat‍sat down.", "U+200D ZWJ — invisible"),
+    ("The cat‌sat down.", "U+200C ZWNJ — invisible"),
+    ("The cat⁠sat down.", "U+2060 word joiner — invisible"),
+    ("The cat﻿sat down.", "U+FEFF ZWNBSP — invisible"),
+    ("The cat​sat down.", "U+200B ZWSP — invisible"),
+    ("A co‐operate dog.", "U+2010 hyphen"),
+    ("A co‑operate dog.", "U+2011 non-breaking hyphen"),
+    ("A cat‒dog.", "U+2012 figure dash"),
+    ("A cat–dog.", "U+2013 en dash"),
+    ("A cat—dog.", "U+2014 em dash"),
+    ("A cat－dog.", "U+FF0D fullwidth hyphen-minus"),
+    ("A cat﹣dog.", "U+FE63 small hyphen-minus"),
+    ("A cat−dog.", "U+2212 minus sign"),
+    ("The para·llel cat.", "U+00B7 middle dot"),
+    ("The para‧llel cat.", "U+2027 hyphenation point"),
+    ("The cab́le ran.", "U+0301 combining acute with no precomposed form on b"),
+]
+
+
+def test_the_whole_joiner_class_is_refused_not_just_the_one_seen() -> None:
+    """Red team F2 (round 3). F6 closed the LETTER half of the word alphabet and left the
+    JOINER half open, which is the half ordinary input hits.
+
+    ``WORD_RE`` accepts exactly two joiners, ASCII ``'`` and ``-``. Every other one ended a
+    "wordlike" run, so the two halves it left were each matched by ``WORD_RE`` *in full*,
+    ``fragmented_words`` flagged nothing, and the endpoint RETURNED a score over a rewritten
+    fragment. Observed on the running backend, HTTP 200:
+    ``"The cat’s don’t stop…"`` → swap ``"The want’s big’t wish…"``. ``big’t`` is not a word,
+    which is the one property ``swap`` is defined by.
+    """
+    for text, why in JOINER_CASES:
+        assert fragmented_words(text), f"not flagged: {why} in {text!r}"
+        with pytest.raises(InvalidParamError, match="word alphabet"):
+            check_word_alphabet(text, 0)
+
+    # The two joiners the transform really does handle must keep working: widening the run
+    # definition must not start refusing ordinary English.
+    for ok in (
+        "The cat's don't stop.",
+        "A co-operate good-bye o'clock dog.",
+        "The cat sat on the mat and did not move at all today.",
+    ):
+        assert fragmented_words(ok) == []
+        check_word_alphabet(ok, 0)
+
+    # The refusal names the run the READER wrote, not the fragment WORD_RE saw.
+    assert fragmented_words("The cat’s don’t stop.") == ["cat’s", "don’t"]
+    assert fragmented_words("The co­operate dog.") == ["co­operate"]
+    # A trailing joiner is punctuation: an em dash between spaces separates two whole words.
+    assert fragmented_words("The cat — the dog ran.") == []
+    assert wordlike_runs("The cat — the dog ran.") == ["The", "cat", "the", "dog", "ran"]
 
 
 def test_intermediate_p_is_refused_exactly_as_the_lexicon_lab_refuses_it() -> None:

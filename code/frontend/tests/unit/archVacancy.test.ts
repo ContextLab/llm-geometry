@@ -164,11 +164,76 @@ describe("the word alphabet (§8.2) — red team F6", () => {
     }
   });
 
+  /**
+   * Round 3. F6 was closed for LETTERS and left open for JOINERS, which is the half an
+   * ordinary reader actually hits: `don’t` with the curly apostrophe every browser, phone
+   * keyboard and word processor produces scored HTTP 200 and swapped to `big’t`.
+   *
+   * This table is the CLASS, not the character that was reported, and it is duplicated
+   * verbatim in the backend's `test_the_whole_joiner_class_is_refused_not_just_the_one_seen`
+   * so the two stacks are pinned to the same answers.
+   */
+  const JOINER_CASES: [string, string][] = [
+    ["The cat’s don’t stop.", "’ U+2019 right single quote — the default pasted apostrophe"],
+    ["The ‘cat‘s ran.", "‘ U+2018 left single quote"],
+    ["He said itʼs fine.", "ʼ U+02BC modifier letter apostrophe"],
+    ["The catʹs paw.", "ʹ U+02B9 modifier letter prime"],
+    ["The cat′s paw.", "′ U+2032 prime"],
+    ["The co­operate dog ran.", "U+00AD soft hyphen — invisible"],
+    ["The cat‍sat down.", "U+200D ZWJ — invisible"],
+    ["The cat‌sat down.", "U+200C ZWNJ — invisible"],
+    ["The cat⁠sat down.", "U+2060 word joiner — invisible"],
+    ["The cat﻿sat down.", "U+FEFF ZWNBSP — invisible"],
+    ["The cat​sat down.", "U+200B ZWSP — invisible"],
+    ["A co‐operate dog.", "U+2010 hyphen"],
+    ["A co‑operate dog.", "U+2011 non-breaking hyphen"],
+    ["A cat‒dog.", "U+2012 figure dash"],
+    ["A cat–dog.", "U+2013 en dash"],
+    ["A cat—dog.", "U+2014 em dash"],
+    ["A cat－dog.", "U+FF0D fullwidth hyphen-minus"],
+    ["A cat﹣dog.", "U+FE63 small hyphen-minus"],
+    ["A cat−dog.", "U+2212 minus sign"],
+    ["The para·llel cat.", "U+00B7 middle dot"],
+    ["The para‧llel cat.", "U+2027 hyphenation point"],
+    ["The cab́le ran.", "U+0301 combining acute with no precomposed form on b"],
+  ];
+
+  it("refuses the whole joiner class, not just the character that was reported", () => {
+    for (const [text, why] of JOINER_CASES) {
+      expect(fragmentedWords(text, WORD_RE), why).not.toEqual([]);
+      expect(() => checkWordAlphabet(text, WORD_RE, 0), why).toThrowError(
+        /InvalidParamError|word alphabet/,
+      );
+    }
+  });
+
+  it("still admits every joiner WORD_RE really does handle", () => {
+    // The straight apostrophe and the ASCII hyphen ARE in the transform's alphabet, so
+    // widening the run definition must not start refusing ordinary English.
+    for (const ok of [
+      "The cat's don't stop.",
+      "A co-operate good-bye o'clock dog.",
+      "The cat sat on the mat and did not move at all today.",
+    ]) {
+      expect(fragmentedWords(ok, WORD_RE)).toEqual([]);
+      expect(() => checkWordAlphabet(ok, WORD_RE, 0)).not.toThrow();
+    }
+  });
+
+  it("names the joined word whole, so the reader can find it", () => {
+    // Not "don" or "t": the run the reader wrote.
+    expect(fragmentedWords("The cat’s don’t stop.", WORD_RE)).toEqual(["cat’s", "don’t"]);
+    expect(fragmentedWords("The co­operate dog.", WORD_RE)).toEqual(["co­operate"]);
+    // A trailing joiner is punctuation, not part of the word: an em dash between spaces
+    // separates, and both neighbours are whole WORD_RE words.
+    expect(fragmentedWords("The cat — the dog ran.", WORD_RE)).toEqual([]);
+  });
+
   it("refuses such a passage with a typed error naming the word", () => {
     // The full stack RETURNED a score for this one: "a café" vacated to "a washé".
     expect(() =>
       checkWordAlphabet("The dog and the cat sat with a café on the table.", WORD_RE, 0),
-    ).toThrowError(/ASCII letters only/);
+    ).toThrowError(/ASCII letters joined by/);
     const err = (() => {
       try {
         checkWordAlphabet("He did it naïvely.", WORD_RE, 2);
@@ -224,12 +289,37 @@ describe("what the quantized static build may say (§8.3a, FR-720a)", () => {
     expect(d.refused?.message).toMatch(/sign flip/);
   });
 
-  it("reports the two pooled differences it has a measured bound for", () => {
+  it("reports the two pooled differences it has a bound for", () => {
     for (const id of ["wrong_content", "total"]) {
       expect(byId[id].nats).toBeTypeOf("number");
-      // The stated ± was MEASURED for q8; nothing here invents one.
+      // The stated ± is the retained q8 bound; nothing here invents one, and nothing
+      // here calls it a measurement of the shipped swap (architecture.md §8.3a).
       expect(byId[id].quantizationUncertaintyNats).toBe(0.2);
       expect(byId[id].refused).toBeUndefined();
+    }
+  });
+
+  it("calls an identity an identity from the TEXTS, not from p", () => {
+    // Red team F3. `p === 0` is only the commonest way to reach an identity: a passage of
+    // nothing but closed-class scaffolding has no vacatable word at any p, so the three
+    // variants come out one string there too. On the `p` test that rendered as
+    // "0.000 ± 0.000 (sampling, 20 paired tokens)", an "upper bound" caption, and the
+    // advice to score more text — none of which is true of an identity.
+    const zero = { nats: 0, se: 0, nPairs: 20 };
+    const atP1 = staticVacancyDifferences(zero, zero, { identical: true, p: 1 });
+    for (const d of atP1) {
+      expect(d.identity).toBe(true);
+      expect(d.identityNote).toMatch(/no word the transform vacates/);
+      expect(d.identityNote).toMatch(/not a measurement/);
+    }
+    // …and the p = 0 route keeps its own, correct, note.
+    const atP0 = staticVacancyDifferences(zero, zero, { identical: true, p: 0 });
+    expect(atP0[0].identityNote).toMatch(/At p = 0 no stem is vacated/);
+    // A run whose variants really do differ is not an identity at p = 0 either — the
+    // condition is the texts, in both directions.
+    for (const d of staticVacancyDifferences(swap, nonce, { identical: false, p: 0 })) {
+      expect(d.identity).toBe(false);
+      expect(d.identityNote).toBeUndefined();
     }
   });
 

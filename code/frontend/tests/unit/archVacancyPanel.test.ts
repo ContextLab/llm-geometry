@@ -18,8 +18,10 @@ import { describe, expect, it } from "vitest";
 
 import type { ArchVacancyDifference } from "../../src/lib/dataClient";
 import {
+  QUANTIZATION_TERM,
   errorBarTerms,
   formSharePercent,
+  quantizationNote,
   secondaryLine,
   upperBoundLabel,
   verdictKind,
@@ -113,11 +115,11 @@ describe("F4 — every measured term of an error bar is rendered", () => {
     quantizationUncertaintyNats: 0.2,
   });
 
-  it("states the measured quantization uncertainty on a SECONDARY row too", () => {
+  it("states the quantization uncertainty on a SECONDARY row too", () => {
     const line = secondaryLine(STATIC_TOTAL);
     expect(line).toContain("0.879");
     expect(line).toContain("± 0.074 (sampling)");
-    expect(line).toContain("± 0.2 (quantization, measured)");
+    expect(line).toContain(`± 0.2 (${QUANTIZATION_TERM})`);
     // The interval the old row stated excluded the float32 truth; the term that fixes
     // that is the one that was dropped.
     expect(0.879 + 0.0741).toBeLessThan(0.9892);
@@ -128,13 +130,79 @@ describe("F4 — every measured term of an error bar is rendered", () => {
     const backendTotal = diff({ id: "total", nats: 0.9892, se: 0.0595, nPairs: 847 });
     expect(secondaryLine(backendTotal)).not.toContain("quantization");
     expect(errorBarTerms(backendTotal)).toEqual(["± 0.059 (sampling, 847 paired tokens)"]);
+    expect(quantizationNote(backendTotal)).toBeNull();
   });
 
   it("headline cards carry both terms, unchanged", () => {
     expect(errorBarTerms(STATIC_TOTAL)).toEqual([
       "± 0.074 (sampling, 847 paired tokens)",
-      "± 0.2 (quantization, measured)",
+      `± 0.2 (${QUANTIZATION_TERM})`,
     ]);
+  });
+});
+
+describe("F1 (round 3) — the quantization term does not call itself measured", () => {
+  // The static panel's two reported numbers, exactly as `staticVacancyDifferences`
+  // assembles them: `VACANCY_Q8_UNCERTAINTY_NATS = 0.2` attached to `wrong_content` and
+  // to `total`.
+  const STATIC_WRONG_CONTENT = diff({
+    id: "wrong_content",
+    expr: "nll(swap) − nll(english)",
+    upperBound: false,
+    nats: 0.644,
+    se: 0.0539,
+    nPairs: 856,
+    quantizationUncertaintyNats: 0.2,
+  });
+  const STATIC_TOTAL = diff({
+    id: "total",
+    expr: "nll(nonce) − nll(english)",
+    headline: false,
+    upperBound: false,
+    nats: 0.879,
+    se: 0.0741,
+    nPairs: 856,
+    quantizationUncertaintyNats: 0.2,
+  });
+
+  /**
+   * `architecture.md` §8.3a, verbatim: "So `VACANCY_Q8_UNCERTAINTY_NATS = 0.2` is **not
+   * currently a like-for-like measurement of the shipped configuration** … Until then, do
+   * not quote it as 'measured on the shipped swap'."
+   *
+   * Both renderers quoted it as exactly that, which is the one surface a reader reads.
+   * "measured" is a claim about provenance, and this pins that no renderer makes it.
+   */
+  it("never labels the retained bound 'measured', on either surface", () => {
+    for (const rendered of [
+      ...errorBarTerms(STATIC_WRONG_CONTENT),
+      ...errorBarTerms(STATIC_TOTAL),
+      secondaryLine(STATIC_WRONG_CONTENT),
+      secondaryLine(STATIC_TOTAL),
+    ]) {
+      if (!rendered.includes("quantization")) continue;
+      // "re-measured" is the honest negation and is allowed; a bare "measured" is the
+      // provenance claim §8.3a forbids.
+      expect(rendered).not.toMatch(/(?<!re-)measured/);
+      expect(rendered).toMatch(/retained/);
+    }
+  });
+
+  it("says on the page what the bound's real standing is", () => {
+    const note = quantizationNote(STATIC_TOTAL);
+    expect(note).not.toBeNull();
+    // The three facts §8.3a requires: retained, the texts changed, and why it is kept.
+    expect(note).toMatch(/retained bound, not a fresh measurement/);
+    expect(note).toMatch(/before the swap transform was rewritten/);
+    expect(note).toMatch(/larger than every q8-versus-float32 gap/);
+    // …and it quotes the number the stack attached, never a literal of its own.
+    expect(note).toContain("±0.2 nats");
+  });
+
+  it("still keeps the number itself — the fix is the label, not a new refusal", () => {
+    expect(errorBarTerms(STATIC_TOTAL)).toHaveLength(2);
+    expect(errorBarTerms(STATIC_TOTAL)[1]).toContain("± 0.2");
+    expect(secondaryLine(STATIC_TOTAL)).toContain("0.879");
   });
 });
 

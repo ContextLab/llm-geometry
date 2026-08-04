@@ -878,6 +878,13 @@ content — the doc's T4 prediction that field ≫ location, on a model it did n
   > ever observed here, and lowering a bound without a measurement is worse. Restoring the
   > derivation needs a browser q8 run of the static scorer on the six default passages, against
   > those fp32 numbers. Until then, do not quote it as "measured on the shipped swap".
+  >
+  > **The rendered label now complies** (2026-08-04, round 3). Both error-bar renderers printed
+  > `± 0.2 (quantization, measured)` on the two numbers the static panel reports — the one
+  > surface a reader actually sees, and the exact claim this paragraph forbids. They print
+  > `QUANTIZATION_TERM` (`vacancyVerdict.ts`) instead: *"quantization, retained bound — not
+  > re-measured since the swap rewrite"*, with the full standing of the bound beside the
+  > numbers. `archVacancyPanel.test.ts` fails if any renderer calls it measured again.
 - **Per-passage differences do not**: worst case 0.65 nats, **115 %** of that passage's fp32
   delta.
 - **`nonce − swap` is destroyed.** Its true value is 0.06–0.21; q8's error on it is 14–23 %

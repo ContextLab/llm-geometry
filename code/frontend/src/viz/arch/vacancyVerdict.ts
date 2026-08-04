@@ -14,10 +14,14 @@
  *  - the share was printed as `Math.round(nats/total*100)%` with no sign guard, so the
  *    same run read `-69% of the total damage` — a share of nothing;
  *  - the secondary row rendered `± se` and dropped `quantizationUncertaintyNats`, so the
- *    static site stated `0.879 ± 0.074` for a difference whose measured quantization
+ *    static site stated `0.879 ± 0.074` for a difference whose stated quantization
  *    uncertainty is ±0.2, and the interval excluded the float32 value 0.9892 (FR-720a:
- *    a ± that was never measured is a fabrication — and a measured one that was dropped
+ *    a ± that was never measured is a fabrication — and a stated one that was dropped
  *    is the same failure with the sign reversed).
+ *
+ * A fourth was found later, in the same class and on the same surface: both renderers
+ * *labelled* that ±0.2 `measured`, which `architecture.md` §8.3a forbids in as many words.
+ * See `QUANTIZATION_TERM` below.
  */
 
 import type { ArchVacancyDifference } from "../../lib/dataClient";
@@ -87,32 +91,82 @@ export function formCostsLessThanContent(
   return a < b;
 }
 
-/** The caption under an `upperBound` difference. A cost has no negative upper bound. */
+/**
+ * The caption under an `upperBound` difference. A cost has no negative upper bound — and
+ * an identity is not a bound at all: nothing was measured for it to bound.
+ */
 export function upperBoundLabel(d: ArchVacancyDifference): string {
+  if (d.identity) return "not a bound — the three variants are one string, so this is 0 by construction";
   return d.nats !== null && d.nats !== undefined && d.nats < 0
     ? "negative — a cost cannot have a negative upper bound; see below"
     : "upper bound — see below";
 }
 
 /**
+ * How the quantization term may describe itself — and what it may NOT say.
+ *
+ * It said `measured`. It is not: `VACANCY_Q8_UNCERTAINTY_NATS = 0.2` was derived from
+ * q8-vs-fp32 comparisons taken on the PROTOTYPE swap's variant texts, the swap rewrite of
+ * 2026-08-04 changed those texts, and the q8 arm has not been re-run since because it needs
+ * a real browser. `specs/007-vacancy-transform-field/architecture.md` §8.3a, verbatim:
+ * "So `VACANCY_Q8_UNCERTAINTY_NATS = 0.2` is **not currently a like-for-like measurement of
+ * the shipped configuration** … Until then, do not quote it as 'measured on the shipped
+ * swap'." The panel quoted it exactly that way, on the one surface a reader actually reads,
+ * which is the claim FR-720a governs. Retained-not-remeasured is the true status, and the
+ * true status is what gets printed.
+ */
+export const QUANTIZATION_TERM = "quantization, retained bound — not re-measured since the swap rewrite";
+
+/**
+ * The full standing of that retained bound, for the reader who wants to know why a number
+ * is quoted with a ± nobody has re-derived. Rendered once under the headline pair, never
+ * per card. `null` when the stack attached no quantization term at all (the full stack
+ * scores at float32 and has none).
+ */
+export function quantizationNote(d: ArchVacancyDifference | null | undefined): string | null {
+  const q = d?.quantizationUncertaintyNats;
+  if (!q) return null;
+  return (
+    `That ±${q} nats is a retained bound, not a fresh measurement. It was derived from ` +
+    "q8-versus-float32 comparisons taken before the swap transform was rewritten, so the " +
+    "variant texts it was measured on no longer exist; re-deriving it needs a q8 run of " +
+    "this scorer in a real browser, which has not happened. It is kept unchanged because it " +
+    "is strictly larger than every q8-versus-float32 gap ever observed on this contrast, " +
+    "and lowering a bound without a measurement would be the worse error " +
+    "(architecture.md §8.3a)."
+  );
+}
+
+/**
  * Every term of a difference's error bar, in the order they are rendered.
  *
- * The sampling standard error always; the MEASURED quantization uncertainty whenever the
+ * The sampling standard error always; the retained quantization uncertainty whenever the
  * stack attached one. Nothing here invents a term, and nothing here drops one.
+ *
+ * An IDENTITY gets neither. When the three variants are one string every difference is 0
+ * by construction, and `± 0.000 (sampling, 20 paired tokens)` dresses that identity as a
+ * measurement that came back zero — the same fabrication FR-720a forbids, with the number
+ * happening to be right. The token count is real and is kept; the ± is not, and goes.
  */
 export function errorBarTerms(d: ArchVacancyDifference): string[] {
+  if (d.identity) {
+    return [`an identity across ${d.nPairs.toLocaleString()} paired tokens — 0 by construction`];
+  }
   const terms = [`± ${num(d.se)} (sampling, ${d.nPairs.toLocaleString()} paired tokens)`];
   if (d.quantizationUncertaintyNats) {
-    terms.push(`± ${d.quantizationUncertaintyNats} (quantization, measured)`);
+    terms.push(`± ${d.quantizationUncertaintyNats} (${QUANTIZATION_TERM})`);
   }
   return terms;
 }
 
 /** The same, compact, for the secondary rows: `expr = value ± se · ± q`. */
 export function secondaryLine(d: ArchVacancyDifference): string {
+  if (d.identity) {
+    return `${d.expr} = ${nats(d.nats)} (an identity: the three variants are one string)`;
+  }
   const terms = [`± ${num(d.se)} (sampling)`];
   if (d.quantizationUncertaintyNats) {
-    terms.push(`± ${d.quantizationUncertaintyNats} (quantization, measured)`);
+    terms.push(`± ${d.quantizationUncertaintyNats} (${QUANTIZATION_TERM})`);
   }
   return `${d.expr} = ${nats(d.nats)} ${terms.join(" · ")}`;
 }

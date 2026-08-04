@@ -44,21 +44,30 @@ gpt2's and SmolLM2's do not — without that, a decomposed character silently sh
 span after it, and the check above would fire on a passage that is perfectly fine.
 
 WORD ALPHABET (§8.2). The transform's ``WORD_RE`` is ``[A-Za-z]+(?:['-][A-Za-z]+)*`` —
-ASCII letters only. A passage containing ``café`` or ``naïvely`` therefore does not
-contain those words as far as the transform is concerned: it contains ``caf`` and
-``na``/``vely``, and vacating those produces ``washé`` and ``kitsvely``. That is not a
-rendering wart, it is a *silently wrong measurement*, so :func:`check_word_alphabet`
-refuses such a passage up front with a typed 400 naming the offending word rather than
-letting it through to either the mangled score or the opaque "token spans both a
-preserved and a vacated word" 500 it sometimes produces instead. Widening the alphabet is
-a change to the shared transform (``lex/vacancy.py`` + ``lexEngine/vacancy.ts``) and its
-normative contract, not something this module may do on its own.
+ASCII letters, ASCII apostrophe, ASCII hyphen. A passage containing ``café`` or
+``naïvely`` therefore does not contain those words as far as the transform is concerned:
+it contains ``caf`` and ``na``/``vely``, and vacating those produces ``washé`` and
+``kitsvely``. That is not a rendering wart, it is a *silently wrong measurement*, so
+:func:`check_word_alphabet` refuses such a passage up front with a typed 400 naming the
+offending word rather than letting it through to either the mangled score or the opaque
+"token spans both a preserved and a vacated word" 500 it sometimes produces instead.
+Widening the alphabet is a change to the shared transform (``lex/vacancy.py`` +
+``lexEngine/vacancy.ts``) and its normative contract, not something this module may do on
+its own.
+
+The alphabet has TWO halves and the first fix only closed one. Letters were covered;
+JOINERS were not, and every joiner a reader's word can contain except ASCII ``'`` and
+``-`` splits that word into two runs ``WORD_RE`` then matches *entirely*, so nothing was
+flagged and the transform rewrote a fragment while the endpoint returned 200. ``don’t``
+with the curly apostrophe — what every browser, Word and phone keyboard produces — scored
+and swapped to ``big’t``; soft hyphen and ZWJ are invisible and did the same. See
+:func:`wordlike_runs`, which is the whole class rather than the character that was
+reported.
 """
 
 from __future__ import annotations
 
 import math
-import re
 import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
@@ -114,10 +123,99 @@ DEFAULT_PASSAGE_COUNT = 6
 #: reason, and a stack that scores at float32 has no quantization error to bound.
 MIN_PAIRED_PRESERVED = 2
 
-#: A run of characters a READER would call one word: Unicode letters, plus the internal
-#: apostrophes and hyphens ``WORD_RE`` already allows. Used only to detect runs that
-#: ``WORD_RE`` (ASCII-only) would split or truncate — see :func:`check_word_alphabet`.
-WORDLIKE_RE = re.compile(r"[^\W\d_]+(?:['\-][^\W\d_]+)*")
+#: Characters that BIND two letters into one written word without being letters.
+#:
+#: This set is the fix for a silent wrong answer, so it is a class and not a list of the
+#: characters someone happened to hit. ``WORD_RE`` accepts exactly two of them (ASCII
+#: ``'`` and ``-``); every other one used to end a "wordlike" run, which left two runs that
+#: ``WORD_RE`` matched in full — so :func:`fragmented_words` found nothing, the transform
+#: rewrote half a word, and the endpoint returned a score. Observed: ``don’t`` → ``big’t``
+#: (U+2019, the apostrophe every smart-quotes editor emits), ``co<SHY>operate`` →
+#: ``co<SHY>wood``, ``cat<ZWJ>sat`` → ``want<ZWJ>wish``.
+#:
+#: Membership is by Unicode property wherever one exists, so unlisted members of the same
+#: class are covered too:
+#:
+#:  - ``Pd`` — dash punctuation, i.e. hyphens of every width (U+002D, U+2010 hyphen,
+#:    U+2011 non-breaking hyphen, U+2012–U+2015, the fullwidth and small forms);
+#:  - ``Cf`` — invisible format characters: U+00AD soft hyphen, U+200B–U+200F (ZWSP,
+#:    ZWNJ, ZWJ and the bidi marks), U+2060 word joiner, U+FEFF;
+#:  - ``M*`` — combining marks, handled in :func:`wordlike_runs` itself: a mark belongs to
+#:    the letter it sits on. NFC composes most of them away, but only most — ``k`` +
+#:    U+0301 has no precomposed form, so ``wor``+U+0301+``d`` stayed two ``WORD_RE`` words;
+#:  - the apostrophes and word-internal points below, which carry no property that
+#:    separates them from ordinary quotation marks and so are named.
+#:
+#: Widening ``WORD_RE`` to accept these instead is a change to the shared transform and its
+#: contract (§8.2); refusing is what this module may do on its own.
+WORD_JOINER_CATEGORIES = ("Pd", "Cf")
+WORD_JOINER_CHARS = frozenset(
+    "'"  # U+0027 apostrophe — the one WORD_RE accepts, listed so the class is complete
+    "‘"  # left single quotation mark
+    "’"  # right single quotation mark — the default apostrophe of pasted text
+    "ʹ"  # modifier letter prime
+    "ʼ"  # modifier letter apostrophe (the Unicode-recommended word-internal one)
+    "՚"  # Armenian apostrophe
+    "′"  # prime
+    "＇"  # fullwidth apostrophe
+    "·"  # middle dot — Catalan l·l
+    "‧"  # hyphenation point
+    "−"  # minus sign, category Sm rather than Pd
+)
+
+
+def _is_letter(ch: str) -> bool:
+    return unicodedata.category(ch).startswith("L")
+
+
+def _is_mark(ch: str) -> bool:
+    return unicodedata.category(ch).startswith("M")
+
+
+def _is_joiner(ch: str) -> bool:
+    return ch in WORD_JOINER_CHARS or unicodedata.category(ch) in WORD_JOINER_CATEGORIES
+
+
+def wordlike_runs(text: str) -> list[str]:
+    """Runs of `text` a READER would call one word, in order of appearance.
+
+    Grammar, in one line: ``L M* ( J+ L M* )*`` — a letter, any combining marks that sit on
+    it, then any number of joiner-separated continuations. A trailing joiner is punctuation
+    and is not part of the run (``"the cat -"``); a trailing mark is part of the letter it
+    modifies.
+
+    MIRROR of `WORDLIKE_RE` in `staticClient/byteSpans.ts`, which is the same grammar
+    written as a regex — JavaScript has ``\\p{Pd}``/``\\p{Cf}``/``\\p{M}`` and Python's
+    :mod:`re` has none of the three, so this stack scans instead of matching. The two are
+    pinned to the same answers by a shared case table in both suites.
+    """
+    runs: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        if not _is_letter(text[i]):
+            i += 1
+            continue
+        start = end = i
+        while i < n:
+            ch = text[i]
+            if _is_letter(ch) or _is_mark(ch):
+                i += 1
+                end = i
+            elif _is_joiner(ch):
+                # A joiner only joins when a letter follows it; otherwise the run ended
+                # and this is punctuation.
+                j = i
+                while j < n and _is_joiner(text[j]):
+                    j += 1
+                if j < n and _is_letter(text[j]):
+                    i = j
+                else:
+                    break
+            else:
+                break
+        runs.append(text[start:end])
+    return runs
+
 
 #: Fraction of the shipped corpus's 250-word blocks that are front matter (title page +
 #: the alphabetical index of first lines). Measured: the index ends in block 11 of 63.
@@ -294,17 +392,17 @@ def preserved_token_indices(
 def fragmented_words(text: str) -> list[str]:
     """Words of `text` that ``WORD_RE`` splits or truncates, in order of appearance.
 
-    A "word" here is a run of Unicode letters (:data:`WORDLIKE_RE`). ``WORD_RE`` is ASCII
-    letters only, so it matches part of such a run — ``caf`` of ``café``, ``na`` and
-    ``vely`` of ``naïvely`` — and the transform then rewrites the part rather than the
-    word. Runs ``WORD_RE`` matches *entirely* (``don't``, ``good-bye``) are fine, and so
-    are runs it does not touch at all (CJK, emoji): those are never vacated, are
-    byte-identical in all three variants, and are attributed to no word — which is the
-    same treatment punctuation gets and is correct.
+    A "word" here is a run a reader would call one (:func:`wordlike_runs`). ``WORD_RE`` is
+    ASCII letters joined by ASCII ``'`` and ``-`` only, so it matches part of such a run —
+    ``caf`` of ``café``, ``na`` and ``vely`` of ``naïvely``, ``don`` and ``t`` of ``don’t``
+    — and the transform then rewrites the part rather than the word. Runs ``WORD_RE``
+    matches *entirely* (``don't``, ``good-bye``) are fine, and so are runs it does not
+    touch at all (CJK, emoji): those are never vacated, are byte-identical in all three
+    variants, and are attributed to no word — which is the same treatment punctuation gets
+    and is correct.
     """
     out: list[str] = []
-    for match in WORDLIKE_RE.finditer(text):
-        run = match.group(0)
+    for run in wordlike_runs(text):
         parts = WORD_RE.findall(run)
         if parts and (len(parts) > 1 or parts[0] != run):
             out.append(run)
@@ -320,6 +418,10 @@ def check_word_alphabet(text: str, index: int | None = None) -> None:
     :func:`preserved_token_indices`, because one BPE piece covered both halves. Same root
     cause, two symptoms, so one refusal covers both, naming the word rather than a token
     index, before any weights are touched.
+
+    The joiner half of the alphabet is the same defect and was live longer: ``don’t`` with
+    a curly apostrophe scored 200 and swapped to ``big’t``. It is covered here now because
+    :func:`wordlike_runs` treats the whole joiner class as word-internal.
     """
     bad = fragmented_words(text)
     if not bad:
@@ -327,14 +429,16 @@ def check_word_alphabet(text: str, index: int | None = None) -> None:
     where = "" if index is None else f"passage {index}: "
     shown = ", ".join(repr(w) for w in dict.fromkeys(bad))
     raise InvalidParamError(
-        f"{where}the vacancy transform's word alphabet is ASCII letters only "
-        r"(WORD_RE = [A-Za-z]+(?:['-][A-Za-z]+)*), so it does not see these words as "
-        f"words and would rewrite a fragment of each instead: {shown}. Refusing rather "
-        "than scoring text the transform mangles — 'a café' vacates to 'a washé', and a "
+        f"{where}the vacancy transform's word alphabet is ASCII letters joined by the "
+        r"ASCII apostrophe and hyphen only (WORD_RE = [A-Za-z]+(?:['-][A-Za-z]+)*), so it "
+        f"does not see these words as words and would rewrite a fragment of each instead: "
+        f"{shown}. Refusing rather than scoring text the transform mangles — 'a café' "
+        "vacates to 'a washé' and 'don’t' (curly apostrophe) to 'big’t', and a "
         "single BPE piece can then cover both a preserved and a vacated fragment. Use a "
-        "passage written in the ASCII alphabet (emoji and CJK are fine: they are never "
-        "vacated and are identical in all three variants). Widening the alphabet is a "
-        "change to the shared transform and its contract, not to this endpoint.",
+        "passage written in the ASCII alphabet, with straight apostrophes and hyphens "
+        "(emoji and CJK are fine: they are never vacated and are identical in all three "
+        "variants). Widening the alphabet is a change to the shared transform and its "
+        "contract, not to this endpoint.",
         {"words": list(dict.fromkeys(bad)), **({} if index is None else {"passage": index})},
     )
 
@@ -748,17 +852,32 @@ def vacancy_score(
             {"nPairs": n_pairs, "required": MIN_PAIRED_PRESERVED},
         )
 
-    # At p = 0 nothing is vacated, so all three variants are the SAME string and every
-    # difference is exactly 0 by construction. That is a genuine null control — the
-    # instrument reading zero when nothing changed — but it is an identity, not a
-    # measurement, and the panel must not print "0.000 ± 0.000 nats" as though a
-    # measurement had come back that way. The flag travels with the numbers so the
-    # renderer says which one it has.
-    identity = float(p) == 0.0
+    # An identity is "the three variants are the same string", and that is what gets
+    # tested — not ``p == 0``, which is only the commonest WAY to reach it. A passage whose
+    # every open-class word is closed-class scaffolding ("the of and a to in is it you
+    # that…") has nothing to vacate at any p, so english, swap and nonce come out
+    # character-identical and every difference is exactly 0 by construction. Tested on p it
+    # rendered "0.000 ± 0.000 (sampling, 20 paired tokens)", an "upper bound" caption and
+    # the advice to "score more text" — three false statements about a quantity that is not
+    # a measurement at all, and cannot be changed by more text. The flag travels with the
+    # numbers so the renderer says which one it has.
+    identity = all(
+        texts["english"] == texts["swap"] == texts["nonce"] for _, texts, _, _ in prepared
+    )
     identity_note = (
-        "At p = 0 no stem is vacated, so english, swap and nonce are the same string "
-        "character for character and every difference is exactly 0 by construction. This "
-        "is the instrument's null control, not a measurement of anything."
+        (
+            "At p = 0 no stem is vacated, so english, swap and nonce are the same string "
+            "character for character and every difference is exactly 0 by construction. "
+            "This is the instrument's null control, not a measurement of anything."
+        )
+        if float(p) == 0.0
+        else (
+            "This text has no word the transform vacates — every one of them is "
+            "closed-class scaffolding — so english, swap and nonce are the same string "
+            "character for character and every difference is exactly 0 by construction. "
+            "That is an identity, not a measurement: no amount of extra text of this kind "
+            "changes it. Score a passage with content words in it."
+        )
     )
 
     differences = [
