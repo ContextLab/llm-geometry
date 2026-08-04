@@ -28,9 +28,12 @@ import {
   buildVocabWords,
   corpusStats,
   runScratchTrain,
+  uniformBaselineLoss,
   SCRATCH_DEFAULT_EPOCHS,
+  SCRATCH_LEARNED_MARGIN,
   SCRATCH_MAX_EPOCHS,
 } from "../geoEngine/scratch";
+import { FINETUNE_MAX_UNK_RATE } from "../geoEngine/model";
 import type { ScratchWorkerRequest, ScratchWorkerResponse } from "../geoEngine/scratchWorker";
 import { GeoTokenizer } from "../geoEngine/tokenizer";
 import { fetchDatasetText } from "./hfDatasets";
@@ -51,7 +54,13 @@ import type { LocalJobRegistry, ProgressFn } from "./jobs";
 // model, and restoring them alone made `Save model` write a file pairing them with the
 // shipped word list under a matching `vocab_sha256` — an unrejectable wrong file. The
 // backend has always stored the two together (`save_weight_set(..., vocab_json=…)`).
-const MINTED_SETS_KEY = "llm-geometry:static-weight-sets";
+//
+// The key is VERSIONED. Payloads written before `ownsVocab` existed recorded vocabulary
+// ownership only through `setSource`, and a `finetuned`/`edited` payload derived from a
+// scratch model was written WITHOUT the word list it needs — restoring one would revive
+// exactly the corruption this fix removes, and nothing in the payload can distinguish it
+// from a legitimate fine-tune of the shipped model. Bumping the key drops them instead.
+const MINTED_SETS_KEY = "llm-geometry:static-weight-sets:v2";
 const MINTED_SETS_CAP = 8; // LRU; each entry is ~50 KB of JSON, ~60 KB with a vocabulary
 
 function loadPersistedSets(): Record<string, ExportedWeightSet> {
@@ -243,18 +252,39 @@ export class GeoSection {
     const cached = this.finetuneCache.get(cacheKey);
     if (cached) return { ...cached };
 
-    const tokenIds = engine.tokenizer.encodeStream(text);
+    // The ACTIVE model's own vocabulary, not the canonical one (issue #6): encoding a
+    // scratch model's fine-tuning corpus with the shipped Alice words turned the whole
+    // stream into <unk> while the UI still reported "loss 6.58 → 5.58 on your text".
+    const enc = engine.tokenizerFor(base).encode(text, { truncate: false });
+    const tokenIds = enc.ids;
+    if (tokenIds.length < 2) {
+      throw invalidParamError(
+        "fine-tuning text is too short after tokenization (need at least 2 tokens)",
+      );
+    }
+    const unkRate = enc.n_unk / tokenIds.length;
+    if (unkRate > FINETUNE_MAX_UNK_RATE) {
+      throw invalidParamError(
+        `${enc.n_unk} of ${tokenIds.length} tokens (${Math.round(unkRate * 100)}%) in this ` +
+          "text are outside the active model's vocabulary, so fine-tuning on it would mostly " +
+          "teach the model to emit <unk> and the loss would say nothing about your words. Use " +
+          "'Train a new model' to build a vocabulary from this text instead.",
+      );
+    }
     const jobId = this.jobs.create(cacheKey, async (report) => {
       const result = await this.runFinetuneAsync(
         { baseWeights, tokenIds, steps, lr, seed: 0 },
         report,
       );
-      const token = engine.registerFinetunedWeights(result.weights);
+      const token = engine.registerFinetunedWeights(result.weights, base);
       persistMintedSet(engine, token);
       const payload = {
         weights_token: token,
         loss_before: result.lossBefore,
         loss_after: result.lossAfter,
+        n_tokens: tokenIds.length,
+        n_unk: enc.n_unk,
+        unk_rate: unkRate,
       };
       this.finetuneCache.set(cacheKey, { ready: true, ...payload });
       return payload;
@@ -313,6 +343,10 @@ export class GeoSection {
         weights_token: token,
         vocab_size: new GeoTokenizer(result.vocabWords).idToText.size,
         final_loss: result.finalLoss,
+        // Whether the run actually left the uniform-distribution baseline. Without it
+        // a run that learned nothing reads exactly like one that learned something.
+        uniform_baseline: uniformBaselineLoss(),
+        learned: result.finalLoss < uniformBaselineLoss() - SCRATCH_LEARNED_MARGIN,
         n_tokens: result.nTokens,
         n_distinct: result.nDistinct,
         epochs: result.epochs,

@@ -136,6 +136,10 @@ export interface GeoTrainScratchResult {
   weights_token?: string;
   vocab_size?: number;
   final_loss?: number;
+  /** ln(vocab_size): the cross-entropy a model reaches by learning NOTHING. */
+  uniform_baseline?: number;
+  /** Whether `final_loss` actually cleared that baseline (see geo/scratch.py). */
+  learned?: boolean;
   n_tokens?: number;
   n_distinct?: number;
   epochs?: number;
@@ -247,6 +251,12 @@ export interface GeoFinetuneResult {
   weights_token?: string;
   loss_before?: number;
   loss_after?: number;
+  /** How much of the fine-tuning stream the ACTIVE model's vocabulary actually knew.
+   * A loss drop is only "on your text" to the extent your text was in the vocabulary,
+   * so a client that shows the loss must be able to show this beside it. */
+  n_tokens?: number;
+  n_unk?: number;
+  unk_rate?: number;
 }
 
 export type ArchNodeKind =

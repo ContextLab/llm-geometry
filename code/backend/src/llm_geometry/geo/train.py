@@ -116,12 +116,59 @@ def _ce_loss(model: GeoTransformer, batch: torch.Tensor) -> torch.Tensor:
     )
 
 
-def _uniformity_loss(model: GeoTransformer, gen: torch.Generator) -> torch.Tensor:
-    """Wang & Isola uniformity: log E[exp(−t‖eᵢ−eⱼ‖²)] over sampled embedding rows."""
-    idx = torch.randint(0, VOCAB_SIZE, (REPULSION_SAMPLE,), generator=gen)
-    e = model.embedding[idx]
+def uniformity_loss(embedding: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+    """Wang & Isola uniformity: log E[exp(−t‖eᵢ−eⱼ‖²)] over the GIVEN embedding rows.
+
+    The sample indices are a parameter rather than drawn here so one training step can
+    be reproduced exactly in another language: torch's RNG stream is not portable, but
+    a list of indices is. That is what makes the cross-language golden in
+    ``tests/fixtures/geo/scratch_step.json`` possible.
+    """
+    e = embedding[idx]
     sq_dists = torch.pdist(e).pow(2)
     return torch.log(torch.exp(-REPULSION_T * sq_dists).mean())
+
+
+def sample_uniformity_indices(gen: torch.Generator) -> torch.Tensor:
+    """The REPULSION_SAMPLE embedding rows one training step repels, drawn from ``gen``."""
+    return torch.randint(0, VOCAB_SIZE, (REPULSION_SAMPLE,), generator=gen)
+
+
+def train_batch_step(
+    model: GeoTransformer,
+    opt: torch.optim.Optimizer,
+    batch: torch.Tensor,
+    uniformity_idx: torch.Tensor,
+    repulsion_weight: float = REPULSION_WEIGHT,
+    capture_grads: bool = False,
+) -> tuple[float, float, dict[str, np.ndarray] | None]:
+    """ONE training step: forward, backward, clip, Adam, re-project onto S².
+
+    Factored out of ``train_geo_model`` (which calls it for every batch, so the two
+    cannot drift) precisely so the golden generator can run a single step from a fixed
+    weight set and fixed sample indices, and the TS port can be pinned against it.
+    Returns ``(cross-entropy, uniformity, gradients-before-clipping | None)``.
+    """
+    opt.zero_grad()
+    ce = _ce_loss(model, batch)
+    uni = uniformity_loss(model.embedding, uniformity_idx)
+    loss = ce + repulsion_weight * uni
+    loss.backward()
+    grads = None
+    if capture_grads:
+        grads = {
+            name: p.grad.detach().cpu().numpy().astype(np.float32).copy()
+            for name, p in model.named_parameters()
+            if p.grad is not None
+        }
+    # Safety net against platform-dependent gradient explosions (the same trajectory
+    # diverged on CI's Linux BLAS while stable on macOS).
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    opt.step()
+    with torch.no_grad():  # keep the embeddings on S² (FR-103)
+        norms = model.embedding.norm(dim=1, keepdim=True).clamp_min(1e-12)
+        model.embedding.div_(norms)
+    return float(ce.detach()), float(uni.detach()), grads
 
 
 @torch.no_grad()
@@ -168,18 +215,19 @@ def train_geo_model(
             epoch_loss, epoch_batches = 0.0, 0
             for start in range(0, n, batch_size):
                 batch = torch.from_numpy(windows[order[start : start + batch_size]])
-                opt.zero_grad()
-                ce = _ce_loss(model, batch)
-                loss = ce + repulsion_weight * _uniformity_loss(model, gen)
-                loss.backward()
-                # Safety net against platform-dependent gradient explosions (the same
-                # trajectory diverged on CI's Linux BLAS while stable on macOS).
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                opt.step()
-                with torch.no_grad():  # keep the embeddings on S² (FR-103)
-                    norms = model.embedding.norm(dim=1, keepdim=True).clamp_min(1e-12)
-                    model.embedding.div_(norms)
-                epoch_loss += float(ce.detach())
+                # Drawn here rather than inside the step so the step is reproducible
+                # from data alone. The RNG consumption order is unchanged (one randperm
+                # per epoch, one randint per batch), so this refactor left the canonical
+                # checkpoint bit-identical: re-training with force=True still produced
+                # be5359a1c66bda29c8c554269e589009 on the machine that wrote this.
+                # (That id is machine-specific — Linux and macOS BLAS legitimately
+                # diverge — so what the suite pins instead is the equivalence itself:
+                # `test_train_batch_step_reproduces_the_training_loop`.)
+                idx = sample_uniformity_indices(gen)
+                ce, _uni, _grads = train_batch_step(
+                    model, opt, batch, idx, repulsion_weight=repulsion_weight
+                )
+                epoch_loss += ce
                 epoch_batches += 1
             if not np.isfinite(epoch_loss):
                 raise ComputeError(f"Training diverged at epoch {epoch + 1} (non-finite loss)")

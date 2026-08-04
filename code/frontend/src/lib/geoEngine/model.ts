@@ -50,6 +50,14 @@ export const FINETUNE_MAX_STEPS = 500;
 export const FINETUNE_DEFAULT_STEPS = 100;
 export const FINETUNE_DEFAULT_LR = 1e-2;
 
+// A fine-tuning stream this far into <unk> is not "your text" in any meaningful sense:
+// the model is being taught to emit the unknown-word token, and the resulting loss drop
+// says nothing about the words you pasted. Refused rather than reported. Mirrors
+// geo/finetune.FINETUNE_MAX_UNK_RATE / FINETUNE_UNK_WARN_RATE.
+export const FINETUNE_MAX_UNK_RATE = 0.9;
+// Above this the UI is expected to say so on screen next to the loss.
+export const FINETUNE_UNK_WARN_RATE = 0.25;
+
 // The matrices addressable through the weights API (embedding ignores `layer`).
 export const EDITABLE_MATRICES = ["W_Q", "W_K", "W_V", "W_O", "embedding"] as const;
 export type EditableMatrix = (typeof EDITABLE_MATRICES)[number];

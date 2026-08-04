@@ -13,8 +13,15 @@
  *   * The random INITIALIZATION is not bit-identical. numpy/torch's Mersenne/Philox
  *     streams cannot be reproduced in JS, so a browser run and a Python run starting
  *     from "the same seed" are different draws. They are two independent training runs
- *     of the same recipe, not the same run — which is why the golden test pins one
- *     forward+backward step from a FIXED initialization rather than a whole run.
+ *     of the same recipe, not the same run.
+ *
+ * Because whole runs cannot be compared, the cross-language pin is one training STEP
+ * from a SUPPLIED initialization with SUPPLIED repulsion sample indices:
+ * `scratchTrainStep` below takes both, so `tests/unit/geoScratchGolden.test.ts` can
+ * check the Adam update and the Wang & Isola uniformity gradient against numbers the
+ * real Python backend produced (`tests/fixtures/geo/scratch_step.json`, written by
+ * `tests/fixtures/geo/generate.py`). Before that golden existed this comment claimed
+ * it did, and those two pieces of arithmetic had no cross-language coverage at all.
  */
 
 import { computeError, invalidParam } from "./errors";
@@ -44,6 +51,27 @@ export const REPULSION_SAMPLE = 256;
 export const REPULSION_T = 2.0;
 export const SCRATCH_DEFAULT_EPOCHS = 12;
 export const SCRATCH_MAX_EPOCHS = 60;
+
+/**
+ * How far below `ln(VOCAB_SIZE)` a run's final cross-entropy has to land before we are
+ * willing to call it "learned". A model that predicts the uniform distribution scores
+ * exactly `ln(VOCAB_SIZE)` nats, so half a nat below it means the next-token
+ * distribution is at least e^0.5 ≈ 1.65× more concentrated than uniform — a low bar on
+ * purpose, because this flag exists to catch runs that never left the baseline, not to
+ * grade good ones. Mirrors geo/scratch.SCRATCH_LEARNED_MARGIN.
+ *
+ * NOTE: the checkpoint's two "non-degeneracy" gates — coverage_uniformity and
+ * field_directional_entropy — CANNOT stand in for this. They guard against COLLAPSE,
+ * and a model that learned nothing scores BETTER on both than the real checkpoint,
+ * because near-random embeddings are maximally dispersed and maximally
+ * multi-directional (measured: entropy 3.28 vs 2.81, coverage 0.988 vs 0.900).
+ */
+export const SCRATCH_LEARNED_MARGIN = 0.5;
+
+/** Cross-entropy (nats) of the uniform next-token distribution: the learn-nothing floor. */
+export function uniformBaselineLoss(): number {
+  return Math.log(VOCAB_SIZE);
+}
 
 export interface CorpusStats {
   n_tokens: number;
@@ -132,19 +160,29 @@ export function initWeights(seed = 0): WeightSet {
   return ws;
 }
 
-/**
- * Wang & Isola uniformity over REPULSION_SAMPLE sampled embedding rows, and its
- * gradient w.r.t. those rows. L = log( mean_{i<j} exp(−t·‖eᵢ−eⱼ‖²) ).
- */
-function uniformityLossAndGrad(
-  embedding: Float32Array,
-  rand: () => number,
-  gradEmbedding: Float64Array,
-): number {
+/** The REPULSION_SAMPLE embedding rows one step repels (mirrors torch.randint). */
+export function sampleUniformityIndices(rand: () => number): Int32Array {
   const m = Math.min(REPULSION_SAMPLE, VOCAB_SIZE);
   const idx = new Int32Array(m);
   for (let i = 0; i < m; i++) idx[i] = Math.min(VOCAB_SIZE - 1, Math.floor(rand() * VOCAB_SIZE));
+  return idx;
+}
 
+/**
+ * Wang & Isola uniformity over the GIVEN embedding rows, and its gradient w.r.t. them.
+ * L = log( mean_{i<j} exp(−t·‖eᵢ−eⱼ‖²) ).
+ *
+ * The indices are a parameter, not drawn here, so one step is reproducible from data
+ * alone — torch's RNG stream is not portable but a list of indices is, which is what
+ * lets `tests/unit/geoScratchGolden.test.ts` pin this gradient against the real Python
+ * backend (`geo/train.uniformity_loss`).
+ */
+export function uniformityLossAndGrad(
+  embedding: Float32Array,
+  idx: Int32Array,
+  gradEmbedding: Float64Array,
+): number {
+  const m = idx.length;
   const pairs = (m * (m - 1)) / 2;
   if (pairs === 0) return 0;
   const w = new Float64Array(pairs);
@@ -199,10 +237,112 @@ export interface ScratchRunResult {
 }
 
 /** Adam moments, one pair of buffers per weight tensor. */
-interface AdamState {
+export interface AdamState {
   m: Record<string, Float64Array>;
   v: Record<string, Float64Array>;
   t: number;
+}
+
+const ADAM_B1 = 0.9;
+const ADAM_B2 = 0.999;
+const ADAM_EPS = 1e-8;
+
+/** Zeroed Adam moments + gradient buffers shaped for `ws`. */
+export function newAdamState(ws: WeightSet): { adam: AdamState; grads: Record<string, Float64Array> } {
+  const adam: AdamState = { m: {}, v: {}, t: 0 };
+  const grads: Record<string, Float64Array> = {};
+  for (const name of weightNames()) {
+    adam.m[name] = new Float64Array(ws[name].length);
+    adam.v[name] = new Float64Array(ws[name].length);
+    grads[name] = new Float64Array(ws[name].length);
+  }
+  return { adam, grads };
+}
+
+export interface ScratchStepResult {
+  /** Mean per-token cross-entropy over the batch. */
+  ce: number;
+  /** The Wang & Isola uniformity term (before its REPULSION_WEIGHT scaling). */
+  uniformity: number;
+  /** Global gradient norm before clipping. */
+  gradNorm: number;
+}
+
+/**
+ * ONE training step: forward+backward over `batch`, the uniformity term over
+ * `sampleIdx`, global-norm clipping, an Adam update, and re-projection onto S².
+ * Mutates `ws`, `adam` and `grads` in place.
+ *
+ * Factored out of `runScratchTrain` (which calls it for every batch, so the two cannot
+ * drift) precisely so a single step from a FIXED weight set and FIXED sample indices
+ * can be pinned against the Python backend's `geo/train.train_batch_step` — the pin
+ * `scratch.ts` used to claim existed and did not.
+ */
+export function scratchTrainStep(
+  model: GeoModel,
+  ws: WeightSet,
+  adam: AdamState,
+  grads: Record<string, Float64Array>,
+  batch: Int32Array[],
+  sampleIdx: Int32Array,
+  lr: number = TRAIN_LR,
+  repulsionWeight: number = REPULSION_WEIGHT,
+): ScratchStepResult {
+  const names = weightNames();
+  for (const name of names) grads[name].fill(0);
+  let nValid = 0;
+  for (const window of batch) {
+    for (let t = 1; t < window.length; t++) if (window[t] !== PAD_ID) nValid++;
+  }
+  if (nValid === 0) throw invalidParam("training batch has no non-padding target tokens");
+
+  let ceSum = 0;
+  for (const window of batch) ceSum += accumulate(model, window, nValid, grads);
+  const ce = ceSum / nValid;
+
+  // Repulsion term: gradient goes straight into the embedding gradient buffer.
+  const scaled = new Float64Array(ws.embedding.length);
+  const uniformity = uniformityLossAndGrad(ws.embedding, sampleIdx, scaled);
+  for (let i = 0; i < scaled.length; i++) grads.embedding[i] += repulsionWeight * scaled[i];
+
+  // Global-norm clip at 1.0 — the same guard the backend uses against the
+  // platform-dependent gradient blow-ups that once diverged only on Linux.
+  let sq = 0;
+  for (const name of names) {
+    const g = grads[name];
+    for (let i = 0; i < g.length; i++) sq += g[i] * g[i];
+  }
+  const gradNorm = Math.sqrt(sq);
+  const clip = gradNorm > 1 ? 1 / gradNorm : 1;
+
+  adam.t++;
+  const bc1 = 1 - Math.pow(ADAM_B1, adam.t);
+  const bc2 = 1 - Math.pow(ADAM_B2, adam.t);
+  for (const name of names) {
+    const g = grads[name];
+    const m = adam.m[name];
+    const v = adam.v[name];
+    const w = ws[name];
+    for (let i = 0; i < g.length; i++) {
+      const gi = g[i] * clip;
+      m[i] = ADAM_B1 * m[i] + (1 - ADAM_B1) * gi;
+      v[i] = ADAM_B2 * v[i] + (1 - ADAM_B2) * gi * gi;
+      w[i] -= (lr * (m[i] / bc1)) / (Math.sqrt(v[i] / bc2) + ADAM_EPS);
+    }
+  }
+
+  // Keep the embeddings on S² (FR-103) — the whole point of this model.
+  const emb = ws.embedding;
+  for (let v0 = 0; v0 < VOCAB_SIZE; v0++) {
+    const o = v0 * D_MODEL;
+    const en = Math.hypot(emb[o], emb[o + 1], emb[o + 2]);
+    if (en > 1e-12) {
+      emb[o] /= en;
+      emb[o + 1] /= en;
+      emb[o + 2] /= en;
+    }
+  }
+  return { ce, uniformity, gradNorm };
 }
 
 export function runScratchTrain(opts: ScratchRunOptions): ScratchRunResult {
@@ -222,21 +362,11 @@ export function runScratchTrain(opts: ScratchRunOptions): ScratchRunResult {
   const ws = cloneWeightSet(initWeights(seed));
   const model = new GeoModel(ws);
 
-  const names = weightNames();
   const rand = sfc32(seed + 1);
-  const adam: AdamState = { m: {}, v: {}, t: 0 };
-  for (const name of names) {
-    adam.m[name] = new Float64Array(ws[name].length);
-    adam.v[name] = new Float64Array(ws[name].length);
-  }
-  const grads: Record<string, Float64Array> = {};
-  for (const name of names) grads[name] = new Float64Array(ws[name].length);
+  const { adam, grads } = newAdamState(ws);
 
   const n = windows.length;
   const batchSize = Math.min(TRAIN_BATCH_SIZE, n);
-  const B1 = 0.9;
-  const B2 = 0.999;
-  const EPS = 1e-8;
 
   for (let epoch = 0; epoch < epochs; epoch++) {
     const order = shuffled(n, rand);
@@ -246,65 +376,16 @@ export function runScratchTrain(opts: ScratchRunOptions): ScratchRunResult {
       const batch: Int32Array[] = [];
       for (let i = start; i < Math.min(start + batchSize, n); i++) batch.push(windows[order[i]]);
       if (batch.length === 0) continue;
-
-      for (const name of names) grads[name].fill(0);
-      let nValid = 0;
-      for (const window of batch) {
-        for (let t = 1; t < window.length; t++) if (window[t] !== PAD_ID) nValid++;
-      }
-      if (nValid === 0) continue;
-
-      let ceSum = 0;
-      for (const window of batch) ceSum += accumulate(model, window, nValid, grads);
-      const ce = ceSum / nValid;
+      // Drawn here, not inside the step, so the step is reproducible from data alone
+      // (the cross-language golden supplies these indices explicitly). The PRNG
+      // consumption order is one shuffle per epoch then one sample per batch.
+      const sampleIdx = sampleUniformityIndices(rand);
+      const { ce } = scratchTrainStep(model, ws, adam, grads, batch, sampleIdx);
       if (!Number.isFinite(ce)) {
         throw computeError(`Training diverged at epoch ${epoch + 1} (non-finite loss)`);
       }
       epochCe += ce;
       batches++;
-
-      // Repulsion term: gradient goes straight into the embedding gradient buffer.
-      const scaled = new Float64Array(ws.embedding.length);
-      uniformityLossAndGrad(ws.embedding, rand, scaled);
-      for (let i = 0; i < scaled.length; i++) grads.embedding[i] += REPULSION_WEIGHT * scaled[i];
-
-      // Global-norm clip at 1.0 — the same guard the backend uses against the
-      // platform-dependent gradient blow-ups that once diverged only on Linux.
-      let sq = 0;
-      for (const name of names) {
-        const g = grads[name];
-        for (let i = 0; i < g.length; i++) sq += g[i] * g[i];
-      }
-      const norm = Math.sqrt(sq);
-      const clip = norm > 1 ? 1 / norm : 1;
-
-      adam.t++;
-      const bc1 = 1 - Math.pow(B1, adam.t);
-      const bc2 = 1 - Math.pow(B2, adam.t);
-      for (const name of names) {
-        const g = grads[name];
-        const m = adam.m[name];
-        const v = adam.v[name];
-        const w = ws[name];
-        for (let i = 0; i < g.length; i++) {
-          const gi = g[i] * clip;
-          m[i] = B1 * m[i] + (1 - B1) * gi;
-          v[i] = B2 * v[i] + (1 - B2) * gi * gi;
-          w[i] -= (TRAIN_LR * (m[i] / bc1)) / (Math.sqrt(v[i] / bc2) + EPS);
-        }
-      }
-
-      // Keep the embeddings on S² (FR-103) — the whole point of this model.
-      const emb = ws.embedding;
-      for (let v0 = 0; v0 < VOCAB_SIZE; v0++) {
-        const o = v0 * D_MODEL;
-        const en = Math.hypot(emb[o], emb[o + 1], emb[o + 2]);
-        if (en > 1e-12) {
-          emb[o] /= en;
-          emb[o + 1] /= en;
-          emb[o + 2] /= en;
-        }
-      }
     }
     opts.onProgress?.(
       (epoch + 1) / epochs,

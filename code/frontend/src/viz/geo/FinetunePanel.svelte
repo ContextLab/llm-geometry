@@ -22,6 +22,10 @@
   let progressMsg = $state("");
   let error = $state("");
   let result = $state<{ before: number; after: number } | null>(null);
+  /** How much of the fine-tuning stream the ACTIVE model's vocabulary knew. A loss drop
+   * is only "on your text" to the extent your text was in the vocabulary, so this is
+   * shown beside the loss rather than left for the user to assume. */
+  let unk = $state<{ nTokens: number; nUnk: number; rate: number } | null>(null);
   /** What the finished run was actually trained on — "your text" was printed even for
    * a Hugging Face dataset, which is not the user's text at all. */
   let sourceLabel = $state("your text");
@@ -54,6 +58,7 @@
     busy = true;
     error = "";
     result = null;
+    unk = null;
     progress = 0;
     progressMsg = "submitting…";
     try {
@@ -101,6 +106,10 @@
     if (r.loss_before != null && r.loss_after != null) {
       result = { before: r.loss_before, after: r.loss_after };
     }
+    unk =
+      r.n_tokens != null && r.n_unk != null && r.unk_rate != null
+        ? { nTokens: r.n_tokens, nUnk: r.n_unk, rate: r.unk_rate }
+        : null;
   }
 
   function fail(e: unknown) {
@@ -123,10 +132,12 @@
   <p class="panel-note">
     Real gradient steps (SGD, lr 1e-2) on the <b>currently active</b> weights — so this adapts the
     model you are looking at rather than starting one. Watch the embedding drift on the sphere as
-    the loss falls. Note that your text is tokenized with the <b>shipped</b> vocabulary, so
-    fine-tuning a model you trained from scratch does not use that model's own words
-    (<a href="https://github.com/ContextLab/llm-geometry/issues/6" target="_blank" rel="noopener">issue #6</a>).
-    To build a vocabulary from your own text, use <b>Train a new model</b>.
+    the loss falls. Your text is tokenized with the <b>active model's own</b> vocabulary, and the
+    new checkpoint keeps that vocabulary, so fine-tuning a model you trained from scratch really
+    does use its words. Words the model has never seen become <code>&lt;unk&gt;</code>; the share
+    of them is reported with the loss, and text that is almost entirely unknown is refused rather
+    than turned into a loss drop that says nothing about it. To build a vocabulary from your own
+    text, use <b>Train a new model</b>.
   </p>
 
   <div class="tabs" role="tablist">
@@ -167,6 +178,24 @@
       </span>
     {/if}
   </div>
+
+  {#if unk}
+    <!-- The loss above is only "on your text" to the extent your text was in the
+         model's vocabulary. Stated always, and flagged once it is large enough to
+         change how the number should be read. -->
+    <div class="unk" class:high={unk.rate > 0.25} data-testid="geo-finetune-unk">
+      {#if unk.rate > 0.25}
+        <b>{unk.nUnk.toLocaleString()} of {unk.nTokens.toLocaleString()} tokens
+          ({Math.round(unk.rate * 100)}%)</b>
+        were outside this model's vocabulary and trained as <code>&lt;unk&gt;</code> — the loss is
+        partly about the unknown-word token, not only your words.
+      {:else}
+        {unk.nUnk.toLocaleString()} of {unk.nTokens.toLocaleString()} tokens
+        ({Math.round(unk.rate * 100)}%) were outside this model's vocabulary
+        (<code>&lt;unk&gt;</code>).
+      {/if}
+    </div>
+  {/if}
 
   {#if busy && progressMsg}
     <Progress {progress} message={progressMsg} />
@@ -273,6 +302,21 @@
   }
   .loss .arrow {
     color: var(--accent);
+  }
+  .unk {
+    font-size: 0.72rem;
+    line-height: 1.5;
+    color: var(--text-dim);
+  }
+  .unk.high {
+    color: var(--warn, var(--bad));
+    background: rgba(255, 190, 92, 0.1);
+    border: 1px solid rgba(255, 190, 92, 0.3);
+    border-radius: 10px;
+    padding: 0.4rem 0.55rem;
+  }
+  .unk code {
+    font-family: var(--mono);
   }
   .error {
     background: rgba(255, 122, 144, 0.12);

@@ -11,16 +11,18 @@ import numpy as np
 import pytest
 
 from llm_geometry.cache.store import CacheStore
-from llm_geometry.errors import InvalidWeightEditError, NotFoundError
+from llm_geometry.errors import InvalidParamError, InvalidWeightEditError, NotFoundError
 from llm_geometry.geo.config import D_MODEL, N_LAYERS, VOCAB_SIZE
 from llm_geometry.geo.model import GeoTransformer
 from llm_geometry.geo.weights import (
     EDITABLE_MATRICES,
     PRESETS,
+    WEIGHT_SHAPES,
     build_weight_set,
     load_weight_set,
     preset_matrix,
     save_weight_set,
+    validate_weight_set,
     weights_token,
 )
 
@@ -141,6 +143,33 @@ def test_explicit_values_and_embedding_normalization(base_ws):
 def test_invalid_edits_raise(base_ws, edit):
     with pytest.raises(InvalidWeightEditError):
         build_weight_set(base_ws, [edit])
+
+
+def test_weight_shapes_match_the_model(base_ws):
+    """`WEIGHT_SHAPES` is plain data so file validation costs no torch construction —
+    which only works if it agrees with the real module, exactly."""
+    assert set(WEIGHT_SHAPES) == set(base_ws)
+    for name, shape in WEIGHT_SHAPES.items():
+        assert np.asarray(base_ws[name]).shape == shape, name
+
+
+def test_validate_weight_set_rejects_incomplete_and_misshapen(base_ws):
+    """Red-team F4: a set missing tensors used to be accepted and then surface as a
+    500 whose whole message was the bare string `'layers.0.W_V'`."""
+    validate_weight_set(base_ws)  # the real thing passes
+
+    with pytest.raises(InvalidParamError) as exc:
+        validate_weight_set({"embedding": base_ws["embedding"]})
+    assert "layers.0.W_Q" in exc.value.message
+    assert "incomplete" in exc.value.message
+
+    with pytest.raises(InvalidParamError) as exc:
+        validate_weight_set({**base_ws, "extra": np.zeros((2, 2), np.float32)})
+    assert "extra" in exc.value.message
+
+    with pytest.raises(InvalidParamError) as exc:
+        validate_weight_set({**base_ws, "layers.0.W_Q": np.zeros((4, 4), np.float32)})
+    assert "shape" in exc.value.message
 
 
 def test_editable_matrix_list_matches_contract():

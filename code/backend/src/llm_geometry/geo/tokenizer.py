@@ -158,6 +158,16 @@ class GeoTokenizer:
     # -- serialization ---------------------------------------------------------------
 
     def to_json(self) -> str:
+        """The CANONICAL vocabulary serialization — byte-identical in both builds.
+
+        `vocab_sha256` is a digest of these exact bytes, so the spelling is part of the
+        format, not a formatting preference. Python used ``", "``/``": "`` separators
+        while the browser used ``JSON.stringify``'s compact ones with its own key
+        order, and the same model therefore had two different digests depending on
+        which build saved it. Pinned here (and in
+        ``lib/geoEngine/tokenizer.canonicalVocabJson``) as: keys sorted, compact
+        separators, ``ensure_ascii`` so the bytes do not depend on the encoding.
+        """
         return json.dumps(
             {
                 "format": "geo-tokenizer-v1",
@@ -166,6 +176,7 @@ class GeoTokenizer:
             },
             ensure_ascii=True,
             sort_keys=True,
+            separators=(",", ":"),
         )
 
     @classmethod
@@ -186,9 +197,11 @@ def tokenizer_for(weights_token: str | None, store: Any = None) -> GeoTokenizer:
     """The tokenizer whose words give THIS model's token ids their meaning.
 
     Models trained from scratch on a user's own text carry their own vocabulary, so
-    reading their ids with the canonical one would label every token wrongly. Anything
-    without a stored vocabulary (the canonical checkpoint, fine-tunes and weight edits
-    derived from it) uses the canonical tokenizer.
+    reading their ids with the canonical one would label every token wrongly — and so
+    does anything DERIVED from such a model, because a fine-tune or a weight edit
+    changes the numbers, not what the ids mean (`weights.inherited_vocab`). Only sets
+    descended from the canonical checkpoint have no stored vocabulary, and those are
+    the ones the canonical tokenizer is right for.
     """
     if not weights_token or weights_token == "learned":
         return get_tokenizer()

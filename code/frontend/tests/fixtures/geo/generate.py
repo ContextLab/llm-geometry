@@ -11,6 +11,11 @@ Outputs (all git-committed test fixtures):
   tests/fixtures/geo/checkpoint.json   full-precision canonical state_dict + meta
   tests/fixtures/geo/vocab.json        the canonical tokenizer vocabulary (to_json())
   tests/fixtures/geo/golden.json       route request/response pairs for golden tests
+  tests/fixtures/geo/scratch_step.json
+      ONE from-scratch training step (losses, gradients, post-step weights) run from
+      the canonical weight set with FIXED repulsion sample indices — the cross-language
+      pin for the Adam update and the Wang & Isola uniformity gradient. Whole-run
+      comparisons cannot provide one: torch's RNG stream is not reproducible in JS.
   src/lib/geoEngine/presetFixtures.json
       base64(float32-LE) matrices for the seeded numpy presets random /
       random_autocorr (seeds 0..2) — numpy's PCG64+ziggurat stream is not portable
@@ -163,6 +168,95 @@ def main() -> None:
         "result": {k: ft[k] for k in ("weights_token", "loss_before", "loss_after", "base_token")},
     }]
     print("finetune golden:", finetune_golden[0]["result"])
+
+    # 5b. ONE from-scratch TRAINING STEP, from a fixed weight set with fixed repulsion
+    #     sample indices — the cross-language pin `scratch.ts` used to claim existed.
+    #
+    #     Whole from-scratch runs cannot be compared across languages (torch's RNG
+    #     stream is not reproducible in JS), which is exactly why the Adam update and
+    #     the Wang & Isola uniformity gradient had NO cross-language coverage at all.
+    #     Making the initialization and the sample indices data rather than RNG output
+    #     removes the obstacle: both stacks can run the identical step.
+    import torch  # noqa: E402
+    from llm_geometry.geo.config import (  # noqa: E402
+        EOS_ID,
+        REPULSION_SAMPLE,
+        REPULSION_WEIGHT,
+        TRAIN_BATCH_SIZE,
+        TRAIN_LR,
+        TRAIN_WINDOW_STRIDE,
+    )
+    from llm_geometry.geo.model import model_from_weight_set  # noqa: E402
+    from llm_geometry.geo.train import (  # noqa: E402
+        deterministic_torch,
+        make_windows,
+        train_batch_step,
+    )
+
+    # A real slice of the real corpus, long enough to fill a full TRAIN_BATCH_SIZE
+    # batch of windows (64 × stride 10 + 51 ≈ 700 tokens), so the step exercises the
+    # same batch shape a genuine run does.
+    from llm_geometry.geo.corpus import load_corpus_text  # noqa: E402
+
+    step_text = load_corpus_text()[:8000]
+    step_ids = get_tokenizer().encode_stream(step_text)
+    # Deterministic, portable, and spread over the whole vocabulary. A stride coprime
+    # with VOCAB_SIZE visits distinct rows, so the pairwise repulsion term is not
+    # degenerate (identical rows contribute zero distance and would hide sign errors).
+    step_sample_idx = [(i * 7919) % VOCAB_SIZE for i in range(REPULSION_SAMPLE)]
+    step_windows = make_windows(
+        np.asarray(step_ids + [EOS_ID], dtype=np.int64), stride=TRAIN_WINDOW_STRIDE
+    )[:TRAIN_BATCH_SIZE]
+    with deterministic_torch(0):
+        step_model = model_from_weight_set(ws)
+        step_opt = torch.optim.Adam(step_model.parameters(), lr=TRAIN_LR)
+        step_ce, step_uni, step_grads = train_batch_step(
+            step_model,
+            step_opt,
+            torch.from_numpy(step_windows),
+            torch.as_tensor(step_sample_idx, dtype=torch.long),
+            repulsion_weight=REPULSION_WEIGHT,
+            capture_grads=True,
+        )
+        step_after = step_model.get_weight_set()
+    assert step_grads is not None
+    step_grad_norm = float(
+        np.sqrt(sum(float((np.asarray(g, np.float64) ** 2).sum()) for g in step_grads.values()))
+    )
+    (HERE / "scratch_step.json").write_text(
+        json.dumps(
+            {
+                "format": "geo-scratch-step-v1",
+                "generated": date.today().isoformat(),
+                "source": "llm_geometry.geo.train.train_batch_step on the canonical "
+                          "checkpoint (see checkpoint.json — same weights, same run)",
+                "note": (
+                    "One optimizer step from the canonical weight set. `token_ids` are "
+                    "the corpus slice, windowed with stride TRAIN_WINDOW_STRIDE and "
+                    "truncated to the first TRAIN_BATCH_SIZE windows; `sample_idx` are "
+                    "the embedding rows the uniformity term repels. Both stacks can "
+                    "reproduce this step exactly from these inputs."
+                ),
+                "params": {
+                    "lr": TRAIN_LR,
+                    "repulsion_weight": REPULSION_WEIGHT,
+                    "batch_size": TRAIN_BATCH_SIZE,
+                    "stride": TRAIN_WINDOW_STRIDE,
+                },
+                "token_ids": [int(i) for i in step_ids],
+                "sample_idx": step_sample_idx,
+                "ce": step_ce,
+                "uniformity": step_uni,
+                "grad_norm": step_grad_norm,
+                "grads": {name: b64(g) for name, g in sorted(step_grads.items())},
+                "weights_after": {name: b64(a) for name, a in sorted(step_after.items())},
+            }
+        )
+    )
+    print(
+        "scratch_step.json written: ce=%.8f uniformity=%.8f grad_norm=%.8f"
+        % (step_ce, step_uni, step_grad_norm)
+    )
 
     # 6. Route goldens over real HTTP.
     proc = subprocess.Popen(
