@@ -15,6 +15,28 @@ SSE progress events MAY now carry an optional `"phase"` field
 Array encoding: all tensors are nested JSON lists of finite floats, row-major,
 rounded to 6 significant digits. Shapes documented as `(rows, cols)`.
 
+## Additive namespaces (this file's endpoints are unchanged)
+
+Later features add whole namespaces beside `/api/geo/*` and `/api/arch/*`. Nothing
+below is altered by them — no path, parameter, field, status code, or error type in
+this document changes meaning — and each addition is recorded here so that "frozen"
+means *frozen*, not *undocumented*:
+
+| Added by | Namespace | Contract |
+|-|-|-|
+| 006 | `/api/lex/*` (Lexicon Lab) | `specs/006-lexicon-lab-tiny/contracts/api-lex.md` |
+| 007 | `POST /api/lex/vacancy`, `vacancy` on `POST /api/lex/train` | same file, "Feature 007" section |
+
+**Why 007 needed an addition rather than a parameter on something existing.** The
+vacancy transform rewrites a *corpus*, and every existing endpoint here takes a model
+or a prompt. Folding it into `/api/lex/coverage` would have made that endpoint's
+response mean two different things depending on a flag — the exact failure this file
+is frozen to prevent. The one existing endpoint that did change, `/api/lex/train`,
+gained an **optional** object whose absence is byte-for-byte the previous behaviour,
+because a vacated corpus has to be tokenized under the vocabulary the transform
+assigns it and shipping the ~86 kB rewritten text back and forth to achieve that
+would have been a worse contract than a parameter.
+
 ---
 
 ## Geometry Lab — `/api/geo/*`
