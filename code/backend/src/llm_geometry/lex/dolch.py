@@ -1,12 +1,14 @@
 """The Dolch sight-word lists (Dolch, 1936) — the *prescribed* vocabulary budget.
 
-Edward William Dolch published these lists in 1936; they are a factual word list of
-long-standing pedagogical use and are not an expressive work.
+Edward William Dolch published the 220 service words and the 95 nouns in 1936; see the
+note on the graded split below. They are a factual word list of long-standing pedagogical
+use and are not an expressive work.
 
 This is a CORRECTED transcription of the lists in the `tiny-models` source project. Two
 changes, both verified rather than assumed (`notes/agent-reports/006-source-vocabulary.md`):
 
-1. First grade had ``giving``. The published list has ``going`` — it already contains
+1. First grade had ``giving``. The published graded list — the conventional grading, see
+   the provenance note below — has ``going``; it already contains
    ``give`` separately, so ``giving`` was a transcription slip, not a variant. Checked
    against the published list; ``test_dolch.py`` pins both the presence of ``going`` and
    the absence of ``giving`` so the slip cannot come back.
@@ -21,7 +23,12 @@ words in English", but it is verbatim the vocabulary of a well-known 1960 pictur
 (it contains `eggs`, `ham`, `Sam`, `goat`, `fox`, `box`, `mouse`, `train`, `anywhere` —
 not common English words). Shipping it under that description would be repeating a false
 claim, and shipping it accurately would raise a provenance question we have no reason to
-take on. The graded Dolch lists below carry the same idea with clean 1936 provenance.
+take on. The Dolch lists below carry the same idea with a citable source: the 220 service
+words and the 95 nouns are the two lists printed in Dolch's 1936 article (ESJ 36(6):456-460,
+pp. 458-459 and p. 460). The grade-level split of those 220 into pre-primer / primer /
+first grade is NOT in that article — it prints them grouped by part of speech — it is the
+conventional grading that has travelled with the list since, and we have not established
+where it first appeared.
 
 Counts here are MEASURED by `test_dolch.py`, never hard-coded prose: published sources
 disagree about the noun list's length (one widely-cited table gives 95, another 97, and

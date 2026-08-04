@@ -16,6 +16,13 @@
  * NOT ported, exactly as in Python: the source's `MASK_50`. See the Python module's
  * docstring for why (it is not "the commonest words in English").
  *
+ * PROVENANCE, precisely. Dolch's 1936 article (ESJ 36(6):456-460) prints the 220 service
+ * words (pp. 458-459, grouped by PART OF SPEECH) and the 95 nouns (p. 460). It does NOT
+ * contain the pre-primer / primer / first-grade split the three blocks below encode; that
+ * is the conventional grading which has travelled with the list since, and where it first
+ * appeared has not been established here. "The published list has `going`" above refers to
+ * that conventional graded list, not to the 1936 article.
+ *
  * Sizes are MEASURED by `dolchSizes()`, never quoted as literals in code or prose.
  */
 

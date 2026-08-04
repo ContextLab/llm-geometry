@@ -53,7 +53,11 @@ separate instrument; none is needed for T4.
   across document order, and across corpora.
 - **FR-705** The map is injective, verified per build with re-minting on collision, and
   `bijective` is reported in the statistics.
-- **FR-706** A nonce never collides with a real type of the corpus (`avoid`, contract §5.2).
+- **FR-706** A nonce never collides with a real type of the domain (contract §5.2). The
+  domain is avoided *implicitly*, as a property of how the map is built — there is
+  deliberately **no** caller-supplied `avoid` parameter, so the map stays a pure function of
+  `(domain, seed, match_prosody)` rather than of what a caller remembered to pass. The
+  source project's `avoid` parameter is named in the Info tab as a defect, not a model.
 - **FR-707** Inflectional suffixes and closed-class words are preserved; the eligibility rules
   of contract §2.2 are implemented identically in both stacks.
 - **FR-708** The three control conditions are supported: `consistent = false` (inconsistent

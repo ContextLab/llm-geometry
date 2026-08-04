@@ -5,7 +5,7 @@
 // swarm / RBF width / response animation). The explorer tabs own their controls
 // outright — see lib/explorerStores.ts — so the only shell state left is which
 // tab is showing.
-import { writable } from "svelte/store";
+import { get, writable, type Readable } from "svelte/store";
 
 /** Which view is active in the main panel. */
 export type View = "architecture" | "geometry" | "lexicon" | "info";
@@ -40,7 +40,92 @@ function initialView(): View {
   return parseHash(window.location.hash) ?? LANDING;
 }
 
-export const view = writable<View>(initialView());
+/**
+ * Work that a tab switch would destroy, registered by whoever owns it.
+ *
+ * `App.svelte` renders exactly one tab (`{#if $view === …}`), so switching tabs unmounts
+ * the other three. That is the right structure — the Geometry Lab holds a WebGL context
+ * and the Architecture Explorer holds a model — but it means a component's `onDestroy` is
+ * also the app's "discard everything you were doing" path. The Lexicon Lab's training
+ * worker is terminated there, so a run at step 114 of 400 vanished on a tab click: the
+ * button returned to idle, nothing was shown, and roughly forty seconds of real training
+ * was gone. Every `Explain` deep-dive ends with a button that navigates to the Info tab,
+ * and the landing tab offers "New here? Start with Info →", so the app actively invited
+ * the click that destroyed the work (red-team D, F2).
+ *
+ * The registry is a plain list rather than a boolean because the message has to NAME what
+ * would be lost. A component registers when its work starts and releases it in every
+ * terminal branch AND in `onDestroy` — releasing on destroy is what makes a confirmed
+ * navigation leave the registry empty rather than latched.
+ */
+export interface PendingWork {
+  /** Unique per registrant; re-registering the same id replaces the label. */
+  id: string;
+  /** What the reader loses, in their words: "a training run in the Lexicon Lab". */
+  label: string;
+}
+
+const pending = writable<readonly PendingWork[]>([]);
+
+/** Read-only view of the registry, for anything that wants to warn about it. */
+export const pendingWork: Readable<readonly PendingWork[]> = { subscribe: pending.subscribe };
+
+export function registerWork(id: string, label: string): void {
+  pending.update((list) => [...list.filter((w) => w.id !== id), { id, label }]);
+}
+
+export function releaseWork(id: string): void {
+  pending.update((list) => list.filter((w) => w.id !== id));
+}
+
+/**
+ * A navigation held back because it would destroy registered work, or `null`.
+ *
+ * The prompt is in-app rather than `window.confirm`: a native dialog is not stylable, is
+ * suppressed in some embedding contexts, and — the deciding reason — cannot say which run
+ * is at stake without the caller building the sentence anyway.
+ */
+const navHold = writable<{ target: View; work: readonly PendingWork[] } | null>(null);
+export const pendingNavigation: Readable<{ target: View; work: readonly PendingWork[] } | null> = {
+  subscribe: navHold.subscribe,
+};
+
+/** Go through with the held navigation. The work's owner unmounts and releases itself. */
+export function confirmNavigation(): void {
+  const held = get(navHold);
+  if (held === null) return;
+  navHold.set(null);
+  current.set(held.target);
+}
+
+/** Abandon the held navigation and stay where the work is. */
+export function cancelNavigation(): void {
+  navHold.set(null);
+}
+
+const current = writable<View>(initialView());
+
+/**
+ * The active tab.
+ *
+ * `set` is guarded rather than plain, so there is exactly ONE way to change the view and
+ * it cannot silently discard work. With the guard in the eleven call sites instead, the
+ * twelfth would have been the one that lost a training run. When nothing is registered —
+ * which is almost always — this is an ordinary `writable`.
+ */
+export const view = {
+  subscribe: current.subscribe,
+  set(next: View): void {
+    if (next === get(current) || get(pending).length === 0) {
+      current.set(next);
+      return;
+    }
+    navHold.set({ target: next, work: get(pending) });
+  },
+  update(fn: (v: View) => View): void {
+    view.set(fn(get(current)));
+  },
+};
 
 if (typeof window !== "undefined") {
   // A fragment we did not honour is corrected ONCE, at load, so the address bar never
@@ -69,7 +154,7 @@ if (typeof window !== "undefined") {
   // The first emission is skipped so simply loading the page does not rewrite a clean
   // URL into `#architecture`; the hash appears once the reader actually navigates.
   let first = true;
-  view.subscribe((v) => {
+  current.subscribe((v) => {
     if (first) {
       first = false;
       return;
@@ -91,9 +176,18 @@ if (typeof window !== "undefined") {
     // back to the landing tab (and rewrites the URL to say so).
     if (raw !== "" && parseHash(raw) === null) return;
     const next = parseHash(raw) ?? LANDING;
+    // Back is a tab switch too, and it destroys work exactly as a click does. The
+    // traversal has already happened by the time we hear about it, so the address bar is
+    // put back on the tab still showing and the same prompt is raised. That costs the
+    // Forward stack, which is the cheaper of the two things on offer here.
+    if (next !== get(current) && get(pending).length > 0) {
+      window.history.pushState(null, "", `#${get(current)}`);
+      navHold.set({ target: next, work: get(pending) });
+      return;
+    }
     applyingFromUrl = true;
     try {
-      view.set(next);
+      current.set(next);
     } finally {
       applyingFromUrl = false;
     }

@@ -148,32 +148,57 @@ const VACANCY_FRONT_MATTER_FRACTION = 0.2;
 
 /**
  * Dtypes whose error against float32 has actually been MEASURED on this contrast
- * (§8.3a). q8 is bounded at ≤ 0.054 nats on the pooled difference; q4f16 is not on this
- * list because it does not compute — it returns input-independent logits — and no other
- * dtype has been measured. Anything absent is refused, never extrapolated onto.
+ * (§8.3a). q8 is bounded at ≤ 0.054 nats on the pooled difference — measured on the
+ * PROTOTYPE swap, see `VACANCY_Q8_UNCERTAINTY_NATS` below for what that does and does not
+ * still support. q4f16 is not on this list because it does not compute — it returns
+ * input-independent logits — and no other dtype has been measured. Anything absent is
+ * refused, never extrapolated onto.
  */
 const VACANCY_MEASURED_DTYPES: readonly string[] = ["q8"];
 
 /**
  * The uncertainty stated beside a pooled difference in static mode.
  *
- * DERIVED FROM TWO MEASUREMENTS, not chosen:
+ * **READ THIS BEFORE QUOTING THE NUMBER (2026-08-04).** The swap transform was rewritten
+ * on that date — it is now a type→type derangement inside one suffix class, and the
+ * closed-class test moved to the whole word — so the three variant TEXTS changed. Every
+ * comparison this constant was derived from was measured on the old texts, and only the
+ * fp32 half of it can be re-measured outside a browser. What is and is not known now:
  *
  *  1. The independent six-passage study of §8.3a (2 models × 2 seeds, its own passage
  *     cut and its own swap implementation) bounded the pooled q8-vs-fp32 discrepancy at
- *     **≤ 0.054 nats** on every contrast, and recommended stating ~2× that.
- *  2. This build's own configuration, measured across the two stacks on the SHIPPED
- *     default passage set with gpt2 — identical tokenization (2754/2858/3810 tokens,
- *     847 preserved) in both, so the only difference is the dtype:
+ *     **≤ 0.054 nats** on every contrast, and recommended stating ~2× that. That study
+ *     used a swap this build no longer has, and `architecture.md` §8.3a says so.
+ *  2. This build's own two-stack comparison on the SHIPPED default passage set with gpt2
+ *     read, before the rewrite — identical tokenization (2754/2858/3810 tokens, 847
+ *     preserved) in both stacks, so the only difference was the dtype:
  *
  *         swap  − english :  fp32 0.7166   q8 0.6440   |Δ| = 0.073
  *         nonce − english :  fp32 0.9892   q8 0.8790   |Δ| = 0.110
  *
- * The second exceeds 0.1, so a stated ±0.1 would have been a bound its own first
- * comparison broke. 0.2 is ~2× the largest discrepancy actually observed here, in the
- * configuration that actually ships. Never quoted to more than one decimal place: that
- * is all either measurement supports. If this constant changes, re-run BOTH stacks on
- * the default set before changing it — the number is a measurement, not a margin.
+ *     **The fp32 arm has since moved and the q8 arm has not been re-run.** Re-measured
+ *     on the shipped transform (gpt2, float32, the six default passages, `p = 1,
+ *     seed = 0`; 2754/2766/3792 tokens, 856 preserved in every variant):
+ *
+ *         swap  − english :  fp32 0.6904 ± 0.0539 (sampling)
+ *         nonce − english :  fp32 0.9776 ± 0.0590 (sampling)
+ *
+ *     — pinned against a real run by `test_the_fp32_arm_quoted_in_the_static_client`
+ *     (`tests/integration/test_arch_vacancy_score.py`), so this comment cannot rot again
+ *     without a test failing. The q8 figures above belong to texts that no longer exist,
+ *     so **no |Δ| can be computed for the configuration that ships**: subtracting the old
+ *     q8 number from the new fp32 one would compare two different passages and produce
+ *     exactly the fabricated bound FR-720a forbids.
+ *
+ * So: **0.2 is currently NOT a like-for-like measurement of the shipped configuration.**
+ * It is retained rather than changed because it is strictly larger than every q8-vs-fp32
+ * discrepancy ever observed on this contrast (0.054 in the prototype study; 0.073 and
+ * 0.110 here before the rewrite), and lowering a bound without a measurement is the worse
+ * error. It cannot be justified more tightly than that today. Restoring the derivation
+ * needs one thing and only one thing: **a real browser q8 run of this file's scorer on the
+ * six default passages, against the fp32 numbers above.** That run cannot be made from a
+ * Node test — see `VACANCY_MEASURED_DTYPES` — so it is a browser task, not a code task.
+ * Until it happens, do not quote this constant as "measured on the shipped swap".
  */
 const VACANCY_Q8_UNCERTAINTY_NATS = 0.2;
 

@@ -9,8 +9,10 @@ to what happened around them.
 Three variants of one passage are scored (§8.3):
 
 * ``english`` — the passage as written;
-* ``swap``    — every vacated stem replaced by a REAL, frequency-rank-matched English
-  word. Equally nonsensical, ordinarily tokenized, every form known;
+* ``swap``    — every vacated WORD replaced by another type of the passage's own domain,
+  frequency-rank-matched inside the same suffix class. Nothing is assembled, so the image
+  IS a domain type: a real word, carrying the same inflection as the word it replaces.
+  Equally nonsensical, ordinarily tokenized, every form known;
 * ``nonce``   — every vacated stem replaced by a phonotactically legal invention.
 
 and the two differences that are worth anything are the *labelled* ones:

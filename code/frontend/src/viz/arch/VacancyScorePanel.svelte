@@ -30,8 +30,10 @@
    * THE DECOMPOSITION IS THE WHOLE POINT (contract §8.3). Vacating content words changes
    * three things at once: the forms become unknown, they fragment into more subword
    * tokens, and the passage stops meaning anything. A caveat cannot separate those; a
-   * control can. The `swap` variant replaces each vacated stem with a REAL,
-   * frequency-rank-matched English word — equally nonsensical, ordinarily tokenized — so:
+   * control can. The `swap` variant replaces each vacated WORD with another type of the
+   * passage's own domain, frequency-rank-matched inside the same suffix class. Nothing is
+   * assembled, so the image IS a domain type: a real word, of the same inflection as the
+   * word it replaces — equally nonsensical, ordinarily tokenized — so:
    *
    *     nll(swap)  − nll(english)  =  the cost of WRONG CONTENT
    *     nll(nonce) − nll(swap)     =  the cost of UNKNOWN FORM

@@ -65,7 +65,7 @@
     STRESS_TABLE,
     SUFFIXES,
     effectiveKeepSet,
-    isEligible,
+    isVacatable,
     stemAndSuffix,
     transformWord,
     vacancyStats,
@@ -212,7 +212,7 @@
       id: "swap",
       label: "swap",
       title:
-        "Draw a real, frequency-rank-matched English word instead (contract §8.3) — the control that separates wrong content from unknown form. Its images ARE domain words, so it is injective only at p = 0 or p = 1 (§5.2a).",
+        "Map the whole word onto another domain type of the same suffix class, by frequency rank (contract §8.3) — the control that separates wrong content from unknown form. Its images ARE domain words, so it is injective only at p = 0 or p = 1 (§5.2a).",
     },
   ];
 
@@ -340,11 +340,13 @@
       const w = before[i];
       if (w.at > cursor) segs.push({ text: orig.slice(cursor, w.at), cls: "gap" });
       const out = after[i]?.text ?? w.text;
-      const [stem] = stemAndSuffix(w.text.toLowerCase());
+      // §2.2's WHOLE-WORD test, not the stem-level one: the splitter breaks the closed
+      // class open (`after -> aft + er`), so judging the stem painted seven function
+      // words as open class — words the transform will never touch at any `p`.
       const cls: Seg["cls"] =
         out.toLowerCase() !== w.text.toLowerCase()
           ? "minted"
-          : isEligible(stem, keep)
+          : isVacatable(w.text.toLowerCase(), keep)
             ? "open"
             : "kept";
       segs.push({ text: out, cls });
@@ -388,36 +390,66 @@
   const P_CELLS = [0, 0.25, 0.5, 0.75, 1] as const;
   const RIBBON_ROWS = 8;
 
-  /** Eligible stems the reader can actually find in the text above. */
-  const corpusStems = $derived.by(() => {
+  /**
+   * What the map's keys ARE, which depends on the mint (`VacancyMap.mapping`, §8.3):
+   * `nonce` keys on the lowercased STEM, `swap` keys on the whole lowercased TYPE. The
+   * ribbon reads keys, so it has to be told which — reading a type as a stem is not a
+   * cosmetic mislabelling, it changes the number in the `u` column and therefore the
+   * pattern of vacated cells beside it.
+   */
+  const keysAreTypes = $derived(map?.mint === "swap");
+  /** The header of the ribbon's first column, and the word its caption uses for a row. */
+  const rowNoun = $derived(keysAreTypes ? "type" : "stem");
+
+  /**
+   * Map keys the reader can actually find in the text above — the domain also contains the
+   * whole Dolch list, and a row for a word that is not in the corpus demonstrates nothing.
+   * Under `swap` that is the corpus's vacatable TYPES; under `nonce`, their stems.
+   */
+  const corpusKeys = $derived.by(() => {
     const out = new Set<string>();
     for (const t of new Set(tokenize(corpusText))) {
-      const [stem] = stemAndSuffix(t);
-      if (isEligible(stem, keep)) out.add(stem);
+      const lower = t.toLowerCase();
+      if (!isVacatable(lower, keep)) continue;
+      out.add(keysAreTypes ? lower : stemAndSuffix(lower)[0]);
     }
     return out;
   });
 
   /**
-   * ~8 stems spanning the `u` range, each shown at five values of `p`. Chosen by rank in
+   * The string whose hash decides vacancy, for a key of this map. `u` is always a function
+   * of the STEM (`u(stem) < p`), so a `swap` key must be split first — and a `nonce` key
+   * must NOT be, since it is already a stem and splitting again would turn `water` into
+   * `wat` and print a `u` the transform never used.
+   */
+  function hashedStem(key: string): string {
+    return keysAreTypes ? stemAndSuffix(key)[0] : key;
+  }
+
+  /**
+   * ~8 keys spanning the `u` range, each shown at five values of `p`. Chosen by rank in
    * `u` rather than by hand, so the row set is a function of the corpus and the seed.
    */
   const ribbon = $derived.by(() => {
     if (!map) return [];
     const rows = [...map.mapping.keys()]
-      .filter((s) => corpusStems.has(s))
-      .map((stem) => ({ stem, u: vacancyU(stem, params.seed), nonce: map.mapping.get(stem) ?? stem }))
-      .sort((a, b) => a.u - b.u || (a.stem < b.stem ? -1 : 1));
+      .filter((k) => corpusKeys.has(k))
+      .map((key) => ({
+        key,
+        u: vacancyU(hashedStem(key), params.seed),
+        image: map.mapping.get(key) ?? key,
+      }))
+      .sort((a, b) => a.u - b.u || (a.key < b.key ? -1 : 1));
     if (rows.length === 0) return [];
     const picked: typeof rows = [];
     for (let k = 0; k < RIBBON_ROWS; k++) {
       const idx = Math.round((k * (rows.length - 1)) / (RIBBON_ROWS - 1));
       const row = rows[Math.min(idx, rows.length - 1)];
-      if (!picked.some((r) => r.stem === row.stem)) picked.push(row);
+      if (!picked.some((r) => r.key === row.key)) picked.push(row);
     }
     return picked.map((r) => ({
       ...r,
-      cells: P_CELLS.map((pc) => ({ p: pc, vacated: r.u < pc, form: r.u < pc ? r.nonce : r.stem })),
+      cells: P_CELLS.map((pc) => ({ p: pc, vacated: r.u < pc, form: r.u < pc ? r.image : r.key })),
     }));
   });
 
@@ -733,10 +765,15 @@
 
   <div class="mintbox" data-testid="lex-vacancy-mint-note">
     <p class="note">
-      <b>nonce</b> invents the replacement. <b>swap</b> draws a real English word instead —
-      from this corpus's own open-class types, matched on frequency rank (contract §8.3). The
-      passage is left exactly as nonsensical either way, but under <b>swap</b> every form is a
-      word the reader, and a pretrained tokenizer, already knows. That difference is the whole
+      <b>nonce</b> invents the replacement, and assembles the surface from the invented stem plus
+      the source word's suffix. <b>swap</b> assembles nothing: it maps a whole type onto another
+      whole type of this domain, drawn by frequency rank <i>within the same suffix class</i>
+      (contract §8.3), so the replacement is a real word carrying the same inflection as the word
+      it replaces. A suffix class with only one member cannot be permuted without leaving that word
+      where it was, so on a short text such a class is folded into the uninflected one — the single
+      place the inflection match bends, and it bends toward a real word rather than an invented
+      surface. The passage is left exactly as nonsensical either way, but under <b>swap</b> every
+      form is a word the reader, and a pretrained tokenizer, already knows. That difference is the whole
       control: it separates the cost of <i>wrong content</i> from the cost of an
       <i>unknown form</i>, which is the measurement the
       <button class="linklike" onclick={() => view.set("architecture")}>
@@ -843,10 +880,14 @@
       <span class="swatch minted">minted</span>
       <span class="legend-why">
         — the classes come from the real map: a word is <b>minted</b> when the transform
-        actually changed it, <b>open</b> when its stem passes the eligibility test of
-        contract §2.2 but <code>u(stem) ≥ p</code>, and <b>preserved</b> when the stem is in
-        the closed class or fails eligibility (too short, or not ASCII letters — which is why
-        <code>good-bye</code> never moves). Nothing here is annotated by hand. The corpus opens
+        actually changed it, <b>open</b> when it passes the vacatability test of contract §2.2
+        but <code>u(stem) ≥ p</code>, and <b>preserved</b> when it is in the closed class or
+        fails eligibility (too short, or not ASCII letters — which is why
+        <code>good-bye</code> never moves). §2.2 tests the WHOLE WORD against the closed class
+        before splitting a suffix off it, so <code>after</code> and <code>does</code> read as
+        preserved rather than as open class — the splitter would break them into
+        <code>aft + er</code> and <code>doe + s</code>, neither of which is a function word.
+        Nothing here is annotated by hand. The corpus opens
         with its own table of contents; page forward for verse.
       </span>
     </p>
@@ -859,7 +900,7 @@
       <table class="ribbon" data-testid="lex-vacancy-ribbon">
         <thead>
           <tr>
-            <th scope="col" class="stem-h">stem</th>
+            <th scope="col" class="stem-h">{rowNoun}</th>
             <th scope="col" class="u-h">u</th>
             {#each P_CELLS as pc (pc)}
               <th scope="col">p = {pc.toFixed(2)}</th>
@@ -867,9 +908,9 @@
           </tr>
         </thead>
         <tbody>
-          {#each ribbon as row (row.stem)}
+          {#each ribbon as row (row.key)}
             <tr class:live={row.u < params.p}>
-              <th scope="row" class="stem">{row.stem}</th>
+              <th scope="row" class="stem">{row.key}</th>
               <td class="u">{row.u.toFixed(3)}</td>
               {#each row.cells as cell (cell.p)}
                 <td class={cell.vacated ? "cell minted" : "cell open"}>{cell.form}</td>
@@ -881,15 +922,18 @@
     </div>
     <p class="caption" data-testid="lex-vacancy-ribbon-caption">
       Read each row left to right. <b>Nesting</b>: once a cell turns minted it never reverts —
-      a stem is vacated iff <code>u(stem) &lt; p</code>, and <code>u</code> is a hash of
+      a word is vacated iff <code>u(stem) &lt; p</code>, and <code>u</code> is a hash of
       <code>(seed, stem)</code> alone, so the vacated sets are nested as <code>p</code> grows.
       <b>Stability</b>: the minted string is <i>the same string</i> in every later cell — the
-      nonce map is built once over the whole type set in canonical order, so it does not depend
+      map is built once over the whole type set in canonical order, so it does not depend
       on <code>p</code>, on document order, or on which other words exist. The source project's
       minter built its map lazily while rewriting and had neither property; contract §5.2 is the
-      correction. Rows are the eligible stems of this corpus at eight evenly spaced ranks of
-      <code>u</code>; a highlighted row is one that is vacated at the current
-      <code>p = {params.p.toFixed(2)}</code>.
+      correction. Rows are this map's own keys, restricted to the ones this corpus contains, at
+      eight evenly spaced ranks of <code>u</code> — <b>{rowNoun}s</b>, because
+      <code>{mint}</code> keys its map on the {keysAreTypes
+        ? "whole type and replaces it whole"
+        : "stem and re-attaches the source suffix"} (§8.3). A highlighted row is one that is
+      vacated at the current <code>p = {params.p.toFixed(2)}</code>.
       {#if !mapped}
         <b class="warn">
           The corpus above is in the <i>{condition === "reveal" ? "partial reveal" : condition}</i>

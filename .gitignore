@@ -138,6 +138,8 @@ dmypy.json
 
 # Claude Code local settings
 .claude/settings.local.json
+# Claude Code agent worktrees — real git worktrees of THIS repo, never content
+.claude/worktrees/
 
 # oh-my-claudecode local state
 .omc/

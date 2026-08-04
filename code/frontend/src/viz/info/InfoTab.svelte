@@ -735,26 +735,39 @@
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <div class="eq" role="group" aria-label="equation" tabindex="0">
     words are found with the tokenizer's OWN regex &nbsp; [A-Za-z]+(?:['-][A-Za-z]+)*<br />
+    a word is vacatable &nbsp; iff &nbsp; the WORD is open class &nbsp; and &nbsp; its STEM is<br />
     u(stem) = (first 8 bytes of sha256(“seed:stem”) as a uint64 ≫ 11) / 2⁵³<br />
-    vacate the stem &nbsp; iff &nbsp; u(stem) &lt; p
+    vacate it &nbsp; iff &nbsp; u(stem) &lt; p
   </div>
   <p class="para">
     <b>Preserved, byte for byte:</b> everything that is not a word match — whitespace, punctuation,
     digits, line breaks; the closed class, which is a curated function-word list and deliberately
     <i>not</i> a Dolch budget (unioning the two silently protects content verbs like
     <code>run</code> and <code>eat</code> and understates the vacancy rate); inflectional suffixes,
-    since the stem is vacated and the suffix re-attached, so <code>dog's</code> becomes
-    <code>&lt;nonce&gt;'s</code>; and anything failing the eligibility test — <code>good-bye</code>
-    contains a hyphen, so it never moves. <b>Replaced:</b> eligible stems, and only stems.
+    since under <code>nonce</code> the stem is vacated and the suffix re-attached, so
+    <code>dog's</code> becomes <code>&lt;nonce&gt;'s</code>; and anything failing the eligibility
+    test — <code>good-bye</code> contains a hyphen, so it never moves. <b>Replaced:</b> eligible
+    words, and only eligible words.
+  </p>
+  <p class="para">
+    <b>The closed class is tested on the whole word, before the splitter runs, and that order is
+    load-bearing.</b> Splitting a suffix off is a spelling heuristic, so it breaks function words
+    open — <code>after → aft + er</code>, <code>this → thi + s</code>, <code>does → doe + s</code>,
+    and the same for <code>always</code>, <code>during</code>, <code>having</code>,
+    <code>unless</code>. None of those <i>stems</i> is a function word, so a stem-only test passed
+    all seven and vacated them (<code>after → kitser</code> at seed 0) while this page claimed the
+    scaffolding survives character for character — and the pretrained arm below takes its whole
+    measurement over the words that survive. Protection belongs to the word the reader keeps, not
+    to the fragment the splitter happened to produce.
   </p>
   <p class="para">
     That the transform finds words with the <i>tokenizer's</i> regular expression rather than one
     written beside it is load-bearing rather than tidy: the theorem below is false the moment the
     transform's idea of a word differs from the trainer's. On the shipped corpus the map's domain
     is <b>2,233</b> types — the corpus's own <b>2,211</b> plus the full Dolch list, so that
-    switching budgets cannot re-mint the text under the reader — of which <b>1,944</b> are
-    eligible, sharing <b>1,680</b> distinct stems. At <code>p = 1</code> that rewrites
-    <b>8,202</b> of the corpus's <b>16,000</b> word tokens; the rest are closed class, too short,
+    switching budgets cannot re-mint the text under the reader — of which <b>1,940</b> are
+    eligible, sharing <b>1,676</b> distinct stems. At <code>p = 1</code> that rewrites
+    <b>8,125</b> of the corpus's <b>16,000</b> word tokens; the rest are closed class, too short,
     or not ASCII letters.
   </p>
 
@@ -825,8 +838,9 @@
     Vacating the content words of a passage changes three things at once: the forms become unknown,
     they fragment into many subword tokens, and the passage stops meaning anything. Only the first
     is “location”, and no caveat can separate them — but a control can. <b>Swap</b> runs the same
-    transform with the replacement drawn as a <i>real English word</i>: from the corpus's own
-    open-class types, matched on frequency rank. The passage is then exactly as nonsensical while
+    transform with the replacement drawn as a <i>real English word</i>: from the domain's own
+    open-class types, matched on frequency rank within the same inflectional class. The passage is
+    then exactly as nonsensical while
     every form remains a word the model knows and the tokenizer segments normally. So:
   </p>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -849,11 +863,33 @@
     beside the number instead of at the bottom of the page.
   </p>
   <p class="para">
-    Swap draws its replacements from a finite pool — <b>1,944</b> eligible domain types against the
-    map's <b>1,680</b> stems — so the tail of the canonical order draws from what is left and its
-    frequency match degrades there; and a source type carrying a suffix may receive an already
-    inflected replacement. Both are consequences of drawing from a real vocabulary, and both are
-    stated rather than smoothed over.
+    <b>Swap maps whole type to whole type, inside one suffix class, and assembles nothing.</b> The
+    <b>1,940</b> eligible domain types are partitioned by the suffix the splitter takes off them —
+    on this corpus <b>1,280 / 216 / 106 / 92 / 81 / 67 / 53 / 29 / 8 / 8</b> types in the classes
+    <code>'' s ed er ing 's es ly ies est</code> — each class is ranked by corpus frequency, and
+    each is permuted onto itself with no type left where it was. So a replacement <i>is</i> a type
+    of this domain: a real word by construction rather than by hope, carrying the same inflection
+    as the word it replaces, so <code>-ed</code>, <code>-ing</code> and <code>-'s</code> are as
+    intact in the swap arm as in the nonce arm.
+  </p>
+  <p class="para">
+    An earlier version drew a replacement for the <i>stem</i> and re-attached the source word's
+    suffix. The pool holds inflected types, so that produced forms that are not English at all —
+    <code>jump</code> + <code>ed</code> drawing <code>went</code> gave <code>wented</code>,
+    <code>leap</code> + <code>ing</code> drawing <code>thy</code> gave <code>thying</code> — for
+    about a quarter of the vacated words. That falsified the one property the control exists for,
+    and it biased the decomposition, because <code>nll(nonce) − nll(swap)</code> is <i>the cost of
+    unknown form</i> and the swap arm was carrying unknown forms of its own. Under the shipped
+    transform the count is exactly <b>0</b>: of the <b>767</b> words the six default passages
+    vacate at <code>p = 1</code>, every swap form is a type of that passage's own domain. Two
+    things follow from drawing
+    real types instead, and both are stated rather than smoothed over. The pools are finite and
+    per class, so the tail of a class's frequency order draws from what is left and its frequency
+    match degrades there. And a class with a single member cannot be permuted without leaving that
+    word where it was, so such a class is folded into the bare class — the one place the inflection
+    match bends, and it bends toward an uninflected real word rather than toward an invented
+    surface. That is common on a <i>passage</i>-sized domain (five of the six default passages have
+    one) and does not arise on the shipped corpus, whose smallest class holds 8 types.
   </p>
   <p class="para">
     <b>A swap map is injective only at <code>p = 0</code> and <code>p = 1</code>, and that is a
@@ -862,14 +898,16 @@
     cannot be engineered away: a map that is stable in <code>p</code> and whose images are domain
     types would, if it were injective at every <code>p</code>, have to be a bijection carrying each
     nested vacated set onto itself — hence the identity. Measured on the shipped corpus, swap loses
-    <b>244 / 322 / 233</b> image slots at <code>p = 0.25 / 0.5 / 0.75</code>, and <b>0</b> at both
-    endpoints. The engine therefore <b>refuses</b> the mapped vocabulary in between, with a typed
+    <b>349 / 484 / 364</b> image slots at <code>p = 0.25 / 0.5 / 0.75</code> at seed 0, and
+    <b>0</b> at both endpoints — where a <i>lost image slot</i> is one of the domain's 2,233 types
+    that no type maps onto, which is the count the Lexicon Lab measures live beside the slider.
+    The engine therefore <b>refuses</b> the mapped vocabulary in between, with a typed
     error naming the theorem, and the panel shows you that refusal rather than clamping the slider
     or quietly substituting a nonce map. Full vacancy — where swap <i>is</i> a bijection of the
     domain and the invariance theorem holds for it exactly as for nonce — is where the pretrained
     arm scores, so the control loses nothing it exists for. The inconsistent-assignment condition
     is refused under swap for a different and equally countable reason: it needs a fresh type per
-    occurrence, and 1,680 stems cannot cover 8,202 vacated tokens.
+    occurrence, and 1,676 stems cannot cover 8,125 vacated tokens.
   </p>
 
   <h4 class="sub">The stress table, stated honestly</h4>
@@ -1030,8 +1068,9 @@
         <td>real, in PyTorch at float32 — every number, including per-passage rows</td>
         <td>
           real, in your browser via transformers.js + ONNX at <code>q8</code>, but only the
-          quantities with a measured error bound: the pooled differences, with ±0.2 nats of
-          quantization uncertainty stated. Absolute NLL, per-passage rows and
+          quantities with an error bound: the pooled differences, with ±0.2 nats of
+          quantization uncertainty stated — a bound whose own re-derivation is pending, see
+          Known limits. Absolute NLL, per-passage rows and
           <code>nonce − swap</code> are refused by name — see the section above
         </td>
       </tr>
@@ -1108,8 +1147,22 @@
     </li>
     <li>
       <b>The static build refuses most of the pretrained arm's numbers</b>, and states ±0.2 nats of
-      measured quantization uncertainty on the ones it does report. For absolute NLL, per-passage
+      quantization uncertainty on the ones it does report. For absolute NLL, per-passage
       rows or <code>nonce − swap</code>, run the full stack, which scores at float32.
+    </li>
+    <li>
+      <b>That ±0.2 is a bound, and its own measurement is one revision out of date.</b> It was
+      set at roughly twice the largest <code>q8</code>-versus-<code>float32</code> gap ever seen
+      on this contrast — 0.054 nats in the six-passage study that preceded the feature, and 0.073
+      and 0.110 in this build's own two-stack comparison. Then the swap transform was rewritten
+      (2026-08-04), which changed the three variant texts: the <code>float32</code> side has been
+      re-measured on the shipped transform, the <code>q8</code> side has not, because that needs a
+      real browser rather than a test process. So the two halves no longer describe the same
+      passages, and no gap can be computed for the configuration that ships. <b>0.2 is kept
+      because it is larger than every gap ever measured here and tightening a bound without a
+      measurement would be the worse error — not because it has been re-derived.</b> Subtracting
+      the old <code>q8</code> figure from the new <code>float32</code> one would be a fabricated
+      error bar, and this page will not print one.
     </li>
     <li>
       <b>The WebGPU path is not covered by CI.</b> It is verified end to end on a real GPU on a
@@ -1121,6 +1174,15 @@
       account and no server-side checkpoint, so closing the page ends the model unless you save the
       <code>.llmlex.json</code> bundle — which carries the weights <i>and</i> the vocabulary,
       because a token id means nothing without the budget it was trained under.
+    </li>
+    <li>
+      <b>A training run cannot survive leaving its tab, so the app asks before it lets you.</b>
+      Only one tab is mounted at a time — that is what keeps a WebGL context and a loaded
+      transformer from all existing at once — so switching tabs really does end a run in flight,
+      in the Lexicon Lab and in the Geometry Lab alike. It used to end it in silence: the button
+      simply reappeared at idle. Now any navigation away from a running tab is <i>held</i> and
+      names what it would destroy, including browser <b>Back</b>, and doing nothing keeps the run.
+      A model that has already <i>finished</i> is unaffected — it survives a tab round trip.
     </li>
   </ul>
 

@@ -4,6 +4,7 @@
   import { client, ApiError, type GeoFinetuneResult } from "../../lib/dataClient";
   import { geoModelNote, geoWeightsToken } from "../../lib/explorerStores";
   import Progress from "../../lib/Progress.svelte";
+  import { registerWork, releaseWork } from "../../lib/stores";
 
   // Fine-tune the tiny model on the student's own data (FR-106): pasted text, an
   // uploaded .txt/.md, or an HF dataset id. Real SGD runs as a job (SSE phase
@@ -31,7 +32,17 @@
   let sourceLabel = $state("your text");
   let unsubscribe: (() => void) | null = null;
 
-  onDestroy(() => unsubscribe?.());
+  /** Same as the scratch panel: an in-flight fine-tune dies with this component. */
+  const WORK_ID = "geo-finetune";
+  $effect(() => {
+    if (busy) registerWork(WORK_ID, "a fine-tuning run in the Geometry Lab");
+    else releaseWork(WORK_ID);
+  });
+
+  onDestroy(() => {
+    unsubscribe?.();
+    releaseWork(WORK_ID);
+  });
 
   function onFileChange(e: Event) {
     const input = e.currentTarget as HTMLInputElement;

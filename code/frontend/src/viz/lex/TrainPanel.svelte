@@ -45,6 +45,7 @@
   import { fetchDatasetText } from "../../lib/staticClient/hfDatasets";
   import Explain from "../../lib/Explain.svelte";
   import Progress from "../../lib/Progress.svelte";
+  import { registerWork, releaseWork } from "../../lib/stores";
 
   interface Props {
     cfg: LexConfig;
@@ -129,9 +130,30 @@
   let worker: Worker | null = null;
   let startedAt = 0;
 
+  /**
+   * A run in flight is work a tab switch would destroy, so the shell is told about it
+   * (`lib/stores.ts`). `App.svelte` renders one tab at a time, so leaving this one runs
+   * the `onDestroy` below and terminates the worker: a run at step 114 of 400 used to
+   * disappear with the button back at idle and nothing said (red-team D, F2). The worker
+   * cannot be kept — it holds the model being trained and the tab it reports into is
+   * gone — so the honest fix is to ask first, and the shell can only ask if it knows.
+   *
+   * Registered from an effect on `busy` rather than from `resetRun`/`stop`/the message
+   * handler, because `busy` is the single fact all of those already agree on; wiring four
+   * call sites is how one of them ends up leaking a registration.
+   */
+  const WORK_ID = "lex-train";
+  $effect(() => {
+    if (busy) registerWork(WORK_ID, "a training run in the Lexicon Lab");
+    else releaseWork(WORK_ID);
+  });
+
   onDestroy(() => {
     worker?.terminate();
     worker = null;
+    // The confirmed-navigation path lands here: leave the registry empty, or the next
+    // navigation would be held back by work that no longer exists.
+    releaseWork(WORK_ID);
   });
 
   /** See BudgetPanel: arrows must move an ARIA radiogroup's selection and focus. */

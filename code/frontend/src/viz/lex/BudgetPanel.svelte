@@ -49,7 +49,7 @@
     {
       id: "dolch",
       label: "Dolch (1936)",
-      title: "The real graded sight-word lists published by Edward William Dolch in 1936 — a vocabulary somebody prescribed.",
+      title: "Edward William Dolch's basic sight vocabulary — a vocabulary somebody prescribed. His 1936 article prints the 220 service words and the 95 nouns; the grade-level split of the 220 is the conventional grading that travelled with the list, not part of that article (see the Info tab).",
     },
     {
       id: "frequency",

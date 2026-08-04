@@ -867,6 +867,17 @@ content — the doc's T4 prediction that field ≫ location, on a model it did n
   (SmolLM2) — the sign is not even stable across models.
 - **Pooled differences do cancel**: `|Δ_q8 − Δ_fp32| ≤ 0.054` nats on every contrast, against a
   sampling standard error of 0.12–0.22.
+
+  > **The q8 arm has not been re-measured since the swap rewrite** (2026-08-04). Every
+  > q8-vs-fp32 gap on record — the 0.054 above, and this build's own 0.073 (`swap − english`)
+  > and 0.110 (`nonce − english`) — was taken on the OLD variant texts. The fp32 side has been
+  > re-measured on the shipped transform (0.6904 and 0.9776; pinned by
+  > `test_the_fp32_arm_quoted_in_the_static_client`), the q8 side cannot be, because it needs a
+  > real browser. So `VACANCY_Q8_UNCERTAINTY_NATS = 0.2` is **not currently a like-for-like
+  > measurement of the shipped configuration**; it is retained only because it exceeds every gap
+  > ever observed here, and lowering a bound without a measurement is worse. Restoring the
+  > derivation needs a browser q8 run of the static scorer on the six default passages, against
+  > those fp32 numbers. Until then, do not quote it as "measured on the shipped swap".
 - **Per-passage differences do not**: worst case 0.65 nats, **115 %** of that passage's fp32
   delta.
 - **`nonce − swap` is destroyed.** Its true value is 0.06–0.21; q8's error on it is 14–23 %

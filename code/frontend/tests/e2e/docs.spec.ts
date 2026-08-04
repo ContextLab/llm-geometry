@@ -394,7 +394,7 @@ test.describe("vacancy transform documentation", () => {
     const body = await res.json();
     const s = body.vacancy_stats;
 
-    // Full vacancy means these identities hold; the sentence about 8,202 tokens is only
+    // Full vacancy means these identities hold; the sentence about 8,125 tokens is only
     // true while they do, so they are asserted rather than assumed.
     expect(s.stemsVacated).toBe(s.stemsTotal);
     expect(s.corpusTypesVacated).toBe(s.corpusTypesEligible);
@@ -407,9 +407,9 @@ test.describe("vacancy transform documentation", () => {
     for (const value of [
       s.domainTypesTotal, // 2,233 = corpus types ∪ the FULL Dolch list
       s.corpusTypesTotal, // 2,211 of them are the corpus's own
-      s.domainTypesEligible, // 1,944 eligible — also the size of the swap pool
-      s.stemsTotal, // 1,680 distinct stems, i.e. the size of the map
-      s.tokensVacated, // 8,202 rewritten word occurrences at p = 1
+      s.domainTypesEligible, // 1,940 eligible — also the total size of the swap pools
+      s.stemsTotal, // 1,676 distinct stems (the size of the map only under `nonce`)
+      s.tokensVacated, // 8,125 rewritten word occurrences at p = 1
       s.tokensTotal, // out of 16,000
     ]) {
       await expect(info, `the prose no longer states ${en(value)}`).toContainText(en(value));

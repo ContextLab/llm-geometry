@@ -232,8 +232,8 @@
    * tick of the slider — visibly breaking the stability the panel exists to demonstrate.
    *
    * `consistent` IS passed, even though the map itself does not depend on it, because the
-   * engine refuses `mint = "swap"` under the inconsistent control (contract §8.3: 1 680
-   * open-class stems against 8 202 vacated tokens, so there is no supply of real words to
+   * engine refuses `mint = "swap"` under the inconsistent control (contract §8.3: 1 676
+   * open-class stems against 8 125 vacated tokens, so there is no supply of real words to
    * mint a fresh one per occurrence). Deciding that here would be re-deriving a rule the
    * engine owns; asking the engine and CARRYING its refusal is the honest form. Nothing is
    * substituted for a refused map — `vacRefusal` renders the engine's own sentence and the

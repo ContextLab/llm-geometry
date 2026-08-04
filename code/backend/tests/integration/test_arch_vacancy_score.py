@@ -223,3 +223,34 @@ def test_bad_parameters_raise_typed_errors() -> None:
         # gpt2 holds 1024 positions; a passage past it is refused rather than truncated,
         # because a truncated variant is not the same text as the one it is compared to.
         vacancy_score(MODEL, ["the cow jumped over the moon. " * 400], p=1.0)
+
+
+def test_the_fp32_arm_quoted_in_the_static_client() -> None:
+    """The fp32 half of `VACANCY_Q8_UNCERTAINTY_NATS`'s justification, on a real run.
+
+    `code/frontend/src/lib/staticClient/arch.ts` states an uncertainty for the numbers the
+    static build shows, and derives it from a q8-vs-fp32 comparison on THIS configuration:
+    gpt2, float32, the six default passages, ``p = 1, seed = 0``. Those fp32 figures went
+    stale the day the swap transform was rewritten, and nothing failed — the comment simply
+    stopped describing the code beside it, which is the defect FR-720a exists to prevent.
+
+    So the comment's fp32 arm is pinned here, against the real model. The q8 arm cannot be:
+    it needs a browser, and `VACANCY_MEASURED_DTYPES` says why. If this test fails, the
+    transform moved; update the comment in the SAME commit, and treat the constant's
+    justification as open until a browser run re-measures the q8 side.
+
+    Six passages × three variants = 18 real forward passes of ~300 tokens on gpt2/CPU.
+    """
+    result = vacancy_score(MODEL, default_passages(), p=1.0, seed=0)
+
+    tokens = {v["id"]: v["pooled"]["nTokens"] for v in result["variants"]}
+    assert tokens == {"english": 2754, "swap": 2766, "nonce": 3792}
+    preserved = {v["id"]: v["pooled"]["nPreservedTokens"] for v in result["variants"]}
+    assert preserved == {"english": 856, "swap": 856, "nonce": 856}
+
+    diffs = {d["id"]: d for d in result["differences"]}
+    assert diffs["wrong_content"]["nPairs"] == 856
+    assert diffs["wrong_content"]["nats"] == pytest.approx(0.6904, abs=5e-4)
+    assert diffs["wrong_content"]["se"] == pytest.approx(0.0539, abs=5e-4)
+    assert diffs["total"]["nats"] == pytest.approx(0.9776, abs=5e-4)
+    assert diffs["total"]["se"] == pytest.approx(0.0590, abs=5e-4)

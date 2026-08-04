@@ -11,6 +11,7 @@
   import { corpusStats } from "../../lib/geoEngine/scratch";
   import { geoModelNote, geoWeightsToken } from "../../lib/explorerStores";
   import Progress from "../../lib/Progress.svelte";
+  import { registerWork, releaseWork } from "../../lib/stores";
 
   // Train a BRAND NEW model on your own corpus (feature 004, FR-420), and save/load
   // models as files (FR-422).
@@ -45,9 +46,22 @@
   let ioNote = $state("");
   let fileInput: HTMLInputElement | undefined = $state();
 
+  /**
+   * From-scratch training is work a tab switch would destroy: leaving the tab unmounts
+   * this panel, `unsubscribe` drops the progress stream, and the run's result never
+   * reaches anyone — silently, until the shell learned to ask (red-team D, F2, reported
+   * against the Lexicon Lab and true here for the same structural reason).
+   */
+  const WORK_ID = "geo-train";
+  $effect(() => {
+    if (busy) registerWork(WORK_ID, "a from-scratch training run in the Geometry Lab");
+    else releaseWork(WORK_ID);
+  });
+
   onDestroy(() => {
     unsubscribe?.();
     statsDeb.cancel();
+    releaseWork(WORK_ID);
   });
 
   // Live corpus stats, so the vocabulary requirement is visible BEFORE a long run
