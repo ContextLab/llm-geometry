@@ -97,7 +97,16 @@ separate instrument; none is needed for T4.
   pretrained arm reports the decomposition `nll(swap) − nll(english)` (wrong content) and
   `nll(nonce) − nll(swap)` (unknown form), and never reports `nll(nonce) − nll(english)` alone
   as if it measured location. The residual tokenization component is stated, not hidden.
-- **FR-720** Both stacks produce the same numbers for the same model and passage.
+- **FR-720** Both stacks produce the same numbers for the same model and passage **at the same
+  dtype**. They do not at the dtypes actually shipped, which is a measured fact, not an
+  assumption (contract §8.3a): ONNX fp32 ≡ torch to 5.3e-4 nats, but q8 shifts absolute
+  `nllPreserved` by −0.19 nats on gpt2 and +0.40 on SmolLM2-135M.
+- **FR-720a** The static build reports a quantity **only** where a measured error bound exists
+  for the dtype it actually ran. Pooled `nonce − english` and `swap − english` qualify under q8
+  (|Δ| ≤ 0.054 nats). `nonce − swap` and every per-passage delta do **not** and are refused with
+  a typed error naming the full stack. If the running dtype has no measured bound, the panel
+  refuses — a stated ± that was never measured is a fabricated error bar and is worse than no
+  number.
 
 ### API and static build
 
@@ -142,7 +151,12 @@ separate instrument; none is needed for T4.
 - **SC-707a** The swap control satisfies the invariance theorem exactly as the nonce strategy
   does (contract §8.3) — the tiny model is equally blind to both. This is the check that the
   control is implemented correctly, and it is asserted, not assumed. The decomposition
-  `nll(swap) − nll(english)` and `nll(nonce) − nll(swap)` is reported from a real model run.
+  `nll(swap) − nll(english)` and `nll(nonce) − nll(swap)` is reported from a real model run
+  **in the full stack**, where fp32 makes it measurable.
+- **SC-707b** The measured 2×2 is reported: a word's form is worth **exactly 0** to the tiny
+  model and **10–20 % of ~1.0 nats** to a pretrained one (contract §8.3a). The static build
+  either states a measured uncertainty for the dtype it ran, or refuses — verified by driving
+  the deployed static build and confirming it does one or the other, never a bare number.
 - **SC-708** Every prosody statistic displayed is accompanied by `stressTableCoverage`, and no
   number from the source document appears as if it were ours.
 - **SC-709** The full suite is green locally and in CI: backend `pytest` + `ruff` + `black`,

@@ -592,6 +592,53 @@ way), still nested in `p`, still stable in `(seed, stem)`. The invariance theore
 therefore holds for `swap` exactly as for `nonce` — the tiny model is equally blind to both,
 which is itself the check that the swap control is implemented correctly.
 
+### 8.3a What was measured, and what the static build may therefore say
+
+Measured before implementing: 6 × 250-word real-corpus passages × 4 conditions (english /
+frequency-matched real-word swap / nonce at two seeds) × {gpt2, SmolLM2-135M}, ~700 preserved
+closed-class tokens per condition. ONNX fp32 ≡ torch to 5.3e-4 nats, and the two stacks'
+tokenizations were identical (0 id mismatches across 48 texts), so the alignment of §8.2 is
+sound and fp32 is the reference.
+
+**The result (fp32).** `nonce − english` ≈ **0.92–1.03 nats**, of which `nonce − swap` is only
+**0.06–0.21**. So roughly 80–90 % of the damage is *wrong content* and only 10–20 % is *unknown
+form*. Taken with the tiny arm's exact zero, that is the 2×2:
+
+| | what a word's form is worth |
+|-|-|
+| tiny, trained from scratch (no locations) | exactly 0 |
+| pretrained (has locations) | ~0.1 of ~1.0 nats, i.e. 10–20 % |
+
+Even for a model that *has* locations, losing the location costs far less than losing the
+content — the doc's T4 prediction that field ≫ location, on a model it did not consider.
+
+**The quantization verdict.** The app ships quantized ONNX, and the effect above is small:
+
+- **Absolute NLL is unusable.** q8 shifts `nllPreserved` by −0.19 nats (gpt2) and **+0.40**
+  (SmolLM2) — the sign is not even stable across models.
+- **Pooled differences do cancel**: `|Δ_q8 − Δ_fp32| ≤ 0.054` nats on every contrast, against a
+  sampling standard error of 0.12–0.22.
+- **Per-passage differences do not**: worst case 0.65 nats, **115 %** of that passage's fp32
+  delta.
+- **`nonce − swap` is destroyed.** Its true value is 0.06–0.21; q8's error on it is 14–23 %
+  pooled, up to 0.28 per passage, with one sign flip in six passages per model.
+- The error is **not** a constant offset that a baseline could remove: q8 compresses extreme
+  surprisal, and 2.7 % of gpt2's preserved tokens carry `|e| > 5` nats, all on 15–20-nat
+  line-initial function words — precisely the tokens this measurement is about. Median and
+  trimmed means do not rescue it.
+- **q4f16 — the app's first-choice dtype — could not be measured outside a browser** (session
+  init fails on the onnxruntime-node CPU EP for both models). Until it is measured in a real
+  browser, the deployed default path has **no error bar at all**.
+
+**Policy.** The full stack (torch/fp32) reports everything. The static build may report a
+number only where there is a measured bound for the dtype it actually ran:
+
+1. pooled `nonce − english` and `swap − english`, with the quantization uncertainty stated;
+2. **never** `nonce − swap`, and **never** a per-passage delta — these are refused with a typed
+   error naming the full stack, exactly as the static build already refuses elsewhere;
+3. if the dtype in use has no measured bound, refuse rather than invent one. A stated ±
+   that was never measured is a fabricated error bar, which is worse than no number.
+
 ### 8.4 Confound, stated in the UI
 
 The vacated passage has genuinely higher entropy, so *every* prediction in it gets worse —
