@@ -91,7 +91,7 @@ function mapFor(seed: number): VacancyMap {
 /** The stems the map would vacate at this `p`, as a set. */
 function vacatedStems(seed: number, p: number): Set<string> {
   const out = new Set<string>();
-  for (const stem of mapFor(seed).map.keys()) {
+  for (const stem of mapFor(seed).mapping.keys()) {
     if (vacancyU(stem, seed) < p) out.add(stem);
   }
   return out;
@@ -218,7 +218,7 @@ describe("eligibility (architecture.md §2.2)", () => {
     const out = vacateText("dog's", mapFor(0), params({ seed: 0, p: 1 }));
     expect(out).not.toBe("dog's");
     expect(out.endsWith("'s")).toBe(true);
-    expect(out.slice(0, -2)).toBe(mapFor(0).map.get("dog"));
+    expect(out.slice(0, -2)).toBe(mapFor(0).mapping.get("dog"));
   });
 
   it("rejects non-ASCII letters where Python's isalpha() would accept them", () => {
@@ -233,8 +233,8 @@ describe("eligibility (architecture.md §2.2)", () => {
     expect(isEligible("dog", extended)).toBe(false);
     expect(isEligible("cat", extended)).toBe(false);
     const vmap = buildVacancyMap(["dog", "cat", "hill"], params({ keep: ["dog"] }));
-    expect(vmap.map.has("dog")).toBe(false);
-    expect(vmap.map.has("hill")).toBe(true);
+    expect(vmap.mapping.has("dog")).toBe(false);
+    expect(vmap.mapping.has("hill")).toBe(true);
   });
 });
 
@@ -251,7 +251,7 @@ describe("SC-701 nesting: the vacated sets grow monotonically with p", () => {
         expect(sets[i].size).toBeLessThan(sets[i + 1].size);
       }
       expect(sets[0].size).toBe(0);
-      expect(sets[sets.length - 1].size).toBe(mapFor(seed).map.size);
+      expect(sets[sets.length - 1].size).toBe(mapFor(seed).mapping.size);
     }
   });
 
@@ -316,8 +316,8 @@ describe("SC-702 stability: a stem's nonce does not depend on p or on input orde
     expect(shuffled).not.toEqual(DOMAIN);
     const rebuilt = buildVacancyMap(shuffled, params({ seed: 0 }));
     const original = mapFor(0);
-    expect(rebuilt.map.size).toBe(original.map.size);
-    for (const [stem, nonce] of original.map) expect(rebuilt.map.get(stem)).toBe(nonce);
+    expect(rebuilt.mapping.size).toBe(original.mapping.size);
+    for (const [stem, nonce] of original.mapping) expect(rebuilt.mapping.get(stem)).toBe(nonce);
     expect(rebuilt.remintRounds).toBe(original.remintRounds);
   });
 
@@ -357,8 +357,8 @@ describe("§5.2 the map is a pure function of (domain, seed, matchProsody)", () 
         ...[...CORPUS_TYPES].map((t) => t.toUpperCase()),
       ];
       const viaScrambled = buildVacancyMap(vacancyDomain(scrambled), params({ seed }));
-      expect(viaScrambled.map.size).toBe(viaHelper.map.size);
-      for (const [stem, nonce] of viaHelper.map) expect(viaScrambled.map.get(stem)).toBe(nonce);
+      expect(viaScrambled.mapping.size).toBe(viaHelper.mapping.size);
+      for (const [stem, nonce] of viaHelper.mapping) expect(viaScrambled.mapping.get(stem)).toBe(nonce);
       expect(viaScrambled.remintRounds).toBe(viaHelper.remintRounds);
       expect(viaScrambled.imageSize).toBe(viaHelper.imageSize);
       expect([...viaScrambled.mintedStress].sort()).toEqual([...viaHelper.mintedStress].sort());
@@ -373,22 +373,22 @@ describe("§5.2 the map is a pure function of (domain, seed, matchProsody)", () 
     for (const name of DOLCH_ORDER) {
       const domain = vacancyDomain([...CORPUS_TYPES, ...dolchBudget(name)]);
       const vmap = buildVacancyMap(domain, params({ seed: 7 }));
-      expect(vmap.map.get("gum")).toBe(reference.map.get("gum"));
-      expect(vmap.map.get("hang")).toBe(reference.map.get("hang"));
+      expect(vmap.mapping.get("gum")).toBe(reference.mapping.get("gum"));
+      expect(vmap.mapping.get("hang")).toBe(reference.mapping.get("hang"));
     }
   });
 
   it("depends on seed and on matchProsody, and on nothing else", () => {
     const a = buildVacancyMap(DOMAIN, params({ seed: 0 }));
-    expect(a.map.get("gum")).not.toBe(mapFor(7).map.get("gum"));
+    expect(a.mapping.get("gum")).not.toBe(mapFor(7).mapping.get("gum"));
     const flat = buildVacancyMap(DOMAIN, params({ seed: 0, matchProsody: false }));
     let differ = 0;
-    for (const [stem, nonce] of flat.map) if (a.map.get(stem) !== nonce) differ++;
+    for (const [stem, nonce] of flat.mapping) if (a.mapping.get(stem) !== nonce) differ++;
     expect(differ).toBeGreaterThan(0);
     // p and the other knobs are NOT inputs to the map — it is built once, for all p.
     for (const p of P_GRID) {
       const atP = buildVacancyMap(DOMAIN, params({ seed: 0, p, revealAfter: 3, consistent: false }));
-      for (const [stem, nonce] of a.map) expect(atP.map.get(stem)).toBe(nonce);
+      for (const [stem, nonce] of a.mapping) expect(atP.mapping.get(stem)).toBe(nonce);
     }
   });
 });
@@ -404,7 +404,7 @@ describe("SC-704 injectivity on the real corpus", () => {
       expect(vmap.remintRounds).toBe(seed === 7 ? 1 : 0);
       // The nonces themselves are distinct — a weaker statement than the above, but the
       // one the source's `used` set was supposed to guarantee.
-      expect(new Set(vmap.map.values()).size).toBe(vmap.map.size);
+      expect(new Set(vmap.mapping.values()).size).toBe(vmap.mapping.size);
     }
   });
 
@@ -427,18 +427,18 @@ describe("SC-704 injectivity on the real corpus", () => {
     // At p ∈ {0.25, 0.5} `hanged` was vacated and `waked` was not, so both became `waked`.
     const vmap = mapFor(7);
     expect(vmap.remintRounds).toBe(1);
-    expect(vmap.map.get("hang")).not.toBe("wak");
+    expect(vmap.mapping.get("hang")).not.toBe("wak");
     // The re-mint is still prosody-matched — `smeeg` is monosyllabic like `hang` — which
     // is the observable proving §5.5's thresholds are on the ATTEMPT counter and not on
     // the absolute salt. On the absolute reading a re-mint from base salt 1001 would start
     // with every check relaxed and the replacement could carry any syllable count.
-    expect(vmap.map.get("hang")).toBe("smeeg");
+    expect(vmap.mapping.get("hang")).toBe("smeeg");
     expect(syllables("smeeg")).toBe(1);
     expect(transformWord("hanged", vmap, params({ seed: 7, p: 1 }))).toBe("smeeged");
     // Condition B, stated directly: no assembled surface form is a domain type.
     for (const t of DOMAIN) {
       const [stem, suffix] = stemAndSuffix(t);
-      const nonce = vmap.map.get(stem);
+      const nonce = vmap.mapping.get(stem);
       if (nonce === undefined) continue;
       const surface = mapVocabWords([t], vmap, params({ seed: 7, p: 1 }))[0];
       expect(DOMAIN.includes(surface)).toBe(false);
@@ -475,7 +475,7 @@ describe("SC-704 injectivity on the real corpus", () => {
 describe("FR-706: a nonce never collides with a real corpus type", () => {
   it("holds for every minted form at both seeds", () => {
     for (const seed of SEEDS) {
-      for (const nonce of mapFor(seed).map.values()) {
+      for (const nonce of mapFor(seed).mapping.values()) {
         expect(CORPUS_TYPES.has(nonce)).toBe(false);
       }
     }
@@ -640,9 +640,9 @@ describe("the control conditions really are different conditions", () => {
   it("matchProsody = false drops the syllable/stress match", () => {
     const flat = buildVacancyMap(DOMAIN, params({ seed, matchProsody: false }));
     const prosodic = mapFor(seed);
-    expect(flat.map.size).toBe(prosodic.map.size);
+    expect(flat.mapping.size).toBe(prosodic.mapping.size);
     let differ = 0;
-    for (const [stem, nonce] of flat.map) if (prosodic.map.get(stem) !== nonce) differ++;
+    for (const [stem, nonce] of flat.mapping) if (prosodic.mapping.get(stem) !== nonce) differ++;
     expect(differ).toBeGreaterThan(0);
     // Every flat nonce is monosyllabic by construction; the prosodic ones are not.
     for (const pattern of flat.mintedStress.values()) expect(pattern).toBe("1");
@@ -702,8 +702,8 @@ describe("§10 statistics", () => {
   });
 
   it("counts stems ACTUALLY vacated, not the size of the prebuilt map", () => {
-    // Departure 11: the zip copy reports `len(self.map)`, which is p-independent.
-    const full = mapFor(0).map.size;
+    // Departure 11: the zip copy reports `len(self.mapping)`, which is p-independent.
+    const full = mapFor(0).mapping.size;
     const half = vacancyStats(CORPUS, vacated(0, 0.5), mapFor(0), params({ seed: 0, p: 0.5 }));
     const none = vacancyStats(CORPUS, vacated(0, 0), mapFor(0), params({ seed: 0, p: 0 }));
     expect(none.stemsVacated).toBe(0);

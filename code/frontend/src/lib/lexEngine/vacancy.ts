@@ -609,7 +609,7 @@ export function vacancyParams(partial: Partial<VacancyParams> = {}): VacancyPara
 export interface VacancyMap {
   /** lowercase stem -> nonce, over EVERY eligible stem of the domain. The map at a given
    *  `p` is this map restricted to `{stem : u(stem) < p}`. */
-  map: ReadonlyMap<string, string>;
+  mapping: ReadonlyMap<string, string>;
   /** nonce -> intended stress pattern, so prosody scoring on a vacated corpus reflects
    *  what we built. `vacateText` adds to it in the `consistent = false` control. */
   mintedStress: Map<string, string>;
@@ -830,7 +830,7 @@ export function buildVacancyMap(types: Iterable<string>, params: VacancyParams):
   for (const t of domain) image.add(imageOfType(t, map, params.seed));
 
   return {
-    map,
+    mapping: map,
     mintedStress,
     remintRounds,
     bijective: true,
@@ -882,7 +882,7 @@ function transformWordWith(
 
   let nonce: string;
   if (params.consistent) {
-    const mapped = vmap.map.get(stem);
+    const mapped = vmap.mapping.get(stem);
     if (mapped === undefined) {
       throw new Error(
         `vacancy: no nonce for stem ${JSON.stringify(stem)} — the map's domain must include ` +
@@ -1076,7 +1076,7 @@ function countTypes(
     if (!isEligible(stem, keep)) continue;
     eligible++;
     if (!(vacancyU(stem, params.seed) < params.p)) continue;
-    const nonce = vmap.map.get(stem);
+    const nonce = vmap.mapping.get(stem);
     if (nonce !== undefined && surfaceForm(stem, suffix, nonce, params.seed) !== t) vacated++;
   }
   return { eligible, vacated };
@@ -1109,7 +1109,7 @@ export function vacancyStats(
   const corpusCounts = countTypes(corpusTypes, vmap, params, keep);
 
   let stemsVacated = 0;
-  for (const stem of vmap.map.keys()) if (vacancyU(stem, params.seed) < params.p) stemsVacated++;
+  for (const stem of vmap.mapping.keys()) if (vacancyU(stem, params.seed) < params.p) stemsVacated++;
 
   let tokensVacated = 0;
   for (let i = 0; i < before.length; i++) {
@@ -1126,7 +1126,7 @@ export function vacancyStats(
     corpusTypesTotal: corpusTypes.size,
     corpusTypesEligible: corpusCounts.eligible,
     corpusTypesVacated: corpusCounts.vacated,
-    stemsTotal: vmap.map.size,
+    stemsTotal: vmap.mapping.size,
     stemsVacated,
     tokensTotal: before.length,
     tokensVacated,
