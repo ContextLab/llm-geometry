@@ -106,8 +106,11 @@ on it exactly:
 
 - `good-bye` — no suffix matches, stem is `good-bye`, which contains a hyphen, so **test 2
   fails and the word is never vacated**.
-- `don't` — the `n't` suffix splits it to stem `do`, which fails test 3 (and test 1).
-- `dog's` — the `'s` suffix splits it to stem `dog`, which passes; output is `<nonce>'s`.
+- `don't` — `n't` does *not* split it, because §3's length rule requires
+  `len(word) - len(suffix) >= 3` and `5 - 3 = 2`. The stem is therefore `don't`, which contains
+  an apostrophe and fails test 2. Never vacated. (An earlier draft of this document said the
+  suffix splits it to `do`; that was wrong about the mechanism, though right about the outcome.)
+- `dog's` — `'s` splits it (`5 - 2 = 3`) to stem `dog`, which passes; output is `<nonce>'s`.
 
 Python must use `re.fullmatch(r"[A-Za-z]+", stem)`, **not** `str.isalpha()`. `isalpha()` is
 Unicode-aware and would accept letters JS's `^[A-Za-z]+$` rejects. Nothing in the shipped
@@ -215,9 +218,38 @@ buildVacancyMap(types, seed, matchProsody, avoid) -> Map<stem, nonce>
 ```
 
 `types` is the union of the corpus's type set and the budget's word list (§7.2 explains why the
-budget must be in the domain). `avoid` is the lowercased corpus type set, so **a nonce can
-never collide with a real word of the corpus** — the source accepts an `avoid` parameter and
-then never passes one, which lets a minted form silently merge with an English type.
+budget must be in the domain). The source accepts an `avoid` parameter and then never passes
+one, which lets a minted form silently merge with an English type.
+
+**The check is over surface forms, not bare nonces, and it must hold at every `p`.** This is
+the second defect the first implementation exposed. A bare-nonce check is not enough:
+
+> At `seed = 7`, the stem `hang` minted the nonce `wak`. No corpus type equals `wak`, so a
+> bare-nonce `avoid` check passes. But the corpus contains `hanged`, whose surface form is
+> `wak` + `ed` = `waked` — and the corpus *also* contains the English word `waked`. At `p = 1`
+> both are vacated and nothing collides, which is why a check performed only at full vacancy
+> sees nothing. At `p = 0.25` and `p = 0.5`, `hanged` is vacated and `waked` is not, so two
+> distinct source types both map to `waked`. Injectivity fails, and with it §7.3.
+
+So define, over the domain:
+
+- `pairs` := `{(stem, suffix)}` for every domain type whose stem is eligible
+- `surface(stem, suffix)` := the assembled, lowercased output of §5.7
+
+and require **both**:
+
+- **A.** the surface forms are pairwise distinct
+- **B.** no surface form equals any lowercased type in the domain — whether or not that type is
+  itself eligible
+
+B is deliberately conservative: it forbids a minted form from equalling a word that would always
+have been vacated alongside it. That costs a re-mint and buys a condition that is independent of
+`p`, which is what the theorem needs. Because un-vacated words map to themselves, minted words
+map into the surface set, and A and B keep those two sets internally distinct and mutually
+disjoint, injectivity holds **simultaneously for every `p`** rather than at `p = 1` only.
+
+On violation, re-mint the offending stems at a higher salt in canonical order and re-check;
+raise after 8 rounds.
 
 ### 5.3 The deterministic byte stream
 
@@ -255,10 +287,17 @@ For `salt = 0, 1, 2, …`:
 
 1. `pattern` := the stem's stress pattern (§6) when `matchProsody`, else `"1"`.
    `nSyl` := `len(pattern)`.
-2. Build a candidate: for syllable `i`, if `pattern[i] == "1"` emit
-   `choice(ONSETS) + choice(NUCLEI) + choice(CODAS)`; else if `i == 0` emit
-   `choice(prefixes)`; else emit `choice(UNSTRESSED_TAILS)`. Stressed syllables in a
-   non-initial unstressed position use the reduced coda set.
+2. Build a candidate: for syllable `i`,
+   - if `pattern[i] == "1"` emit `choice(ONSETS) + choice(NUCLEI) + choice(CODAS)`
+   - else if `i == 0` emit `choice(prefixes)`
+   - else emit `choice(UNSTRESSED_TAILS)`
+
+   Exactly three branches, in that order. An earlier draft added a sentence about "stressed
+   syllables in a non-initial unstressed position", which is self-contradictory — a syllable is
+   stressed or it is not. **The reduced coda set of §5.4 is therefore unreachable**, exactly as
+   it is in the source, where `_syl(stressed=False)` is never called. It is retained in §5.4 for
+   fidelity to the source's tables and because the byte stream's list indices must not shift.
+   **Do not "fix" this in either stack** — doing so would change every multi-syllable nonce.
 3. Collapse runs: `re.sub(r"([bcdfghjklmnpqrstvwxz])\1{2,}", r"\1\1", w)`.
 4. Accept iff `len(w) >= 3` **and** `w ∉ forbidden` **and** `syllables(w) == nSyl`.
 5. On `salt >= 400`, drop the syllable-count check. On `salt >= 800`, drop the length check.
@@ -272,14 +311,53 @@ the canonically-ordered prefix of stems before it. Nothing depends on `p`, on th
 on the order words are encountered while rewriting. Therefore **a stem's nonce is the same at
 every `p`** — the second property the `p`-sweep needs.
 
-### 5.7 Seams
+### 5.7 Seams, and the case-commuting invariant
 
 Re-attaching a suffix can produce a seam (`wee` + `er` → `weeer`). When
 `nonce[-1] == suffix[0]`, replace the nonce's last character with
 `"lnrtk"[u32(sha256(f"{seed}:seam:{stem}:{suffix}")) % 5]`. Deterministic, order-independent;
 the source used a shared RNG here, which is order-dependent.
 
+**Everything in the transform is computed on the lowercased word.** The stem and the suffix are
+lowercased before the seam test, before the seam hash, and before the surface form is assembled;
+`matchCase` is then applied **to the whole assembled surface form**, with the *original whole
+word* as the case source.
+
+This is not a stylistic preference. The first implementation of this contract followed the
+source and sliced the suffix case-preserved, then ran the seam test against it. So `gums` →
+`flels` while `GUMS` → `FLESS`: `suffix[0]` was `s` in one and `S` in the other, the seam test
+fired in one and not the other, and one source **type** acquired two distinct surface forms.
+The tokenizer lowercases, so those are two different types — and §7.3 is false.
+
+> **Invariant (normative, and a test).** For every word `w`:
+> `lower(transformWord(w)) == transformWord(lower(w))`.
+>
+> The transform must **commute with lowercasing**, because the tokenizer lowercases. Any step
+> that branches on a character's case — seam tests, hash inputs, table lookups other than the
+> deliberate case-sensitive `STRESS_TABLE` probe of §6.3 — violates it. Assert it over the whole
+> real corpus, and over each type upper-cased, capitalised, and lower-cased.
+
 ---
+
+### 5.8 Details the first implementation had to invent — now pinned
+
+These were gaps, not choices. Both stacks do it this way or the golden fixture fails.
+
+- **Re-mint selection.** When conditions A/B of §5.2 fail, re-mint **only the losing stem** —
+  the one later in canonical (ASCII-ascending) order among those involved in the collision — at
+  salt `1000 * round + previousSalt + 1`. Round counts from 1. Winners keep their nonce, so a
+  re-mint never cascades.
+- **`consistent = false` key.** The per-occurrence nonce is minted for the key
+  `f"{stem}#{idx}"` where `idx` is the 0-based occurrence index of that **stem** in document
+  order. The `#` is not a legal `WORD_RE` character, so the key can never collide with a stem.
+- **Minted stress is passed, never global.** `stress(word, mintedStress)` takes the map as an
+  argument. The source used a module-level `MINTED_STRESS` dict mutated by `register_minted`,
+  which makes two concurrently-live maps corrupt each other — and the Lexicon Lab holds several
+  at once (one per condition being compared).
+- **Statistic field names are camelCase in both stacks**, exactly as §10 spells them, including
+  in the Python JSON. This deviates from the rest of the Python API, which is snake_case; the
+  vacancy block is a nested object, so it is self-consistent and it lets the golden fixture
+  compare the two stacks key-for-key without a translation table.
 
 ## 6. Prosody
 
@@ -317,8 +395,9 @@ is *not* ported; the behaviour above is byte-identical to the source's.
 
 Lookup order, exactly:
 
-1. `MINTED_STRESS[lower(word)]` — the intended pattern of a form we minted ourselves, so
-   prosody scoring on a vacated corpus is exact *for the minted forms*
+1. `mintedStress[lower(word)]` — the intended pattern of a form we minted ourselves, so
+   prosody scoring on a vacated corpus reflects what we built *for the minted forms*. Passed in
+   as an argument, never a module global (§5.8).
 2. `STRESS_TABLE[word]` — **case-sensitive**, for `Christmas`
 3. `STRESS_TABLE[lower(word)]`
 4. the rule: `"1"` if `n == 1` else `"1" + "0" * (n - 1)`
@@ -387,13 +466,19 @@ five Dolch budgets and a frequency budget, `p ∈ {0, 0.25, 0.5, 0.75, 1}`, `see
 both settings of `matchProsody`. If a future change to the tokenizer, the suffix list, or the
 minter breaks it, that test fails.
 
-**Injectivity is verified, not assumed.** After building the map, compute the image of the
-actual type set. Two distinct source types can in principle collide through the
-stem+suffix construction (`nonce(a) + "s"` colliding with `nonce(b)`), which the `used` set
-does not rule out. If `|image| < |types|`, re-mint the colliding stems at a higher salt in
-canonical order and repeat; raise after 8 rounds. In practice this loop runs zero times — but
-the theorem depends on it, so it is checked every build and reported as `bijective` in the
-statistics.
+**Injectivity is verified, not assumed** — by conditions A and B of §5.2, which are checked at
+map-build time and reported as `bijective` and `remintRounds` in the statistics.
+
+Two traps, both found by implementing this document rather than by reading it:
+
+1. Checking `|image| == |types|` **at `p = 1` only** is insufficient. At full vacancy every
+   eligible type has moved, so a minted form cannot collide with a surviving English word; the
+   collision only exists at intermediate `p`. Condition B is `p`-independent precisely so this
+   cannot recur.
+2. Checking **bare nonces** rather than assembled surface forms is insufficient, for the same
+   reason: the collision arrives through the suffix.
+
+The test asserts injectivity at every `p` in the grid, not just at the endpoints.
 
 ### 7.4 What this predicts, stated before we measure it
 
@@ -521,11 +606,28 @@ typesTotal, typesEligible, typesVacated,
 tokensTotal, tokensVacated,
 meanSyllablesBefore, meanSyllablesAfter,
 meanAnapestBefore,  meanAnapestAfter,
-stressTableCoverageBefore, stressTableCoverageAfter,
+stressFromTableBefore,  stressFromTableAfter,
+stressFromMintedBefore, stressFromMintedAfter,
+stressFromRuleBefore,   stressFromRuleAfter,
 bijective, imageSize, remintRounds
 ```
 
 Both stacks compute these from the same definitions; the golden fixture (§11) pins them.
+
+**Where each token's stress came from.** The first draft asked for a single
+`stressTableCoverage`, which is ambiguous the moment minted forms exist: read literally it counts
+only the hand table (measured 1.2 % after full vacancy), and read as "stress we actually know" it
+also counts minted forms, whose pattern we chose ourselves (41.6 %). Rather than pick, report the
+**three-way split**, which is unambiguous and strictly more informative:
+
+- `stressFromTable` — the hand table of §6.1. This is the honesty number for English words, and
+  it is the one FR-712/SC-708 require beside every prosody statistic.
+- `stressFromMinted` — forms we minted, whose intended pattern we registered. Known by
+  construction, but *asserted* rather than verified: §5.5 accepts a candidate on syllable
+  **count**, so the count is checked and the pattern is not.
+- `stressFromRule` — the spelling heuristic of §6.2, i.e. a guess.
+
+The three are token-weighted fractions and sum to 1 on each side.
 
 For reference, the source reports mean anapest `0.351 → 0.345` and mean syllables
 `1.224 → 1.211` on *its* corpus. **Those are its numbers on a corpus we do not have. Do not
