@@ -28,7 +28,7 @@ timestamp for that reason.
 
 What §11 requires pinned, and where it lives in the document:
 
-1. ``u(stem)`` for 24 stems spanning eligible/ineligible and both budgets, as the EXACT
+1. ``u(stem)`` for 28 stems spanning eligible/ineligible and both budgets, as the EXACT
    float64 — ``stems[].u``. Plain JSON numbers are exact here: ``repr`` and JavaScript's
    number formatting are both shortest-round-trip, so the double survives the trip. That
    exactness is the whole point of departure 2 (``>> 11`` before the divide, §4).
@@ -41,7 +41,7 @@ What §11 requires pinned, and where it lives in the document:
 5. Nesting as explicit sets — ``nesting.levels[].stems``, the literal vacated-stem sets at
    ``p in {0, 0.35, 0.7, 1}``, so the test checks containment on data rather than on an
    assertion one language makes about itself.
-6. Stability — ``cases[].stemForms``, the surface form of each of the 24 stems at every
+6. Stability — ``cases[].stemForms``, the surface form of each of the 28 stems at every
    ``p``. A stem's nonce must be byte-identical at every ``p`` where it is vacated.
 7. The token-id-stream digest under the mapped vocabulary at each ``p`` —
    ``cases[].idStream``. These are all EQUAL, which is §7.3 (the invariance theorem) pinned
@@ -49,7 +49,7 @@ What §11 requires pinned, and where it lives in the document:
 8. Both control conditions (``consistent = false``, ``revealAfter > 0``) and both
    ``matchProsody`` settings — the ``control-*`` and ``noprosody-*`` cases.
 9. The swap control of §8.3 — the ``swap-*`` maps and cases. Four maps (both seeds × both
-   ``matchProsody`` settings) pinned by digest and 24 samples, and three cases per seed at
+   ``matchProsody`` settings) pinned by digest and 28 samples, and three cases per seed at
    ``p in {0, 0.7, 1}``. The endpoints carry a real ``idStream``: SC-703 holds for
    ``mint="swap"`` exactly as for ``mint="nonce"`` wherever a swap map can be injective.
    ``swap-*-p0.7`` carries ``idStream: null`` and ``mapVocabWordsRejects: true``, which is
@@ -93,10 +93,10 @@ by loosening this file:
 3. **Condition B on the per-occurrence path** (§5.8, added to the contract with this fix).
    It was enforced when building the map and not in the ``consistent = false`` control, so
    at seed 7, `p = 1`, the stem ``tak`` minted the nonce ``tak`` and ``Taking -> Taking``:
-   ``corpusTypesVacated`` 1921 against the consistent path's 1922, ``tokensVacated`` 8201
-   against 8202. Both stacks now forbid a per-occurrence nonce from equalling the stem it
-   replaces as well as any domain type, and the control vacates 1922 types / 8202 tokens at
-   both seeds, exactly as ``consistent = true`` does.
+   ``corpusTypesVacated`` and ``tokensVacated`` each one short of the consistent path's.
+   Both stacks now forbid a per-occurrence nonce from equalling the stem it replaces as well
+   as any domain type, and the control vacates 1918 types / 8125 tokens at both seeds,
+   exactly as ``consistent = true`` does.
 
 ``KNOWN_DIVERGENCES`` is therefore EMPTY, and it is kept — with ``attach_divergence`` and
 ``DIVERGENCE_STATUS`` — rather than deleted, because it is the honest way to ship a fixture
@@ -122,6 +122,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "code" / "backend" / "src"))
 
+from llm_geometry.errors import ComputeError  # noqa: E402
 from llm_geometry.lex.corpus import load_corpus_text  # noqa: E402
 from llm_geometry.lex.dolch import dolch_budget  # noqa: E402
 from llm_geometry.lex.train import token_stream  # noqa: E402
@@ -131,6 +132,7 @@ from llm_geometry.lex.vacancy import (  # noqa: E402
     VacancyParams,
     build_vacancy_map,
     is_eligible,
+    is_vacatable,
     map_vocab_words,
     stem_and_suffix,
     type_counts,
@@ -159,7 +161,7 @@ TOLERANCE = 1e-12
 #: a number quoted in a contract that no test reads is a number free to rot.
 P_GRID: tuple[float, ...] = (0.0, 0.25, 0.35, 0.5, 0.7, 0.75, 1.0)
 
-#: §11's "24 stems spanning eligible/ineligible and both budgets".
+#: §11's "28 stems spanning eligible/ineligible and both budgets".
 #:
 #:  * eligible, in the Dolch list AND in the corpus  — the ordinary case
 #:  * eligible, Dolch-only                           — one of the 22 domain-only words that
@@ -174,6 +176,15 @@ P_GRID: tuple[float, ...] = (0.0, 0.25, 0.35, 0.5, 0.7, 0.75, 1.0)
 #:  * ineligible, too short                          — test 3, `len(stem) > 2`
 #:  * ineligible, non-alphabetic stem                — test 2; `good-bye` matches no suffix,
 #:                                                     so its stem keeps the hyphen
+#:  * ineligible, CLOSED CLASS SPLIT OPEN            — `after`, `this`, `does`, `always`:
+#:                                                     `stem_and_suffix` splits each into a
+#:                                                     stem that is not a function word
+#:                                                     (`aft`, `thi`, `doe`, `alway`), so the
+#:                                                     stem test alone passed them and all
+#:                                                     four were vacated. `is_vacatable`
+#:                                                     tests the whole word first (§2.2), and
+#:                                                     the `vacatable` field below is what
+#:                                                     pins that in both stacks.
 PINNED_STEMS: tuple[str, ...] = (
     "little",
     "pretty",
@@ -199,6 +210,10 @@ PINNED_STEMS: tuple[str, ...] = (
     "not",
     "ox",
     "good-bye",
+    "after",
+    "this",
+    "does",
+    "always",
 )
 
 #: §11's excerpt length. The corpus is ASCII (asserted below), so Python code points and
@@ -273,7 +288,14 @@ def stem_block(
         out.append(
             {
                 "stem": stem,
-                "eligible": is_eligible(stem, VacancyParams().keep_set),
+                # BOTH halves of §2.2, separately: `eligible` is the stem-level test and
+                # `vacatable` is the whole-word test that must run first. They differ exactly
+                # on the closed-class words the splitter breaks open (`after`, `this`, …),
+                # which is the pair of readings the fix turned on.
+                "eligible": is_eligible(
+                    stem_and_suffix(stem)[0], VacancyParams().keep_set
+                ),
+                "vacatable": is_vacatable(stem, VacancyParams().keep_set),
                 "stemOf": stem_and_suffix(stem)[0],
                 "suffixOf": stem_and_suffix(stem)[1],
                 "inDomain": stem in domain,
@@ -287,8 +309,47 @@ def stem_block(
 
 
 def vacated_stems(vmap: VacancyMap, seed: int, p: float) -> list[str]:
-    """The stems the map vacates at `p`: `{stem : u(stem) < p}`, in canonical order."""
-    return sorted(stem for stem in vmap.mapping if vacancy_u(stem, seed) < p)
+    """The stems the map vacates at `p`: `{stem : u(stem) < p}`, in canonical order.
+
+    Over ``vmap.stems``, never ``vmap.mapping``: under ``mint="swap"`` the map is keyed by
+    TYPE (§8.3) and this is a set of stems under both strategies.
+    """
+    return sorted(stem for stem in vmap.stems if vacancy_u(stem, seed) < p)
+
+
+def map_block(label: str, vmap: VacancyMap, full: bool) -> dict[str, Any]:
+    """One map's pinned facts. `full` writes every pair; otherwise a digest plus 28 samples.
+
+    ``imagesOutsideDomain`` and ``fixedPoints`` are the swap control's defining property
+    (§8.3) pinned as DATA rather than as prose: every image of a swap map must be a domain
+    type — a real English word — and none may be the type it replaces. Both must read 0 under
+    ``mint="swap"``. Under ``mint="nonce"`` the opposite holds and is equally worth pinning:
+    condition B keeps every image OUT of the domain, so ``imagesOutsideDomain`` is the whole
+    map.
+    """
+    images = sorted(set(vmap.mapping.values()))
+    return {
+        "label": label,
+        "seed": vmap.seed,
+        "matchProsody": vmap.match_prosody,
+        "mint": vmap.mint,
+        "injectiveAtEveryP": vmap.injective_at_every_p,
+        "remintRounds": vmap.remint_rounds,
+        "bijective": vmap.bijective,
+        "imageSize": vmap.image_size,
+        "domainSize": len(vmap.domain),
+        "mappingSize": len(vmap.mapping),
+        "stemsSize": len(vmap.stems),
+        "imagesOutsideDomain": sum(1 for image in images if image not in vmap.domain),
+        "fixedPoints": sorted(k for k, v in vmap.mapping.items() if k == v),
+        "mappingSha256": mapping_sha256(dict(vmap.mapping)),
+        "mapping": (
+            {key: vmap.mapping[key] for key in sorted(vmap.mapping)} if full else None
+        ),
+        "sampleNonces": (
+            None if full else {stem: vmap.mapping.get(stem) for stem in PINNED_STEMS}
+        ),
+    }
 
 
 def _mapped_condition(vmap: VacancyMap, params: VacancyParams) -> bool:
@@ -330,6 +391,25 @@ def id_stream_block(
     }
 
 
+def apply_or_none(vmap: VacancyMap, word: str, params: VacancyParams) -> str | None:
+    """`vmap.apply_word(word, params)`, or ``None`` where the engine REFUSES the word.
+
+    Exactly one case refuses, and it is a property of §8.3 worth pinning rather than an error
+    to hide: a swap map is keyed by TYPE, so a word the domain does not contain has no
+    assignment at all. `gum` and `hang` are in `PINNED_STEMS` precisely because they reach a
+    NONCE map only as the stems of `gums` and `hanged` — they are not types — so the nonce
+    strategy transforms them and the swap strategy refuses them. ``None`` records that
+    refusal, and the golden test asserts the TypeScript side refuses the same words, the same
+    way. Nothing else may raise here: a `ComputeError` on any other word is re-raised.
+    """
+    try:
+        return vmap.apply_word(word, params)
+    except ComputeError:
+        if params.mint == "swap" and word.lower() not in vmap.domain:
+            return None
+        raise
+
+
 def build_case(
     label: str,
     map_label: str,
@@ -365,7 +445,7 @@ def build_case(
         # mapped vocabulary (§5.2a) but its map is still built once and still stable, so its
         # surface forms are pinned here exactly as the nonce strategy's are.
         "stemForms": (
-            {stem: vmap.apply_word(stem, params) for stem in PINNED_STEMS}
+            {stem: apply_or_none(vmap, stem, params) for stem in PINNED_STEMS}
             if params.consistent and not params.reveal_after
             else None
         ),
@@ -448,22 +528,7 @@ def build_document(generated: str) -> dict[str, Any]:
     for seed in (0, 7):
         vmap = build_vacancy_map(domain, VacancyParams(seed=seed))
         prosody_maps[seed] = vmap
-        maps.append(
-            {
-                "label": f"seed{seed}",
-                "seed": seed,
-                "matchProsody": True,
-                "mint": "nonce",
-                "injectiveAtEveryP": vmap.injective_at_every_p,
-                "remintRounds": vmap.remint_rounds,
-                "bijective": vmap.bijective,
-                "imageSize": vmap.image_size,
-                "domainSize": len(vmap.domain),
-                "mappingSize": len(vmap.mapping),
-                "mappingSha256": mapping_sha256(dict(vmap.mapping)),
-                "mapping": {stem: vmap.mapping[stem] for stem in sorted(vmap.mapping)},
-            }
-        )
+        maps.append(map_block(f"seed{seed}", vmap, full=True))
         for p in P_GRID:
             cases.append(
                 build_case(
@@ -481,25 +546,7 @@ def build_document(generated: str) -> dict[str, Any]:
     # complete map at the two seeds above, and a sha256 over the canonical form is exactly
     # as strong a check for this one at 1/1000th the bytes.
     noprosody = build_vacancy_map(domain, VacancyParams(seed=0, match_prosody=False))
-    maps.append(
-        {
-            "label": "seed0-noprosody",
-            "seed": 0,
-            "matchProsody": False,
-            "mint": "nonce",
-            "injectiveAtEveryP": noprosody.injective_at_every_p,
-            "remintRounds": noprosody.remint_rounds,
-            "bijective": noprosody.bijective,
-            "imageSize": noprosody.image_size,
-            "domainSize": len(noprosody.domain),
-            "mappingSize": len(noprosody.mapping),
-            "mappingSha256": mapping_sha256(dict(noprosody.mapping)),
-            "mapping": None,
-            "sampleNonces": {
-                stem: noprosody.mapping.get(stem) for stem in PINNED_STEMS
-            },
-        }
-    )
+    maps.append(map_block("seed0-noprosody", noprosody, full=False))
     for p in (0.7, 1.0):
         cases.append(
             build_case(
@@ -529,25 +576,7 @@ def build_document(generated: str) -> dict[str, Any]:
             label = f"swap-seed{seed}" + ("" if prosody else "-noprosody")
             base = VacancyParams(seed=seed, mint="swap", match_prosody=prosody)
             swap_map = build_vacancy_map(domain, base, counts)
-            maps.append(
-                {
-                    "label": label,
-                    "seed": seed,
-                    "matchProsody": prosody,
-                    "mint": "swap",
-                    "injectiveAtEveryP": swap_map.injective_at_every_p,
-                    "remintRounds": swap_map.remint_rounds,
-                    "bijective": swap_map.bijective,
-                    "imageSize": swap_map.image_size,
-                    "domainSize": len(swap_map.domain),
-                    "mappingSize": len(swap_map.mapping),
-                    "mappingSha256": mapping_sha256(dict(swap_map.mapping)),
-                    "mapping": None,
-                    "sampleNonces": {
-                        stem: swap_map.mapping.get(stem) for stem in PINNED_STEMS
-                    },
-                }
-            )
+            maps.append(map_block(label, swap_map, full=False))
             if not prosody:
                 continue
             for p in (0.0, 0.7, 1.0):
@@ -568,8 +597,8 @@ def build_document(generated: str) -> dict[str, Any]:
     #
     # `control-inconsistent-seed7` is the seed-7 CONDITION-B regression, pinned as data.
     # It is at `p = 1` and not `0.7` deliberately: §10's identity says every eligible type
-    # vacates at full vacancy, so this case must read `corpusTypesVacated == 1922` and
-    # `tokensVacated == 8202` — exactly what `consistent = true` reads. Before the fix it
+    # vacates at full vacancy, so this case must read `corpusTypesVacated == 1918` and
+    # `tokensVacated == 8125` — exactly what `consistent = true` reads. Before the fix it
     # read 1921 / 8201, because the stem `tak` minted the nonce `tak` and `Taking` survived
     # the transform. Seed 0 shows nothing here (no stem mints itself), which is why the
     # defect lived in the one control the fixture already had.
@@ -579,25 +608,7 @@ def build_document(generated: str) -> dict[str, Any]:
         ("control-reveal-after-2", VacancyParams(seed=0, p=0.7, reveal_after=2)),
     ):
         fresh = build_vacancy_map(domain, params)
-        maps.append(
-            {
-                "label": label,
-                "seed": params.seed,
-                "matchProsody": params.match_prosody,
-                "mint": params.mint,
-                "injectiveAtEveryP": fresh.injective_at_every_p,
-                "remintRounds": fresh.remint_rounds,
-                "bijective": fresh.bijective,
-                "imageSize": fresh.image_size,
-                "domainSize": len(fresh.domain),
-                "mappingSize": len(fresh.mapping),
-                "mappingSha256": mapping_sha256(dict(fresh.mapping)),
-                "mapping": None,
-                "sampleNonces": {
-                    stem: fresh.mapping.get(stem) for stem in PINNED_STEMS
-                },
-            }
-        )
+        maps.append(map_block(label, fresh, full=False))
         case = build_case(label, label, corpus, fresh, params, budget_words)
         attach_divergence(case)
         cases.append(case)

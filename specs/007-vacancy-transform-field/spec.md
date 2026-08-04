@@ -153,8 +153,11 @@ separate instrument; none is needed for T4.
   It cannot hold, and the reason is a theorem rather than a bug (contract §5.2a): a map that is
   stable in `p` and whose images are *domain types* is injective at every `p` only if it is the
   identity. `swap` draws its replacements from the domain by construction, so at intermediate
-  `p` a swapped word can collide with a word not yet vacated — measured at 191 / 246 / 190
-  colliding types for `p` = 0.25 / 0.5 / 0.75.
+  `p` a swapped word can collide with a word not yet vacated — measured at seed 0 as
+  **349 / 484 / 364 lost image slots** (`|domain| − |image|`, contract §5.2a's stated counting
+  definition) for `p` = 0.25 / 0.5 / 0.75, and 0 at `p ∈ {0, 1}`. Both engines' tests pin those
+  numbers; the earlier "191 / 246 / 190 colliding types" named neither a seed nor a definition,
+  was read by no test, and did not reproduce.
 
   The corrected criterion, and what is actually asserted: `swap` satisfies the invariance
   theorem at **`p ∈ {0, 1}`** — 48 of the 120 SC-703 cases — and the remaining 72 are

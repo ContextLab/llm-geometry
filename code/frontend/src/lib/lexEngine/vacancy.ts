@@ -184,6 +184,24 @@ export function isEligible(stem: string, keep: ReadonlySet<string>): boolean {
   return stem.length > 2;
 }
 
+/**
+ * May this WORD be vacated? (§2.2 — test 1 on the whole word, then `isEligible` on its stem.)
+ *
+ * TEST 1 IS NOT REDUNDANT, AND LEAVING IT OUT WAS A DEFECT. `stemAndSuffix` is a spelling
+ * heuristic, so it splits the closed class open: `after -> aft + er`, `this -> thi + s`,
+ * `does -> doe + s`, and the same for `always`, `during`, `having`, `unless`. None of those
+ * stems is a function word, so the stem test passed and seven function words were vacated —
+ * `after -> kitser` at seed 0 — while §0 claims the closed-class scaffolding is left
+ * character for character intact and §8 measures over exactly the words that survive.
+ *
+ * Every word or type goes through here; `isEligible` alone is the stem-level predicate and
+ * answers a different question.
+ */
+export function isVacatable(word: string, keep: ReadonlySet<string>): boolean {
+  if (keep.has(word.toLowerCase())) return false;
+  return isEligible(stemAndSuffix(word)[0], keep);
+}
+
 // --- §5.4 the phonotactic tables -----------------------------------------------------
 //
 // Ported verbatim from `tiny-seuss/synth/jabberwockify.py`, ORDER SIGNIFICANT: the index
@@ -406,11 +424,35 @@ function u32At(bytes: Uint8Array, offset: number): number {
  * `Number()` of a BigInt below 2^53 is itself exact, so no rounding enters here either.
  */
 export function vacancyU(stem: string, seed: number): number {
-  if (!Number.isInteger(seed)) {
-    throw new Error(`vacancyU: seed must be an integer, got ${seed}`);
-  }
+  checkSeed(seed);
   const hex = sha256Hex(utf8Bytes(`${seed}:${stem.toLowerCase()}`));
   return Number(BigInt("0x" + hex.slice(0, 16)) >> 11n) / 2 ** 53;
+}
+
+/**
+ * §4: the seed's domain, and why it has one.
+ *
+ * The digest is taken over `${seed}:${stem}`, and Python stringifies an arbitrary-precision
+ * int EXACTLY while JavaScript stringifies the nearest float64. At `2**53 + 1` the two
+ * languages hash different strings, build entirely different maps and vacate different
+ * corpora — and neither throws. Measured: `2**53` agrees (it is representable); `2**53 + 1`,
+ * `2**53 + 3`, `-(2**53 + 1)` and `12345678901234567890` all diverge, in every field.
+ *
+ * So the seed is bounded to the integers JavaScript represents exactly, and the bound is
+ * ENFORCED in both stacks. `Number.isInteger` alone was not enough: `9007199254740993`
+ * passes it, having already been rounded on the way in. Clamping would be the same defect one
+ * level up — a number used that is not the number asked for — so this throws.
+ */
+export const MAX_SEED = 2 ** 53 - 1;
+
+function checkSeed(seed: number): void {
+  if (!Number.isInteger(seed) || Math.abs(seed) > MAX_SEED) {
+    throw new Error(
+      `vacancy: seed must be an integer in [-${MAX_SEED}, ${MAX_SEED}] (architecture.md §4): ` +
+        `outside that range JavaScript cannot represent it exactly, so the two stacks would ` +
+        `hash different strings and build different maps. Got ${seed}`,
+    );
+  }
 }
 
 // --- §5.3 the deterministic byte stream ----------------------------------------------
@@ -520,13 +562,14 @@ function mintNonce(
 
 /** Half-width of the frequency-rank window a swap replacement is drawn from. */
 export const SWAP_WINDOW = 32;
-/** The window doubles every this many attempts, up to the whole pool — §5.5's relaxation
+/** The window doubles every this many attempts, up to the whole class — §5.5's relaxation
  *  applied to a draw, and necessary because "anything already used" depletes a window. */
 export const SWAP_WIDEN_EVERY = 64;
 /** Attempt at which the prosody filter is dropped. */
 export const SWAP_RELAX_PROSODY = 1024;
-/** Reaching this many attempts throws. Unlike minting, the pool is finite, so this bound is
- *  reachable in principle and we want to know if it ever is. */
+/** Attempts after which the draw gives way to the deterministic outward scan of §8.3 stage 2.
+ *  Unlike minting, the supply is finite and shrinks as the class fills, so this bound is
+ *  reached in ordinary runs — it is a switch to an exhaustive rule, never a give-up. */
 export const SWAP_MAX_ATTEMPTS = 4096;
 
 /** The two minting strategies of §7.1 / §8.3. */
@@ -565,118 +608,181 @@ function swapKeyBefore(
 }
 
 /**
- * The replacement pool of §8.3: the domain's open-class TYPES, by frequency rank.
+ * The replacement pools of §8.3: one frequency-ranked pool per SUFFIX CLASS.
  *
- * TYPES, NOT STEMS. The stem set is exactly the set of keys the map assigns, so drawing from
- * it would consume the pool exactly and leave an A-collision with nowhere to move. On the
- * shipped corpus the pool is 1944 types against 1680 stems, and that slack is what the
- * re-draw rounds spend.
+ * A class is the suffix `stemAndSuffix` splits off a vacatable domain type, so the ten
+ * classes on the shipped corpus are `'' s ed er ing 's es ly ies est`. Within a class the
+ * order is `(count descending, type ascending)` — the tie rule `frequencyBudget` already
+ * uses, so "frequency rank" means one thing in this codebase.
+ *
+ * WHOLE TYPES, PARTITIONED BY SUFFIX — NOT STEMS, AND NOTHING IS RE-ASSEMBLED. The first
+ * implementation drew a replacement for the STEM and re-attached the SOURCE word's suffix to
+ * it, which produced forms that are not English words at all: the pool holds inflected types,
+ * so `jump` + `ed` drawing `went` gave `wented`, `leap` + `ing` drawing `thy` gave `thying`,
+ * and `aft` + `er` drawing `kits` gave `kitser`. Measured over the six shipped Architecture
+ * passages at `p = 1, seed = 0`: 195 of 776 vacated words (25.1 %) had a swap form absent
+ * from `/usr/share/dict/words`, and 165 (21.3 %) were not words of the passage's own domain.
+ * That falsifies the one property the control exists for — every form known — and it biases
+ * the headline decomposition, since `nll(nonce) − nll(swap)` is *the cost of unknown form*
+ * and the swap arm was carrying unknown forms of its own.
+ *
+ * Mapping whole type to whole type inside one suffix class fixes both halves at once: the
+ * image IS a domain type, so it is a real word by construction rather than by hope, and it
+ * carries the same inflection as the word it replaces, so the morphology a reader parses
+ * (`-ed`, `-ing`, `-'s`) is as intact in the swap arm as in the nonce arm.
  */
-export function swapPool(
+export function swapPools(
   domain: Iterable<string>,
   counts: ReadonlyMap<string, number>,
   keep: ReadonlySet<string>,
-): string[] {
-  const pool = new Set<string>();
+): Map<string, string[]> {
+  if (typeof domain === "string") {
+    throw new Error("swapPools: expected an iterable of TYPES, got a string");
+  }
+  const grouped = new Map<string, Set<string>>();
   for (const t of domain) {
     const lower = t.toLowerCase();
-    if (isEligible(stemAndSuffix(lower)[0], keep)) pool.add(lower);
+    if (!isVacatable(lower, keep)) continue;
+    const suffix = stemAndSuffix(lower)[1];
+    const bucket = grouped.get(suffix);
+    if (bucket === undefined) grouped.set(suffix, new Set([lower]));
+    else bucket.add(lower);
   }
-  return [...pool].sort((a, b) =>
-    swapKeyBefore(counts.get(a) ?? 0, a, counts.get(b) ?? 0, b) ? -1 : 1,
-  );
-}
 
-/**
- * Where a stem sits in the frequency-ranked pool (§8.3).
- *
- * NOT `pool.indexOf(stem)`: 375 of the shipped corpus's 1680 eligible stems are not domain
- * types at all — `hang` and `gum` reach the map only as the stems of `hanged` and `gums` — so
- * a lookup would fail on a fifth of them. The rank is the position the stem's own key would
- * take, with its frequency summed over its whole INFLECTIONAL FAMILY: `hang` is as frequent
- * as `hanged` and `hanging` make it, which is the frequency a reader of the corpus meets.
- *
- * Defined as the number of pool entries sorting strictly before the stem's key, so it is a
- * plain count and cannot be read two ways; the binary search is only how it is computed.
- */
-export function swapRank(
-  stem: string,
-  family: Iterable<string>,
-  pool: readonly string[],
-  counts: ReadonlyMap<string, number>,
-): number {
-  let freq = 0;
-  for (const t of family) freq += counts.get(t) ?? 0;
-  let lo = 0;
-  let hi = pool.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    const other = pool[mid];
-    if (swapKeyBefore(counts.get(other) ?? 0, other, freq, stem)) lo = mid + 1;
-    else hi = mid;
+  // A class of one cannot be permuted without a fixed point, and on a PASSAGE-sized domain
+  // that is the common case, not a corner: of the six shipped Architecture passages, five
+  // have a suffix class with exactly one member (`ing` in three of them). Such a class is
+  // merged into the bare class, which the full Dolch list keeps at 194 members or more.
+  //
+  // This is the one place the inflection match bends, and it bends in the only direction that
+  // keeps the property the control exists for: the replacement is still a REAL domain word —
+  // it is simply an uninflected one, so `singing` may come back as `garden`. Refusing instead
+  // would refuse five of the six shipped passages; assembling a form would put a non-word
+  // back into the arm whose whole claim is that every form is known.
+  let bare = grouped.get("");
+  if (bare === undefined) {
+    bare = new Set<string>();
+    grouped.set("", bare);
   }
-  return lo;
-}
+  for (const suffix of [...grouped.keys()].sort()) {
+    const members = grouped.get(suffix)!;
+    if (suffix !== "" && members.size < 2) {
+      for (const t of members) bare.add(t);
+      grouped.delete(suffix);
+    }
+  }
+  if (bare.size === 0) grouped.delete("");
 
-/**
- * Draw one real-word replacement for `stem` (§8.3), as `{ word, salt, forms }` — `forms`
- * being the surfaces the stem now owns, one per suffix it occurs with.
- *
- * Deterministic in `(seed, stem, pool, used, claimed, baseSalt)` and independent of `p`,
- * exactly as `mintNonce` is, so §5.6's stability property survives the swap control.
- *
- * CONDITIONS A AND B₁ ARE ENFORCED HERE, AT DRAW TIME, not only checked afterwards. A
- * candidate is rejected when any surface it would produce is already claimed by an earlier
- * stem, is an ineligible domain type, or equals the very type it replaces. Checking only
- * afterwards costs 29 collision rounds at seed 0 and does not converge inside the 8 §5.2
- * allows: the pool holds inflected types, so a bare stem drawing `years` and a suffixed one
- * drawing `year` land on the same surface, and re-drawing one of them walks into the next
- * such pair. Enforcing at draw time makes the map correct by construction.
- */
-function drawSwap(
-  stem: string,
-  seed: number,
-  matchProsody: boolean,
-  pool: readonly string[],
-  rank: ReadonlyMap<string, number>,
-  used: ReadonlySet<string>,
-  suffixes: readonly string[],
-  claimed: ReadonlySet<string>,
-  barred: ReadonlySet<string>,
-  baseSalt: number,
-): { word: string; salt: number; forms: string[] } {
-  const n = pool.length;
-  if (n === 0) {
-    throw new Error(
-      "vacancy: the swap pool is empty — no domain type has an eligible stem, so there is " +
-        "no real word to draw (architecture.md §8.3)",
+  const pools = new Map<string, string[]>();
+  for (const suffix of [...grouped.keys()].sort()) {
+    pools.set(
+      suffix,
+      [...grouped.get(suffix)!].sort((a, b) =>
+        swapKeyBefore(counts.get(a) ?? 0, a, counts.get(b) ?? 0, b) ? -1 : 1,
+      ),
     );
   }
-  const r = rank.get(stem);
-  if (r === undefined) throw new Error(`vacancy: no swap rank for stem ${JSON.stringify(stem)}`);
-  const pattern = matchProsody ? stress(stem) : null;
-  const family = new Set(suffixes.map((s) => stem + s));
-  for (let a = 0; a < SWAP_MAX_ATTEMPTS; a++) {
-    const salt = baseSalt + a;
-    // The doubling is capped at 20 before the min because JavaScript's `<<` takes its shift
-    // count modulo 32; an uncapped `a / 64` reaches 63 at the give-up bound and Python would
-    // compute a different width from the same attempt. 32 << 20 already exceeds any pool.
-    const width = Math.min(SWAP_WINDOW << Math.min(Math.floor(a / SWAP_WIDEN_EVERY), 20), n);
-    const offset = new MintStream(seed, stem, salt, "swap").nextU32() % (2 * width);
-    const delta = offset < width ? offset - width : offset - width + 1;
-    const candidate = pool[(((r + delta) % n) + n) % n];
-    if (candidate === stem || used.has(candidate) || family.has(candidate)) continue;
-    if (pattern !== null && a < SWAP_RELAX_PROSODY && stress(candidate) !== pattern) continue;
-    const forms = suffixes.map((suffix) => surfaceForm(stem, suffix, candidate, seed));
-    if (forms.some((f) => claimed.has(f) || barred.has(f) || family.has(f))) continue;
-    if (new Set(forms).size !== forms.length) continue;
-    return { word: candidate, salt, forms };
+  return pools;
+}
+
+/**
+ * Permute one suffix class onto itself with no fixed point (§8.3): `type -> replacement type`
+ * for every member of `pool`.
+ *
+ * The result is a derangement of the class, so over all classes the map is a bijection of the
+ * vacatable domain types with no type left where it was — conditions A and B₁ of §5.2a hold by
+ * construction, and `buildVacancyMap`'s check is a verification rather than a search.
+ *
+ * Deterministic in `(seed, pool, matchProsody)` and independent of `p`, exactly as
+ * `mintNonce` is, so §5.6's stability property survives the swap control. Three stages, each
+ * a function of the attempt counter alone rather than of how many types happen to have been
+ * assigned first:
+ *
+ *   1. THE DRAW. Attempt `a` proposes `pool[(r + delta) % m]` for a `delta` in
+ *      `[-w, -1] ∪ [1, w]` read from the `swap`-tagged byte stream, `w` starting at
+ *      `SWAP_WINDOW` and doubling every `SWAP_WIDEN_EVERY` attempts up to the class size;
+ *      the prosody filter drops at `SWAP_RELAX_PROSODY`, mirroring §5.5's relaxations.
+ *   2. DETERMINISTIC COMPLETION, if `SWAP_MAX_ATTEMPTS` draws all landed on used entries.
+ *      Reached in ordinary runs, not only pathological ones: the last type of a class has one
+ *      free image out of `m`. Scanning outward from the type's own rank (`+1, -1, +2, -2, …`)
+ *      keeps the frequency match as close as the remaining supply allows and is exhaustive.
+ *   3. THE ENDGAME EXCHANGE, if the only free image is the type itself — possible only for a
+ *      class's last type. Exchange with the ASCII-first assigned type whose image is not this
+ *      one: both entries stay non-identity and the images stay distinct. A fixed point would
+ *      be a word that silently failed to vacate (the `tak -> tak` defect of §5.8).
+ *
+ * Stages 2 and 3 drop the prosody preference, which is stated rather than hidden: they run
+ * only where the class has nothing else left, and a real word of the wrong stress is a far
+ * smaller departure than a form that is not a word.
+ */
+function assignSwapClass(
+  pool: readonly string[],
+  seed: number,
+  matchProsody: boolean,
+): Map<string, string> {
+  const m = pool.length;
+  if (m < 2) {
+    throw new Error(
+      `vacancy: a swap class of ${m} member(s) cannot be permuted without a fixed point, so ` +
+        `there is no real word available to swap it with — the text has too few open-class ` +
+        `words to be swapped at all (architecture.md §8.3)`,
+    );
   }
-  throw new Error(
-    `vacancy: could not draw a swap replacement for ${JSON.stringify(stem)} in ` +
-      `${SWAP_MAX_ATTEMPTS} attempts — the pool is finite, so report this rather than ` +
-      `raising the bound`,
-  );
+  const rank = new Map<string, number>();
+  pool.forEach((t, i) => rank.set(t, i));
+  const used = new Set<string>();
+  const images = new Map<string, string>();
+  for (const t of [...pool].sort()) {
+    const r = rank.get(t)!;
+    const pattern = matchProsody ? stress(t) : null;
+    let chosen: string | null = null;
+    for (let a = 0; a < SWAP_MAX_ATTEMPTS; a++) {
+      // The doubling is capped at 20 before the min because JavaScript's `<<` takes its shift
+      // count modulo 32; an uncapped `a / 64` reaches 63 at the bound and Python would compute
+      // a different width from the same attempt. 32 << 20 already exceeds any class.
+      const width = Math.min(SWAP_WINDOW << Math.min(Math.floor(a / SWAP_WIDEN_EVERY), 20), m);
+      const offset = new MintStream(seed, t, a, "swap").nextU32() % (2 * width);
+      const delta = offset < width ? offset - width : offset - width + 1;
+      const candidate = pool[(((r + delta) % m) + m) % m];
+      if (candidate === t || used.has(candidate)) continue;
+      if (pattern !== null && a < SWAP_RELAX_PROSODY && stress(candidate) !== pattern) continue;
+      chosen = candidate;
+      break;
+    }
+    if (chosen === null) {
+      for (let step = 1; step <= m && chosen === null; step++) {
+        for (const delta of [step, -step]) {
+          const candidate = pool[(((r + delta) % m) + m) % m];
+          if (candidate !== t && !used.has(candidate)) {
+            chosen = candidate;
+            break;
+          }
+        }
+      }
+    }
+    if (chosen === null) {
+      let exchanged = false;
+      for (const earlier of [...images.keys()].sort()) {
+        if (images.get(earlier) !== t) {
+          images.set(t, images.get(earlier)!);
+          images.set(earlier, t);
+          used.add(t);
+          exchanged = true;
+          break;
+        }
+      }
+      if (!exchanged) {
+        throw new Error(
+          `vacancy: no real word is left to swap ${JSON.stringify(t)} with, and no earlier ` +
+            `assignment can be exchanged with it (architecture.md §8.3)`,
+        );
+      }
+      continue;
+    }
+    used.add(chosen);
+    images.set(t, chosen);
+  }
+  return images;
 }
 
 /**
@@ -771,18 +877,43 @@ export const DEFAULT_VACANCY_PARAMS: VacancyParams = {
   mint: "nonce",
 };
 
-/** Fill in §7.1's defaults around a partial setting. */
+/** Fill in §7.1's defaults around a partial setting, and check the seed's domain (§4).
+ *
+ *  The seed is checked HERE and not only where `u` is computed, so a caller that builds
+ *  params and passes them around gets the error at the mistake rather than three frames
+ *  later. Python's `VacancyParams.__post_init__` does the same, with the same bound. */
 export function vacancyParams(partial: Partial<VacancyParams> = {}): VacancyParams {
-  return { ...DEFAULT_VACANCY_PARAMS, ...partial };
+  const params = { ...DEFAULT_VACANCY_PARAMS, ...partial };
+  checkSeed(params.seed);
+  return params;
 }
 
 // --- §5.2 the map --------------------------------------------------------------------
 
 /** The `p`-independent nonce assignment, plus the facts §7.3 requires be verified. */
 export interface VacancyMap {
-  /** lowercase stem -> nonce, over EVERY eligible stem of the domain. The map at a given
-   *  `p` is this map restricted to `{stem : u(stem) < p}`. */
+  /**
+   * The assignment, whose KEY DEPENDS ON `mint` and is stated here rather than inferred:
+   *
+   *   * `mint = "nonce"` — `lower(stem) -> nonce`, over EVERY vacatable stem of the domain.
+   *     The surface form is assembled from the nonce and the source word's suffix (§5.7).
+   *   * `mint = "swap"` — `lower(type) -> lower(type)`, within one suffix class (§8.3).
+   *     Nothing is assembled: the image IS the surface form, and it is a domain type, hence
+   *     a real English word.
+   *
+   * The map at a given `p` is this map restricted to `{key : u(stem(key)) < p}`. A consumer
+   * that does not branch on `mint` will read stems where there are types, which is why
+   * `mint` is carried on the map rather than passed beside it.
+   */
   mapping: ReadonlyMap<string, string>;
+  /** Which of §8.3's two strategies built `mapping` — so a consumer can tell what its keys
+   *  are, and so the transform can refuse params that disagree with the map. */
+  mint: MintStrategy;
+  /** Every vacatable stem of the domain. Equal to `mapping.keys()` under `nonce` and NOT
+   *  under `swap`, whose keys are types — §10's `stems*` counts are stem counts under both
+   *  strategies, so they are taken from here rather than from `mapping.size`, which would
+   *  silently change meaning with the mint. */
+  stems: ReadonlySet<string>;
   /** nonce -> intended stress pattern, so prosody scoring on a vacated corpus reflects
    *  what we built. `vacateText` adds to it in the `consistent = false` control. */
   mintedStress: Map<string, string>;
@@ -849,7 +980,18 @@ interface StemSuffixPair {
 }
 
 /** The full-map (i.e. `p = 1`) image of a lowercased type. */
-function imageOfType(type: string, map: ReadonlyMap<string, string>, seed: number): string {
+function imageOfType(
+  type: string,
+  map: ReadonlyMap<string, string>,
+  seed: number,
+  mint: MintStrategy,
+  keep: ReadonlySet<string>,
+): string {
+  // The eligibility test comes FIRST, exactly as in `_image_of`: a closed-class word whose
+  // stem happens to be some other type's key must stay put, and "the map has no entry" is not
+  // the same test as "the word may be vacated".
+  if (!isVacatable(type, keep)) return type;
+  if (mint === "swap") return map.get(type) ?? type;
   const [stem, suffix] = stemAndSuffix(type);
   const nonce = map.get(stem);
   if (nonce === undefined) return type;
@@ -959,7 +1101,7 @@ export function buildVacancyMap(
   if (swapping && !params.consistent) {
     throw new Error(
       "vacancy: mint = 'swap' requires consistent = true — the inconsistent control needs a " +
-        "fresh type per occurrence and the corpus has 1680 open-class stems against 8202 " +
+        "fresh type per occurrence and the corpus has 1676 open-class stems against 8125 " +
         "vacated tokens, so there is no supply of real words (architecture.md §8.3)",
     );
   }
@@ -972,21 +1114,17 @@ export function buildVacancyMap(
   const domain = new Set<string>();
   for (const t of types) domain.add(t.toLowerCase());
 
-  // `pairs` is one (stem, suffix) per domain type with an eligible stem — the objects
-  // conditions A and B range over. `stems` is their canonical, ASCII-ascending order.
+  // `pairs` is one (stem, suffix) per vacatable domain type — the objects conditions A and B
+  // range over. `stems` is their canonical, ASCII-ascending order.
   const pairs: StemSuffixPair[] = [];
   const stems = new Set<string>();
-  const families = new Map<string, Set<string>>();
-  const suffixesOf = new Map<string, string[]>();
-  const eligibleTypes = new Set<string>();
+  const vacatableTypes = new Set<string>();
   for (const t of [...domain].sort()) {
+    if (!isVacatable(t, keep)) continue;
     const [stem, suffix] = stemAndSuffix(t);
-    if (!isEligible(stem, keep)) continue;
     pairs.push({ stem, suffix });
     stems.add(stem);
-    (families.get(stem) ?? families.set(stem, new Set()).get(stem)!).add(t);
-    (suffixesOf.get(stem) ?? suffixesOf.set(stem, []).get(stem)!).push(suffix);
-    eligibleTypes.add(t);
+    vacatableTypes.add(t);
   }
   const ordered = [...stems].sort();
 
@@ -994,7 +1132,7 @@ export function buildVacancyMap(
   // be vacated under `swap` — §5.2a's B₁, which is what full-vacancy injectivity needs and
   // all a map drawing from the domain can possibly satisfy.
   const barred = new Set<string>();
-  for (const t of domain) if (!swapping || !eligibleTypes.has(t)) barred.add(t);
+  for (const t of domain) if (!swapping || !vacatableTypes.has(t)) barred.add(t);
 
   // The domain is forbidden from the start — implicitly, never by caller agreement. The set
   // accumulates and is never pruned, so a superseded nonce stays out of circulation (§5.8).
@@ -1003,31 +1141,28 @@ export function buildVacancyMap(
   const mintedStress = new Map<string, string>();
   const patterns = new Map<string, string>();
   const salts = new Map<string, number>();
-  let pool: string[] = [];
-  const rank = new Map<string, number>();
+  let remintRounds = 0;
   if (swapping) {
-    pool = swapPool(domain, counts!, keep);
-    for (const stem of ordered) rank.set(stem, swapRank(stem, families.get(stem)!, pool, counts!));
-    const used = new Set<string>();
-    const claimedForms = new Set<string>();
-    for (const stem of ordered) {
-      const { word, salt, forms } = drawSwap(
-        stem,
-        params.seed,
-        params.matchProsody,
-        pool,
-        rank,
-        used,
-        suffixesOf.get(stem)!,
-        claimedForms,
-        barred,
-        0,
+    for (const pool of swapPools(domain, counts!, keep).values()) {
+      for (const [t, image] of assignSwapClass(pool, params.seed, params.matchProsody)) {
+        map.set(t, image);
+      }
+    }
+    // A + B₁, VERIFIED rather than searched for. `assignSwapClass` deranges each class, so a
+    // violation here is a bug in the construction and not a collision to re-draw away;
+    // throwing is the only honest response, and `remintRounds` stays 0.
+    const images = new Set<string>();
+    const offenders: string[] = [];
+    for (const [t, image] of map) {
+      if (image === t || barred.has(image)) offenders.push(t);
+      images.add(image);
+    }
+    if (offenders.length > 0 || images.size !== map.size) {
+      throw new Error(
+        `vacancy: the swap assignment is not a derangement of the vacatable domain types ` +
+          `(architecture.md §5.2a, conditions A and B₁): ${images.size} distinct images for ` +
+          `${map.size} types, offenders e.g. ${JSON.stringify(offenders.sort().slice(0, 5))}`,
       );
-      used.add(word);
-      for (const f of forms) claimedForms.add(f);
-      forbidden.add(word);
-      map.set(stem, word);
-      salts.set(stem, salt);
     }
   } else {
     for (const stem of ordered) {
@@ -1039,78 +1174,46 @@ export function buildVacancyMap(
       mintedStress.set(nonce, pattern);
       salts.set(stem, salt);
     }
-  }
 
-  let remintRounds = 0;
-  for (;;) {
-    const offenders = injectivityOffenders(pairs, map, barred, params.seed);
-    if (offenders.size === 0) break;
-    remintRounds += 1;
-    if (remintRounds > MAX_REMINT_ROUNDS) {
-      throw new Error(
-        `vacancy: conditions A/B of architecture.md §5.2 still violated after ` +
-          `${MAX_REMINT_ROUNDS} re-mint rounds (${offenders.size} stems outstanding, e.g. ` +
-          `${JSON.stringify([...offenders].sort().slice(0, 5))})`,
-      );
-    }
-    // Canonical order, so the result does not depend on iteration order.
-    for (const stem of [...offenders].sort()) {
-      const previousSalt = salts.get(stem);
-      if (previousSalt === undefined) {
-        throw new Error(`vacancy: re-mint offender ${JSON.stringify(stem)} was never minted`);
-      }
-      const startSalt = 1000 * remintRounds + previousSalt + 1;
-      if (swapping) {
-        // A superseded REPLACEMENT returns to the pool, unlike a superseded nonce, which
-        // stays forbidden forever. The pool is finite (1944 real words against 1680 stems on
-        // the shipped corpus), so retiring words permanently would starve later rounds; and a
-        // real word cannot recreate the collision it was rejected for the way a nonce can,
-        // because that collision was with another stem's surface, which has itself moved.
-        const others = new Set<string>();
-        for (const [s, w] of map) if (s !== stem) others.add(w);
-        const elsewhere = new Set<string>();
-        for (const pair of pairs) {
-          if (pair.stem === stem) continue;
-          elsewhere.add(surfaceForm(pair.stem, pair.suffix, map.get(pair.stem)!, params.seed));
-        }
-        const drawn = drawSwap(
-          stem,
-          params.seed,
-          params.matchProsody,
-          pool,
-          rank,
-          others,
-          suffixesOf.get(stem)!,
-          elsewhere,
-          barred,
-          startSalt,
+    for (;;) {
+      const offenders = injectivityOffenders(pairs, map, barred, params.seed);
+      if (offenders.size === 0) break;
+      remintRounds += 1;
+      if (remintRounds > MAX_REMINT_ROUNDS) {
+        throw new Error(
+          `vacancy: conditions A/B of architecture.md §5.2 still violated after ` +
+            `${MAX_REMINT_ROUNDS} re-mint rounds (${offenders.size} stems outstanding, e.g. ` +
+            `${JSON.stringify([...offenders].sort().slice(0, 5))})`,
         );
-        forbidden.add(drawn.word);
-        map.set(stem, drawn.word);
-        salts.set(stem, drawn.salt);
-        continue;
       }
-      const pattern = patterns.get(stem);
-      if (pattern === undefined) {
-        throw new Error(`vacancy: re-mint offender ${JSON.stringify(stem)} was never minted`);
+      // Canonical order, so the result does not depend on iteration order.
+      for (const stem of [...offenders].sort()) {
+        const previousSalt = salts.get(stem);
+        const pattern = patterns.get(stem);
+        if (previousSalt === undefined || pattern === undefined) {
+          throw new Error(`vacancy: re-mint offender ${JSON.stringify(stem)} was never minted`);
+        }
+        const startSalt = 1000 * remintRounds + previousSalt + 1;
+        const { nonce, salt } = mintNonce(stem, pattern, params.seed, forbidden, startSalt);
+        // The superseded nonce stays in `forbidden` (it is not handed to anyone else) but
+        // leaves `mintedStress`, where a stale key would claim a pattern nothing carries.
+        const superseded = map.get(stem);
+        if (superseded !== undefined) mintedStress.delete(superseded);
+        forbidden.add(nonce);
+        map.set(stem, nonce);
+        mintedStress.set(nonce, pattern);
+        salts.set(stem, salt);
       }
-      const { nonce, salt } = mintNonce(stem, pattern, params.seed, forbidden, startSalt);
-      // The superseded nonce stays in `forbidden` (it is not handed to anyone else) but
-      // leaves `mintedStress`, where a stale key would claim a pattern nothing carries.
-      const superseded = map.get(stem);
-      if (superseded !== undefined) mintedStress.delete(superseded);
-      forbidden.add(nonce);
-      map.set(stem, nonce);
-      mintedStress.set(nonce, pattern);
-      salts.set(stem, salt);
     }
   }
 
   const image = new Set<string>();
-  for (const t of domain) image.add(imageOfType(t, map, params.seed));
+  for (const t of domain) image.add(imageOfType(t, map, params.seed, params.mint, keep));
 
   return {
     mapping: map,
+    mint: params.mint,
+    stems,
     mintedStress,
     remintRounds,
     // MEASURED, not asserted. The loop above exits only when A and B hold, so this is `true`
@@ -1149,8 +1252,15 @@ function transformWordWith(
   keep: ReadonlySet<string>,
   state?: TransformState,
 ): string {
+  if (params.mint !== vmap.mint) {
+    throw new Error(
+      `vacancy: this map was built with mint = ${JSON.stringify(vmap.mint)} but is being ` +
+        `applied with mint = ${JSON.stringify(params.mint)}; the two strategies key the map ` +
+        `differently (architecture.md §8.3), so rebuild the map rather than reusing it`,
+    );
+  }
+  if (!isVacatable(word, keep)) return word;
   const [stem, suffix] = stemAndSuffix(word.toLowerCase());
-  if (!isEligible(stem, keep)) return word;
   if (!(vacancyU(stem, params.seed) < params.p)) return word;
 
   // 0-based occurrence index of this STEM in document order (§5.8).
@@ -1163,6 +1273,22 @@ function transformWordWith(
     throw new Error(
       "vacancy: revealAfter > 0 needs an occurrence order; use vacateText, not mapVocabWords",
     );
+  }
+
+  if (params.mint === "swap") {
+    // §8.3: the map is over whole TYPES and the image is itself a domain type, so there is
+    // nothing to assemble — no suffix to re-attach, no seam to repair. That is the whole
+    // point: what comes out is a real English word, in the same inflectional class as the
+    // word it replaces.
+    const image = vmap.mapping.get(word.toLowerCase());
+    if (image === undefined) {
+      throw new Error(
+        `vacancy: type ${JSON.stringify(word.toLowerCase())} is outside the swap map's ` +
+          `domain — the map must be built over the union of the corpus types and the ` +
+          `budget's words (architecture.md §5.2)`,
+      );
+    }
+    return assertWholeWord(matchCase(word, image), word);
   }
 
   let nonce: string;
@@ -1380,11 +1506,11 @@ function stressSplit(
   return { table: table / n, mintedFrac: mintedHits / n, rule: (n - table - mintedHits) / n };
 }
 
-/** Types whose stem passes §2.2. Shared by both scopes — eligibility is a property of the
- *  stem alone, so there is only one reading of it to get wrong. */
+/** Types that may be vacated per §2.2 — the whole-word test then the stem test. Shared by
+ *  both scopes, so there is only one reading of it to get wrong. */
 function countEligible(types: ReadonlySet<string>, keep: ReadonlySet<string>): number {
   let eligible = 0;
-  for (const t of types) if (isEligible(stemAndSuffix(t)[0], keep)) eligible++;
+  for (const t of types) if (isVacatable(t, keep)) eligible++;
   return eligible;
 }
 
@@ -1399,20 +1525,25 @@ function countEligible(types: ReadonlySet<string>, keep: ReadonlySet<string>): n
  *
  * It is deliberately NOT the corpus scope's reading — see `vacancyStats`, where the two
  * readings are named and contrasted rather than left to look like one mechanism.
+ *
+ * ONE RULE, IN BOTH STACKS: vacatable, and `u(stem) < p`. This function used to also require
+ * the image to DIFFER from the type, which Python never did. The two agreed on every one of
+ * ~2 100 differential cases — conditions B and B₁ both forbid an image equal to its own
+ * source, so the extra clause could never fire — but a statistic defined two ways in two
+ * files is one condition-B regression away from being two numbers, and §5.8 spends five
+ * bullets on exactly that class of asymmetry. The membership rule is the one that survives:
+ * it is what "what would the map rewrite here" means, and it needs no map lookup at all.
  */
 function countVacatedByMap(
   types: ReadonlySet<string>,
-  vmap: VacancyMap,
+  _vmap: VacancyMap,
   params: VacancyParams,
   keep: ReadonlySet<string>,
 ): number {
   let vacated = 0;
   for (const t of types) {
-    const [stem, suffix] = stemAndSuffix(t);
-    if (!isEligible(stem, keep)) continue;
-    if (!(vacancyU(stem, params.seed) < params.p)) continue;
-    const nonce = vmap.mapping.get(stem);
-    if (nonce !== undefined && surfaceForm(stem, suffix, nonce, params.seed) !== t) vacated++;
+    if (!isVacatable(t, keep)) continue;
+    if (vacancyU(stemAndSuffix(t)[0], params.seed) < params.p) vacated++;
   }
   return vacated;
 }
@@ -1465,8 +1596,10 @@ export function vacancyStats(
     changedTypes.add(was);
   }
 
+  // `vmap.stems`, never `vmap.mapping.keys()`: under `mint = "swap"` the map is keyed by TYPE
+  // and this is a count of STEMS in both strategies.
   let stemsVacated = 0;
-  for (const stem of vmap.mapping.keys()) if (vacancyU(stem, params.seed) < params.p) stemsVacated++;
+  for (const stem of vmap.stems) if (vacancyU(stem, params.seed) < params.p) stemsVacated++;
 
   const splitBefore = stressSplit(before, vmap.mintedStress);
   const splitAfter = stressSplit(after, vmap.mintedStress);
@@ -1478,7 +1611,7 @@ export function vacancyStats(
     corpusTypesTotal: corpusTypes.size,
     corpusTypesEligible: countEligible(corpusTypes, keep),
     corpusTypesVacated: changedTypes.size,
-    stemsTotal: vmap.mapping.size,
+    stemsTotal: vmap.stems.size,
     stemsVacated,
     tokensTotal: before.length,
     tokensVacated,

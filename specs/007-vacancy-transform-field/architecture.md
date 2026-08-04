@@ -95,20 +95,35 @@ Callers may extend it with a `keep` set; the effective set is `FUNCTION_WORDS �
 
 ### 2.2 The eligibility test
 
-A word is eligible for vacancy iff, after suffix splitting (§3), its **stem** satisfies all of:
+A word is eligible for vacancy iff **the whole word** passes test 1 and, after suffix
+splitting (§3), its **stem** passes tests 2–4:
 
-1. `lower(stem) ∉ keepSet`
-2. `stem` matches `^[A-Za-z]+$` — ASCII letters only
-3. `len(stem) > 2`
+1. `lower(word) ∉ keepSet` — the WHOLE word, before any splitting
+2. `lower(stem) ∉ keepSet`
+3. `stem` matches `^[A-Za-z]+$` — ASCII letters only
+4. `len(stem) > 2`
 
-Test 2 is why hyphenated and apostrophised words behave as they do, and both stacks must agree
-on it exactly:
+`isVacatable(word)` is tests 1–4; `isEligible(stem)` is 2–4 and is the stem-level predicate
+only. Both stacks export both, and every caller that judges a WORD or a TYPE calls the former.
 
-- `good-bye` — no suffix matches, stem is `good-bye`, which contains a hyphen, so **test 2
+**Test 1 is not redundant, and it was missing.** §3's splitter is a spelling heuristic, so it
+breaks the closed class open: `after → aft + er`, `this → thi + s`, `does → doe + s`, and the
+same for `always`, `during`, `having`, `unless`. None of those stems is a function word, so the
+stem tests passed all seven and they were vacated — at seed 0 `after` came out as `kitser` —
+while §0 claims the closed-class scaffolding survives character for character and §8 takes its
+whole measurement over the words that survive. Protection has to be applied to the word the
+reader keeps, not to the fragment the splitter happens to produce. Measured cost of the fix on
+the shipped corpus: `domainTypesEligible` 1944 → 1940, `corpusTypesEligible` 1922 → 1918,
+`stemsTotal` 1680 → 1676, `tokensVacated` at `p = 1` 8202 → 8125.
+
+Test 3 is why hyphenated and apostrophised words behave as they do, and both stacks must
+agree on it exactly:
+
+- `good-bye` — no suffix matches, stem is `good-bye`, which contains a hyphen, so **test 3
   fails and the word is never vacated**.
 - `don't` — `n't` does *not* split it, because §3's length rule requires
   `len(word) - len(suffix) >= 3` and `5 - 3 = 2`. The stem is therefore `don't`, which contains
-  an apostrophe and fails test 2. Never vacated. (An earlier draft of this document said the
+  an apostrophe and fails test 3. Never vacated. (An earlier draft of this document said the
   suffix splits it to `do`; that was wrong about the mechanism, though right about the outcome.)
 - `dog's` — `'s` splits it (`5 - 2 = 3`) to stem `dog`, which passes; output is `<nonce>'s`.
 
@@ -177,6 +192,22 @@ depends on a subtle proof is one refactor away from being false; this one does n
 
 `p` is compared as given. Callers must pass the identical double; the UI emits `p` at two
 decimal places and both stacks parse it as float64.
+
+**The seed is bounded: `|seed| ≤ 2⁵³ − 1 = 9007199254740991`, enforced in both stacks.** The
+care above is spent on the digest's *output*; the same care is owed to its *input*. The digest
+is taken over `f"{seed}:{stem}"`, and Python stringifies an arbitrary-precision integer exactly
+while JavaScript stringifies the nearest float64 — so at `2⁵³ + 1` Python hashes
+`"9007199254740993:little"` and JavaScript hashes `"9007199254740992:little"`, and the two
+stacks build entirely different maps, vacate different corpora, and report different statistics
+with nothing raised on either side. Measured: `2⁵³` agrees (it is representable); `2⁵³ + 1`,
+`2⁵³ + 3`, `−(2⁵³ + 1)` and `12345678901234567890` diverge in every field.
+
+`MAX_SEED = 2**53 - 1` is checked in `VacancyParams` **and** in `u` itself, since `u` is public
+and a caller can reach it directly. It **raises**; it does not clamp. A clamp would use a seed
+nobody asked for — the same defect one level up, and the browser's seed box already had it
+(typing `9007199254740993` silently became `9007199254740992`). `Number.isInteger` is not a
+sufficient guard on the JavaScript side: `9007199254740993` passes it, having already been
+rounded on the way in.
 
 **Nesting.** `u` is a function of `(seed, stem)` alone — not of `p`, not of traversal order, not
 of which other words exist. So `{stems vacated at p} ⊆ {stems vacated at p'}` for `p < p'`,
@@ -324,8 +355,23 @@ image is a domain type — both true of swap by construction. `T_p` injective fo
 The `V_p` are nested and grow one *stem family* at a time, so a bijection mapping every `V_p`
 onto itself maps each stem family onto itself: `u(stem(σ(s))) = u(stem(s))`, hence `σ = id`.
 **So no non-trivial swap is injective at intermediate `p`.** Measured, to make it concrete rather
-than merely proved: the frequency-rank swap below produces 191 / 246 / 190 colliding types at
-`p = 0.25 / 0.5 / 0.75` on the shipped corpus, and 0 at `p ∈ {0, 1}`.
+than merely proved, **at seed 0, under this counting definition**:
+
+> **lost image slots** `= |domain| − |{T_p(t) : t ∈ domain}|` — how many of the domain's 2 233
+> slots the type map at `p` fails to reach. It is what `lex-vacancy-lost-slots` measures live in
+> the panel, and it is what both engines' tests pin.
+
+The frequency-rank swap of §8.3 loses **349 / 484 / 364** slots at `p = 0.25 / 0.5 / 0.75` on
+the shipped corpus at seed 0 (**336 / 475 / 372** at seed 7), and **0** at `p ∈ {0, 1}`.
+
+*This sentence previously read "191 / 246 / 190 colliding types", with neither a seed nor a
+counting definition attached, and no test read it. It did not reproduce under any of the three
+natural readings at any of twelve seeds; the numbers above are measured by
+`test_swap_collisions_at_intermediate_p_are_measured_under_one_definition` (Python) and
+`§5.2a: swap's lost image slots, measured under one stated definition` (TypeScript), so a
+figure quoted here can no longer rot unobserved. A "measured" claim in this document must
+name its seed and its definition and be pinned by a test — the same rule §10 states for the
+source document's prosody figures.*
 
 What swap *can* satisfy, and does, is the condition at **full vacancy**, where the un-vacated set
 is exactly the ineligible types:
@@ -463,7 +509,7 @@ These were gaps, not choices. Both stacks do it this way or the golden fixture f
   **Condition B applies to the per-occurrence path too.** It was enforced for the map and not
   for this control, and the gap is observable: at seed 7, `p = 1`, the stem `tak` minted the
   nonce `tak`, so `Taking → Taking` — a token that silently failed to vacate, leaving
-  `corpusTypesVacated` at 1921 against the consistent path's 1922. §7.1 says this control has no
+  `corpusTypesVacated` one short of the consistent path's 1918. §7.1 says this control has no
   *stability* property, which is about a nonce being reused across occurrences; it does not
   license a word quietly surviving the transform. A control whose vacancy rate is not actually
   the stated rate is not a control. So a per-occurrence nonce must equal neither any domain type
@@ -679,34 +725,76 @@ when content words are vacated:
 
 Only (1) is "location". A caveat cannot separate them; a control can.
 
-**Swap.** Mint by drawing a *real English word* instead of a nonce form — same eligibility, same
-`u(stem) < p` decision, same suffix handling, and the injectivity §5.2a shows is available to it.
-The replacement is drawn deterministically from the domain's own open-class **types** by
-**frequency rank**: rank the eligible types by `(corpus count descending, type ascending)` — the
-tie rule `frequencyBudget` already uses — and let `r` be the stem's rank. Attempt `a` draws an
-offset `δ ∈ [-w, -1] ∪ [1, w]` from the byte stream of §5.3 under the tag `swap` (never `mint`, so
-the two streams can never alias), and proposes `pool[(r + δ) mod |pool|]`; `w` starts at 32 and
-doubles every 64 attempts up to `|pool|`, which is the same deterministic relaxation §5.5 uses and
-is needed because "anything already used" depletes a window. A candidate is accepted iff it is not
-already used, is not the stem itself, is not a type of the stem's own family, and — while
-`a < 1024` and `matchProsody` — carries the stem's stress pattern. So the swapped passage is
-equally nonsensical, but every form is a known word with ordinary tokenization.
+**Swap.** Replace each vacated word with a *real English word* instead of a nonce form — same
+eligibility, same `u(stem) < p` decision, and the injectivity §5.2a shows is available to it. The
+map is over **whole types, not stems**, and **nothing is re-assembled**: the image *is* a domain
+type, hence a real word, ordinarily tokenized.
 
-Two consequences of drawing from a *finite* pool, stated rather than hidden. The pool is 1 944
-types against 1 680 stems on the shipped corpus, so the tail of the canonical order draws from
-what is left and its frequency match degrades; and a source type that carries a suffix may receive
-an already-inflected replacement, giving a doubly-inflected surface. 66 % of eligible types are
-suffix-free and receive a bare real word.
+Construction. Partition the vacatable domain types into **suffix classes** — the suffix §3 splits
+off, so the ten classes on the shipped corpus are `'' s ed er ing 's es ly ies est`. Rank each
+class by `(corpus count descending, type ascending)`, the tie rule `frequencyBudget` already uses.
+Then permute each class onto itself with **no fixed point**, in ASCII-ascending order of the type,
+in three stages:
 
-The pool must be the *types*, not the stems: the stem set is exactly the set of keys, so drawing
-from it would consume the pool exactly and leave a collision with nowhere to move.
+1. **the draw** — attempt `a` reads an offset `δ ∈ [-w, -1] ∪ [1, w]` from the byte stream of §5.3
+   under the tag `swap` (never `mint`, so the two streams cannot alias) and proposes
+   `pool[(r + δ) mod m]`, where `r` is the type's own rank and `m` the class size; `w` starts at
+   32 and doubles every 64 attempts up to `m`. A candidate is accepted iff it is not already used,
+   is not the type itself, and — while `a < 1024` and `matchProsody` — carries the type's stress
+   pattern;
+2. **deterministic completion**, if 4 096 draws all landed on used entries: scan outward from the
+   type's own rank (`+1, −1, +2, −2, …`), taking the first free entry. This is reached in ordinary
+   runs — the last type of a class has one free image out of `m` — and it is exhaustive, so it
+   cannot fail while any image is free;
+3. **the endgame exchange**, if the only free image is the type itself (possible only for a
+   class's last type): exchange with the ASCII-first assigned type whose image is not this one.
+   Both entries stay non-identity and the images stay distinct.
+
+Stages 2 and 3 drop the prosody preference, which is stated rather than hidden: they run only
+where the class has nothing left, and a real word of the wrong stress is a far smaller departure
+than a form that is not a word. Measured at seed 0 on the shipped corpus: 1 918 of 1 940 types
+(98.9 %) get a stress-matched real word.
+
+Because each class is permuted onto itself, every image is a real domain word **and carries the
+same inflection as the word it replaces**, so the morphology a reader parses (`-ed`, `-ing`,
+`-'s`) is as intact in the swap arm as in the nonce arm. §3's spelling heuristic becomes harmless
+here: `November → Novemb + er` is never re-assembled, it only puts `November` in the `er` class.
+
+**Why not stems.** The first implementation drew a replacement for the STEM and re-attached the
+SOURCE word's suffix to it. The pool holds inflected types, so that produced forms which are not
+English words at all: `jump` + `ed` drawing `went` gave `wented`; `leap` + `ing` drawing `thy`
+gave `thying`; `huff` + `ed` drawing `sacks` gave `sacksed`; `aft` + `er` drawing `kits` gave
+`kitser`. Measured over the six shipped Architecture passages at `p = 1, seed = 0`: **195 of 776
+vacated words (25.1 %)** had a form absent from `/usr/share/dict/words`, and **165 (21.3 %)** were
+not words of their own domain. That falsifies the one property the control exists for, and it
+biases the decomposition below — `nll(nonce) − nll(swap)` is *the cost of unknown form*, and the
+swap arm was carrying unknown forms of its own. Measured after the fix, same configuration:
+**0** of 767 vacated words is outside its domain, and the swap variant's token count falls from
+2 858 to 2 766 against english's 2 754 (+3.8 % → +0.4 %), so it is now very nearly
+tokenization-neutral as well.
+
+**What "real word" means here, exactly.** The image is a type of the passage's own domain — the
+text's own vocabulary, plus the full Dolch list. That is a verifiable property with no external
+dictionary, and it is what both stacks' tests assert. It also means the guarantee is only as
+English as the source text: *Mother Goose* contains `intery`, `cutery`, `kyloe` and `lauk`, so the
+swap arm may too. What it can never contain is a form the source text did not.
+
+**A class of one is merged into the bare class.** A class with a single member cannot be permuted
+without a fixed point, and on a PASSAGE-sized domain that is the common case rather than a corner:
+five of the six shipped Architecture passages have such a class (`ing` in three of them). Those
+types join the bare class, which the full Dolch list keeps at ≥ 194 members. This is the one place
+the inflection match bends, and it bends in the only direction that keeps the property the control
+exists for — the replacement is still a real domain word, merely an uninflected one. Refusing
+instead would refuse five of the six shipped passages; assembling a form would put a non-word back
+into the arm whose whole claim is that every form is known. If even the bare class cannot be
+permuted, the engine **raises**.
 
 Because the replacements are real English words, they are **not** registered in `mintedStress` —
 their stress comes from the table or the rule like any other English word, so `stressFromMinted`
 is 0 on both sides of a swap and `stressFromTable`/`stressFromRule` say what they always say.
 
 `consistent = false` is **refused** under `swap`: that control needs a fresh type per occurrence,
-and the corpus has 1 680 open-class stems against 8 202 vacated tokens, so there is no supply. It
+and the corpus has 1 676 open-class stems against 8 125 vacated tokens, so there is no supply. It
 raises rather than quietly reusing words and reporting a rate it is not achieving.
 
 This makes the minting strategy a parameter:
@@ -725,8 +813,12 @@ UI must report it as *that difference*, never `nll(nonce) − nll(english)` alon
 not separable without a tokenizer-level control and the UI must say so rather than pretend the
 remainder is pure location.
 
-`mint: "swap"` is still **nested** in `p` (the `u(stem) < p` decision is untouched) and still
-**stable** in `(seed, stem)` (the map is built once, in canonical order, independently of `p`).
+`mint: "swap"` is still **nested** in `p` (the `u(stem) < p` decision is untouched, and it is
+still taken on the STEM, so swap and nonce vacate exactly the same tokens — the decomposition
+depends on that) and still **stable** (the map is built once, in canonical order, independently
+of `p`). `VacancyMap.mint` records which strategy built the map, because its KEYS differ: stems
+under `nonce`, types under `swap`. `VacancyMap.stems` carries the stem set either way, so §10's
+`stems*` counts mean one thing under both.
 Injectivity is where it and `nonce` part company, and §5.2a proves why they must: an earlier draft
 of this paragraph claimed swap "preserves every property of §7", and that claim is false — a map
 whose images are domain types and which does not depend on `p` cannot be injective at intermediate
@@ -745,7 +837,20 @@ tokenizations were identical (0 id mismatches across 48 texts), so the alignment
 sound and fp32 is the reference.
 
 **The result (fp32).** `nonce − english` ≈ **0.92–1.03 nats**, of which `nonce − swap` is only
-**0.06–0.21**. So roughly 80–90 % of the damage is *wrong content* and only 10–20 % is *unknown
+**0.06–0.21**.
+
+> **These are the PROTOTYPE's numbers, and the shipped swap is not the one they were measured
+> with** (2026-08-04). That study's swap re-attached the source suffix to a stem replacement, so
+> a quarter of its swap forms were not English words — the defect §8.3 now describes. Re-measured
+> on the shipped configuration (gpt2, float32, the six default passages, `p = 1, seed = 0`,
+> 856 paired preserved tokens): `wrong_content = 0.690 ± 0.054`, `unknown_form = 0.287 ± 0.045`,
+> `total = 0.978 ± 0.059`. Before the fix, the same run read `0.717 ± 0.054` / `0.273 ± 0.041` /
+> `0.989 ± 0.060` over 847 pairs. So the bias was in the direction the argument predicts —
+> `unknown_form` understated by **0.015 nats (5.4 % of itself)** and `wrong_content` overstated by
+> about the same — and it is a fraction of the sampling standard error rather than a
+> conclusion-changing effect. The ratio it feeds is unchanged in substance: ~70 % of the damage is
+> wrong content, ~30 % unknown form, on this model and this passage set. The 0.06–0.21 range above
+> is left as the historical record of a different measurement, not restated as the shipped one. So roughly 80–90 % of the damage is *wrong content* and only 10–20 % is *unknown
 form*. Taken with the tiny arm's exact zero, that is the 2×2:
 
 | | what a word's form is worth |
@@ -815,6 +920,8 @@ same model and passage, to the tolerance the existing arch parity tests use.
 | 9 | zip copy of `split_suffix` | audited copy's `EXCEPTIONS` | `brother → broth+er` is a known artifact the audited copy fixes |
 | 10 | "exact prosody" | measured prosody + `stressTableCoverage` | the source's own status table calls the stress table unverified |
 | 11 | `vacated` count reported as `len(self.map)` | count of stems actually vacated | the zip copy reports the wrong number; the audited copy fixes it |
+| 12 | eligibility tested on the stem alone | tested on the WHOLE word first, then the stem (§2.2) | the suffix splitter breaks seven function words open (`after → aft + er`), and the stem test alone vacated all seven |
+| 13 | seed unbounded | `\|seed\| ≤ 2⁵³ − 1`, enforced in both stacks (§4) | beyond it Python hashes the exact integer and JavaScript the rounded double, so the two build different maps and neither raises |
 
 Departures 4, 6, 7 and 8 are corrections to bugs that break properties the source *claims*.
 Departure 2 is **not** a bug fix — the source's expression was tested and is fine; the change
@@ -844,7 +951,7 @@ Both stacks compute these from the same definitions; the golden fixture (§11) p
 **Counting: the scope is in the name.** This section cost two round trips between the stacks,
 both times because "types" is ambiguous between the **corpus** (2 211 types of *Mother Goose*)
 and the **domain** (2 233 = corpus ∪ the full Dolch list). The two stacks agreed on
-`tokensVacated` to the token (8 202 at `p = 1`) and disagreed only on the type counts — a
+`tokensVacated` to the token (8 125 at `p = 1`) and disagreed only on the type counts — a
 reporting gap, never a disagreement about the transform.
 
 An unprefixed `types*` is therefore **forbidden**. Every count names its scope:
@@ -859,13 +966,20 @@ An unprefixed `types*` is therefore **forbidden**. Every count names its scope:
   **`corpusTypesVacated` is measured from the two texts, not from map membership.** A type
   counts as vacated iff at least one of its occurrences actually changed. Under
   `revealAfter > 0` the two are not the same number and the stacks split on it — one measured
-  the texts (665) and one asked whether the stem was in the vacated set (1337), over-reporting
+  the texts (663) and one asked whether the stem was in the vacated set (1334), over-reporting
   by 2×, because a type whose every occurrence falls inside the reveal window is still listed
   in the map. Under `revealAfter = 0` the readings coincide, which is why it took a control
   condition to expose. Measuring the texts is the definition that matches what this number
   claims to the reader.
-- `stemsTotal` — distinct eligible stems, i.e. the size of the map; `stemsVacated` — stems with
-  `u(stem) < p`
+- `stemsTotal` — distinct vacatable stems, i.e. `|VacancyMap.stems|`; `stemsVacated` — stems with
+  `u(stem) < p`. **Taken from `stems`, never from `|mapping|`**, which counts stems under `nonce`
+  and types under `swap` (§8.3) and would silently change meaning with the strategy.
+
+  **`domainTypesVacated` is MAP MEMBERSHIP, by one rule in both stacks**: the type is vacatable
+  (§2.2) and `u(stem) < p`. TypeScript additionally required the image to *differ* from the type;
+  the two readings coincide, since conditions B and B₁ both forbid an image equal to its own
+  source, so no case ever disagreed — which is exactly why it had to be pinned rather than left as
+  two definitions of one statistic. Both stacks now assert the coincidence directly.
 - `tokensTotal` / `tokensVacated` — over the **corpus** token stream
 
 `domainTypesEligible ≥ stemsTotal` always, since inflected forms share a stem, and
@@ -875,8 +989,11 @@ eligible stem vacates, because `u ∈ [0, 1)` by construction, so `stemsVacated 
 since the first of them is what exposed all of this.
 
 Measured on the shipped corpus (seed 0 / seed 7, `p = 0/.25/.5/.75/1`):
-`corpusTypesVacated` 0/461/954/1430/1922 and 0/434/975/1440/1922;
-`domainTypesVacated` 0/469/966/1448/1944 and 0/440/985/1455/1944.
+`corpusTypesVacated` 0/461/951/1427/1918 and 0/433/972/1436/1918;
+`domainTypesVacated` 0/469/963/1445/1940 and 0/439/982/1451/1940.
+Totals at `p = 1`: `domainTypesTotal` 2 233, `domainTypesEligible` 1 940, `corpusTypesTotal`
+2 211, `corpusTypesEligible` 1 918, `stemsTotal` 1 676, `tokensTotal` 16 000, `tokensVacated`
+8 125. (Before §2.2's whole-word test these read 1 944 / 1 922 / 1 680 / 8 202.)
 
 **Where each token's stress came from.** The first draft asked for a single
 `stressTableCoverage`, which is ambiguous the moment minted forms exist: read literally it counts
@@ -910,14 +1027,14 @@ versions, then cases.
 
 Pinned per case, on the **real committed corpus**:
 
-- `u(stem)` for a fixed list of 24 stems spanning eligible/ineligible and both budgets — the
+- `u(stem)` for a fixed list of 28 stems spanning eligible/ineligible and both budgets — the
   exact float64, which is the whole point of departure 2
 - the full `map` at `seed ∈ {0, 7}` — every stem→nonce pair
 - the first 400 characters of the vacated corpus at `p ∈ {0, 0.35, 0.7, 1}`, seed 0 — this is
   the source's own figure, reproduced on our corpus
 - `vacancyStats` for each of those, all fields
 - the nesting assertion: `vacated(0.35) ⊆ vacated(0.7) ⊆ vacated(1.0)` as explicit id sets
-- the stability assertion: the nonce for each of 24 stems is identical at every `p` where it
+- the stability assertion: the nonce for each of 28 stems is identical at every `p` where it
   is vacated
 - the token id stream digest under the mapped vocabulary at each `p` — all equal, which is
   §7.3 pinned as data rather than as an assertion in one language
