@@ -16,6 +16,7 @@ import type {
   TokenizeResult,
 } from "../../src/lib/dataClient";
 import { ApiError } from "../../src/lib/dataClient";
+import { GeoEngine, weightsToken } from "../../src/lib/geoEngine";
 import { createStaticClient, isStaticClient } from "../../src/lib/staticClient";
 import { dequantizeTile } from "../../src/lib/staticClient/arch";
 import type { ArchRuntime } from "../../src/lib/staticClient/runtimeTypes";
@@ -326,5 +327,62 @@ describe("geo delegation + job emulation", () => {
     await expect(c.pollJob("static-job-does-not-exist")).rejects.toMatchObject({
       type: "NotFoundError",
     });
+  });
+
+  /**
+   * Round 5, F1 + F2, through the REAL client the deployed site runs.
+   *
+   * `MINTED_SETS_CAP` LRU-drops persisted sets while the active `weights_token` is
+   * persisted under a different key, so a token routinely outlives its payload — and a
+   * payload written by an older build is refused on restore. Both used to end the same
+   * way: `geoTokenize` answered 200 with Alice in Wonderland's word list for the user's
+   * own model, and the payload was deleted from sessionStorage with nothing said.
+   */
+  it("refuses an unknown token instead of tokenizing it under the shipped word list", async () => {
+    const c = makeClient();
+    await expect(
+      c.geoTokenize("the cat sat", "deadbeefdeadbeefdeadbeefdeadbeef"),
+    ).rejects.toMatchObject({ type: "NotFoundError" });
+  });
+
+  it("keeps a pre-identity persisted payload and explains why it is not loaded", async () => {
+    const [checkpoint, vocab] = await Promise.all([
+      readStaticJson<Record<string, unknown>>("geo/checkpoint.json"),
+      readStaticJson<Record<string, unknown>>("geo/vocab.json"),
+    ]);
+    // A model that is NOT the shipped checkpoint (one weight moved), carrying its own
+    // word list, filed under the token the previous build gave it: `weightsToken(ws)`,
+    // computed over the weights alone.
+    const engine = GeoEngine.fromAssets(checkpoint, vocab);
+    const ws: Record<string, Float32Array> = {};
+    for (const [name, arr] of Object.entries(engine.canonical)) ws[name] = new Float32Array(arr);
+    ws.embedding[0] += 0.5;
+    const weights: Record<string, string> = {};
+    for (const [name, arr] of Object.entries(ws)) {
+      weights[name] = Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength).toString("base64");
+    }
+    const legacyToken = weightsToken(ws);
+    const payload = {
+      weights,
+      sources: {},
+      setSource: "scratch",
+      ownsVocab: true,
+      vocabWords: [...engine.tokenizer.words].reverse(),
+    };
+    const KEY = "llm-geometry:static-weight-sets:v2";
+    sessionStorage.setItem(KEY, JSON.stringify({ [legacyToken]: payload }));
+
+    const c = makeClient();
+    const err = await c.geoTokenize("alice", legacyToken).then(
+      () => null,
+      (e: unknown) => e as ApiError,
+    );
+    expect(err?.type).toBe("NotFoundError");
+    expect(err?.message).toMatch(/could not be restored/);
+    expect(err?.message).toMatch(/named by its weights alone/);
+    // ...and the model is still THERE. Deleting it on boot destroyed a trained model
+    // with no account of what happened to it or how to get it back.
+    expect(JSON.parse(sessionStorage.getItem(KEY) ?? "{}")).toHaveProperty(legacyToken);
+    sessionStorage.removeItem(KEY);
   });
 });

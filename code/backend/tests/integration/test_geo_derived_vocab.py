@@ -523,3 +523,150 @@ def test_non_ascii_vocabulary_words_are_escaped_identically() -> None:
     assert payload.isascii()
     assert "\\u00e9" in payload
     assert GeoTokenizer.from_json(payload).words[:2] == ["é", "—"]
+
+
+# -- round 5: three wrong-answer paths around the identity fix ---------------------------
+#
+# The version the identity change (0d23123) shipped under. Entries written by that build
+# are keyed by a hash of the WEIGHTS ALONE while carrying a word list of their own, so
+# this build cannot check one against the other — which is the whole reason it must not
+# read them. Written literally, not as `SCHEMA_VERSION - 1`: the point of these cases is
+# what happens to the caches that exist in the wild.
+_PRE_IDENTITY_SCHEMA_VERSION = 14
+
+
+def _write_pre_identity_entry(store: CacheStore, ws: dict, vocab_json: str) -> str:
+    """The entry the previous build wrote for a scratch model, byte-for-byte in shape.
+
+    Weights-only token, its own word list in `meta`, tagged with the schema version that
+    build used.
+    """
+    from llm_geometry.config import SCHEMA_VERSION
+    from llm_geometry.geo.weights import _artifact_key
+
+    token = weights_token(ws)  # the OLD identity: weights, no vocabulary
+    key = _artifact_key(token)
+    store.put(
+        key,
+        {"schema_version": SCHEMA_VERSION, "artifact_type": "geo-weights", "weights_token": token},
+        {
+            "weights_token": token,
+            "source": "scratch",
+            "names": sorted(ws),
+            "owns_vocab": True,
+            "vocab": vocab_json,
+        },
+        {name: np.asarray(a, np.float32) for name, a in ws.items()},
+    )
+    path = store.cache_dir / f"{key}.json"
+    sidecar = json.loads(path.read_text())
+    sidecar["schema_version"] = _PRE_IDENTITY_SCHEMA_VERSION
+    path.write_text(json.dumps(sidecar))
+    return token
+
+
+def test_an_unknown_token_is_unknown_to_tokenize_too(canonical_ready: None) -> None:
+    """ROUND 5 F1: `/tokenize` answered 200 under the SHIPPED word list for a token the
+    store does not have, while `/trace` answered 404 for the identical request.
+
+    That is the campaign's central corruption — a model's ids read under Alice in
+    Wonderland's words — reached through a store miss rather than through a hash
+    collision. Nothing threw, and the token strip's own verification probe compares
+    against exactly that vocabulary, so the tab reported the word list verified.
+    """
+    ghost = "deadbeefdeadbeefdeadbeefdeadbeef"
+    tok = client.get(f"/api/geo/tokenize?text=alice&weights_token={ghost}")
+    assert tok.status_code == 404, tok.text
+    assert tok.json()["error"]["type"] == "NotFoundError"
+    tr = client.get(f"/api/geo/trace?prompt=alice&weights_token={ghost}")
+    assert tr.status_code == 404
+    # The defect was the DISAGREEMENT: one route said the model exists, the other said it
+    # does not, and the one that said yes answered with another model's words.
+    assert tok.json()["error"]["type"] == tr.json()["error"]["type"]
+
+
+def test_tokenizer_for_refuses_an_evicted_model_instead_of_relabelling_it(
+    scratch_model: dict, tmp_path
+) -> None:
+    """The same hole below the routes: an LRU eviction is not "this model reads under the
+    shipped vocabulary", and answering as though it were relabels every token."""
+    from llm_geometry.geo.weights import _artifact_key
+
+    source: CacheStore = scratch_model["store"]
+    origin = scratch_model["result"]["weights_token"]
+    ws = load_weight_set(origin, store=source)
+    vocab_json = tokenizer_for(origin, store=source).to_json()
+
+    # A store of this test's own, so evicting from it cannot disturb the shared fixture.
+    store = CacheStore(tmp_path / "evictable")
+    token = save_weight_set(
+        ws, source="scratch", store=store, vocab_json=vocab_json, owns_vocab=True
+    )
+    own_words = tokenizer_for(token, store=store).words
+    assert own_words != get_tokenizer().words
+
+    key = _artifact_key(token)
+    (store.cache_dir / f"{key}.json").unlink()
+    (store.cache_dir / f"{key}.npz").unlink()
+    with pytest.raises(Exception) as exc:  # NotFoundError
+        tokenizer_for(token, store=store)
+    assert "unknown" in str(exc.value)
+    assert type(exc.value).__name__ == "NotFoundError"
+
+
+def test_a_cache_from_before_the_identity_change_says_what_happened(
+    scratch_model: dict, tmp_path
+) -> None:
+    """ROUND 5 F2: the identity change moved a persisted format without bumping
+    SCHEMA_VERSION, so pre-change entries stayed readable — and being readable is what
+    made the user's own model unsaveable ("does not match a re-hash of its own weights and
+    vocabulary … Retrain or reload it", about a model that was never corrupt).
+
+    They are cache-missed now, and the miss is EXPLAINED: "evicted, re-submit the edit"
+    describes neither what happened nor what to do.
+    """
+    ws = load_weight_set(scratch_model["result"]["weights_token"], store=scratch_model["store"])
+    vocab_json = tokenizer_for(
+        scratch_model["result"]["weights_token"], store=scratch_model["store"]
+    ).to_json()
+    store = CacheStore(tmp_path / "old-cache")
+    token = _write_pre_identity_entry(store, ws, vocab_json)
+
+    with pytest.raises(Exception) as exc:
+        load_weight_set(token, store=store)
+    message = str(exc.value)
+    assert type(exc.value).__name__ == "NotFoundError"
+    assert f"v{_PRE_IDENTITY_SCHEMA_VERSION}" in message
+    assert "earlier build" in message
+    # It must not accuse the user's model of being corrupt, and it must say that the file
+    # they saved is unaffected — the model is recoverable, and the message is the only
+    # place that can say so.
+    assert "SAVED MODEL FILE" in message.upper()
+    assert "corrupt" not in message
+
+
+def test_a_cache_from_before_the_identity_change_does_not_wedge_the_lab(tmp_path) -> None:
+    """ROUND 5 F2, the other half: a pre-change entry sitting at the canonical
+    checkpoint's key made `train_canonical` raise on startup —
+
+        InvalidParamError: weights_token '…' is already stored with a different vocabulary
+        claim (stored owns_vocab=True, writing owns_vocab=False)
+
+    — so the Geometry Lab could not open at all until the cache was deleted by hand.
+    """
+    rng = np.random.default_rng(11)
+    ws = {
+        name: rng.standard_normal(shape).astype(np.float32)
+        for name, shape in __import__(
+            "llm_geometry.geo.weights", fromlist=["WEIGHT_SHAPES"]
+        ).WEIGHT_SHAPES.items()
+    }
+    other_words = [f"zz{i:04d}" for i in range(VOCAB_WORDS)]
+    store = CacheStore(tmp_path / "wedge-cache")
+    token = _write_pre_identity_entry(store, ws, GeoTokenizer(other_words).to_json())
+
+    # The same weights arriving as the canonical-vocabulary model this build knows: the
+    # identical key, the opposite ownership claim.
+    written = save_weight_set(ws, source="learned", store=store)
+    assert written == token
+    assert load_weight_set(written, store=store).keys() == ws.keys()

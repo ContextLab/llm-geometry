@@ -491,11 +491,15 @@ describe("minted-set persistence hooks (static reload survival) [fixtures]", () 
     expect(reloaded.exportBundle(token)).toEqual(after);
 
     // A payload that LOST the word list is dropped, not restored half-right: the token
-    // simply is not there afterwards, so the caller deletes it and the evicted-token
-    // self-heal resets visibly instead of quietly relabelling the model.
+    // is not usable afterwards, so the view resets visibly instead of quietly
+    // relabelling the model. The refusal is asserted through the SENTENCE it gives —
+    // `/unknown/` (the evicted-token wording) passed while the model was being erased
+    // with no account of why, which is the thing being fixed, so this now pins both that
+    // it refuses and what it tells the user.
     const { vocabWords: _dropped, ...withoutVocab } = saved;
     const stale = GeoEngine.fromAssets(fixtureSrc.checkpoint, fixtureSrc.vocab);
     expect(stale.importWeightSet(token, withoutVocab)).toBe(false);
-    expect(() => stale.exportBundle(token)).toThrow(/unknown/);
+    expect(() => stale.exportBundle(token)).toThrow(/could not be restored/);
+    expect(() => stale.exportBundle(token)).toThrow(/carries no word list/);
   });
 });

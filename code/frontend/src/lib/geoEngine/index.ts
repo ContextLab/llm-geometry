@@ -83,6 +83,28 @@ export interface ExportedWeightSet {
 }
 
 
+/**
+ * Why a payload written before `ownsVocab` existed cannot be restored. Undecidable, not
+ * merely old: a `finetuned` payload derived from a scratch model and one derived from the
+ * shipped checkpoint are byte-identical in that format.
+ */
+const LEGACY_OWNERSHIP_REASON =
+  "it was written by an earlier version of this page, which did not record whether a " +
+  "model's ids mean its own words — and in that format a fine-tune of your own model and " +
+  "a fine-tune of the shipped one are indistinguishable, so restoring it could label every " +
+  "token with the wrong word";
+
+/**
+ * Why a payload written under the weights-only identity cannot be restored. Detected, not
+ * assumed: such a payload hashes to `weightsToken(ws)` — the token this build would give
+ * the same weights with NO word list — while declaring a word list of its own.
+ */
+const LEGACY_IDENTITY_REASON =
+  "it was written by an earlier version of this page, when a model was named by its " +
+  "weights alone; a model is now named by its weights AND the words its ids mean, and the " +
+  "older format cannot show which word list is really its own — that ambiguity is exactly " +
+  "how one model came to be saved under another model's words";
+
 function b64FromF32(arr: Float32Array): string {
   const bytes = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
   let s = "";
@@ -186,6 +208,19 @@ export class GeoEngine {
    * silently substituting the shipped word list.
    */
   private readonly ownsVocab = new Set<string>();
+  /**
+   * token -> why a persisted payload for it was REFUSED, so the refusal can be explained
+   * later instead of the model just being absent.
+   *
+   * `importWeightSet` returning false is how a stale or corrupted payload is dropped, and
+   * the static client then deletes it from sessionStorage. For a payload written by an
+   * older build that is exactly right except that the identity rule moved beneath it,
+   * "deleted, no message" destroys a model the user trained and tells them nothing; the
+   * next call would have said "unknown (never minted here, or evicted)", which is not what
+   * happened either. The reason is kept here and raised by `resolveWeightSet`, which is
+   * where the app reaches for the model.
+   */
+  private readonly refusedSets = new Map<string, string>();
   private readonly finetuneCache = new Map<string, GeoFinetuneResult>();
 
   private constructor(
@@ -281,10 +316,26 @@ export class GeoEngine {
     return this.vocabs.get(base)?.words ?? null;
   }
 
-  /** The vocabulary that gives `token`'s ids meaning (mirrors geo/tokenizer.tokenizer_for). */
+  /**
+   * The vocabulary that gives `token`'s ids meaning (mirrors geo/tokenizer.tokenizer_for).
+   *
+   * A token this engine does not hold THROWS; it does not fall back to the shipped word
+   * list. The fallback made `tokenize()` answer with plausible tokens for a model that is
+   * gone — the static build LRU-drops persisted sets (`MINTED_SETS_CAP`) while the active
+   * token is persisted separately, so a token routinely outlives its payload — while
+   * `trace()` on the identical token threw `NotFoundError` from `resolveWeightSet`. The
+   * token strip then showed Alice in Wonderland's words for the user's own model, and the
+   * canonical-vocabulary probe agreed with them, so the tab reported the vocabulary
+   * verified. Same rule, same reason, as the backend's `tokenizer_for`.
+   */
   tokenizerFor(token?: string | null): GeoTokenizer {
     if (!token || token === "learned") return this.tokenizer;
-    return this.vocabs.get(token) ?? this.tokenizer;
+    const vocab = this.vocabs.get(token);
+    if (vocab !== undefined) return vocab;
+    // Not "no own vocabulary" unless the set is actually here: resolveWeightSet throws
+    // the one refusal (including the pre-identity-format explanation) if it is not.
+    this.resolveWeightSet(token);
+    return this.tokenizer;
   }
 
   // --- GET /api/geo/tokenize -------------------------------------------------------
@@ -400,19 +451,20 @@ export class GeoEngine {
   }
 
   importWeightSet(token: string, payload: ExportedWeightSet): boolean {
-    if (this.weightSets.has(token)) return true;
     const ws: WeightSet = {};
     try {
       for (const [name, b64] of Object.entries(payload.weights)) ws[name] = f32FromB64(b64);
     } catch {
-      return false;
+      return this.refuseSet(token, "its weights could not be decoded");
     }
     const words = payload.vocabWords;
     if (words !== undefined && (!Array.isArray(words) || words.some((w) => typeof w !== "string"))) {
-      return false;
+      return this.refuseSet(token, "its stored word list is not a list of words");
     }
     const declaredOwns = payload.ownsVocab;
-    if (declaredOwns !== undefined && typeof declaredOwns !== "boolean") return false;
+    if (declaredOwns !== undefined && typeof declaredOwns !== "boolean") {
+      return this.refuseSet(token, "its `ownsVocab` flag is not a boolean");
+    }
     // A payload that carries NEITHER an `ownsVocab` flag NOR a word list is the shape
     // this engine wrote before ownership was recorded, and it is genuinely undecidable:
     // a `finetuned` payload derived from a scratch model and one derived from the shipped
@@ -422,14 +474,33 @@ export class GeoEngine {
     // rename: a key rename hides the payloads this build happens to know about, and does
     // nothing about one copied between profiles, restored from a backup, or handed to
     // this method by any other caller.
-    if (declaredOwns === undefined && words === undefined) return false;
+    if (declaredOwns === undefined && words === undefined) {
+      return this.refuseSet(token, LEGACY_OWNERSHIP_REASON);
+    }
     const ownsVocab = declaredOwns ?? true;
     // Claims and payload must agree: "owns nothing" with a word list attached, or "owns
     // a word list" with none, is a payload we cannot describe either way.
-    if (ownsVocab !== (words !== undefined)) return false;
+    if (ownsVocab !== (words !== undefined)) {
+      return this.refuseSet(
+        token,
+        `it claims ownsVocab=${ownsVocab} but ${words === undefined ? "carries no word list" : "carries one"}`,
+      );
+    }
     // And the claim is CHECKED, not believed: the token covers the word list, so a
     // payload cannot pair one model's weights with another's words and still hash right.
-    if (this.tokenFor(ws, words ?? null) !== token) return false;
+    if (this.tokenFor(ws, words ?? null) !== token) {
+      // One of those mismatches is not tampering: a payload written when the token
+      // covered the WEIGHTS ALONE hashes to `weightsToken(ws, null)`, and that is
+      // decidable, so it gets its own explanation rather than "corrupt".
+      return this.refuseSet(
+        token,
+        words !== undefined && weightsToken(ws) === token
+          ? LEGACY_IDENTITY_REASON
+          : "its contents do not hash to the token it is stored under",
+      );
+    }
+    this.refusedSets.delete(token); // a good payload for it arrived after all
+    if (this.weightSets.has(token)) return true;
     this.weightSets.set(token, ws);
     this.sourceMaps.set(token, { ...payload.sources });
     this.setSources.set(token, payload.setSource);
@@ -743,7 +814,9 @@ export class GeoEngine {
           "every token with the wrong word, so it is refused.",
       );
     }
-    const tokenizer = GeoTokenizer.fromVocabJson(b.vocab);
+    // The STRICT parser: a file carries one vocabulary format, and the permissive asset
+    // loader accepted shapes the backend refused with a 500 (see fromModelVocabJson).
+    const tokenizer = GeoTokenizer.fromModelVocabJson(b.vocab);
 
     // Integrity is MANDATORY, not opt-in: treating a missing token as "nothing to
     // check" let a file with tampered weights load just by deleting the field.
@@ -791,12 +864,28 @@ export class GeoEngine {
     if (tokenOrLearned === "learned") return this.canonical;
     const ws = this.weightSets.get(tokenOrLearned);
     if (ws === undefined) {
+      // A model that WAS here and was refused on restore is not the same event as an
+      // evicted one, and the remedies differ. Say which happened (`refusedSets`).
+      const refused = this.refusedSets.get(tokenOrLearned);
+      if (refused !== undefined) {
+        throw notFound(
+          `the model '${tokenOrLearned}' was saved in this tab but could not be restored: ` +
+            `${refused}. It is left unloaded rather than loaded under words that may not be ` +
+            "its own. A model file you saved still opens normally; otherwise train it again.",
+        );
+      }
       throw notFound(
         `weights_token '${tokenOrLearned}' is unknown (never minted here, or evicted); ` +
           "re-submit the edit to mint it again",
       );
     }
     return ws;
+  }
+
+  /** Record WHY a persisted payload was refused, and report the refusal. */
+  private refuseSet(token: string, reason: string): false {
+    this.refusedSets.set(token, reason);
+    return false;
   }
 
   private modelFor(tokenOrLearned: string): GeoModel {

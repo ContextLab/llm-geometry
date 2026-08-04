@@ -16,7 +16,17 @@ from pathlib import Path
 
 # Bump whenever any cached artifact's on-disk format changes. Reads of artifacts
 # tagged with a different schema version are treated as cache misses (FR-007).
-SCHEMA_VERSION = 14
+#
+# v15: a Geometry Lab model's identity became (weights + the words its ids mean), so
+# `geo-weights-<token>` entries written by v14 are keyed by a hash that no longer names
+# them. They are not merely stale, they are unverifiable: the whole reason the identity
+# changed is that a v14 entry's word list could belong to a DIFFERENT model (the store
+# deduplicated on a weights-only hash and kept the first word list it saw). Leaving the
+# version at 14 left those entries readable, which made the user's own model unsaveable
+# (`export_bundle` re-hashed it and accused the file of being corrupt) and could wedge
+# `train_canonical` on a conflicting-claim refusal. `geo.weights` turns the resulting
+# miss into an explanation rather than "evicted" — see `_missing_entry_error`.
+SCHEMA_VERSION = 15
 
 # Repo root resolved from this file:
 # .../code/backend/src/llm_geometry/config.py -> parents[4] == repo root

@@ -54,6 +54,25 @@ class CacheStore:
     def has(self, key: str) -> bool:
         return self.get(key) is not None
 
+    def stale_schema_version(self, key: str) -> int | None:
+        """The schema version of an artifact this build refuses to read, or ``None``.
+
+        ``get`` renders a version mismatch as a plain miss (FR-007), which is right for a
+        DERIVED artifact — recompute it and nobody needs to know. It is wrong as an
+        *explanation* when the key names something the user made: a `weights_token` is a
+        model they trained, and "unknown (never minted here, or evicted)" describes
+        neither what happened nor what to do about it. Callers that own such a key use
+        this to say "the format moved" instead of guessing at eviction.
+        """
+        try:
+            sidecar = json.loads(self._json_path(key).read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+        version = sidecar.get("schema_version")
+        if isinstance(version, int) and version != SCHEMA_VERSION:
+            return version
+        return None
+
     def get(self, key: str) -> dict[str, Any] | None:
         """Return ``{"meta", "arrays", "spec"}`` or ``None`` on miss/invalid."""
         json_path, npz_path = self._json_path(key), self._npz_path(key)

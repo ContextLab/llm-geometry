@@ -252,6 +252,34 @@ export function validateValues(matrix: EditableMatrix, values: unknown): Float32
  * embedding being re-unit-normalized after EVERY embedding edit — presets included,
  * which is why an already-normalized preset row is normalized twice, like numpy).
  */
+/** Largest seed either stack accepts — the last integer JS reads exactly (geo MAX_SEED). */
+export const MAX_SEED = Number.MAX_SAFE_INTEGER;
+
+/**
+ * An edit's seed as an integer in `0..MAX_SEED`, or a typed refusal — mirrors the
+ * backend's `geo.weights._edit_seed`.
+ *
+ * `Math.trunc(Number(edit.seed ?? 0)) || 0` rewrote every value it could not use: `1.5`
+ * became 1 and `"7"` became 7 (both selecting a DIFFERENT preset matrix than the request
+ * named), while `Infinity`, `NaN` and `-1` all became 0 — the shipped fixture seed, so the
+ * refusal the static build owes an unavailable seed never happened either.
+ */
+function editSeed(value: unknown, n: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw invalidWeightEdit(`edit ${n}: seed must be an integer, got ${JSON.stringify(value) ?? String(value)}`);
+  }
+  if (!Number.isInteger(value)) {
+    throw invalidWeightEdit(
+      `edit ${n}: seed must be an integer, got ${value} — it is not rounded or truncated, ` +
+        "because a seed that is not the seed you asked for silently selects a different matrix",
+    );
+  }
+  if (value < 0 || value > MAX_SEED) {
+    throw invalidWeightEdit(`edit ${n}: seed must be in 0..${MAX_SEED}, got ${value}`);
+  }
+  return value;
+}
+
 export function buildWeightSet(
   base: WeightSet,
   edits: WeightEditInput[],
@@ -271,10 +299,10 @@ export function buildWeightSet(
     if ((preset === null) === (values === null)) {
       throw invalidWeightEdit(`edit ${n} (${matrix}): exactly one of preset/values must be given`);
     }
-    const seed = Math.trunc(Number(edit.seed ?? 0)) || 0;
+    const seed = editSeed(edit.seed ?? 0, n);
     const layer = edit.layer ?? null;
     if (matrix !== "embedding") {
-      if (layer === null || !Number.isInteger(layer) || layer < 0 || layer >= N_LAYERS) {
+      if (layer === null || typeof layer !== "number" || !Number.isInteger(layer) || layer < 0 || layer >= N_LAYERS) {
         throw invalidWeightEdit(
           `edit ${n} (${matrix}): layer must be an int in 0..${N_LAYERS - 1}, got ${JSON.stringify(edit.layer)}`,
         );

@@ -35,7 +35,7 @@ from scipy.ndimage import gaussian_filter
 from ..cache.store import CacheStore
 from ..config import SCHEMA_VERSION
 from ..errors import InvalidParamError, InvalidWeightEditError, NotFoundError
-from .config import CONTEXT_WINDOW, D_MODEL, MLP_HIDDEN, N_LAYERS, VOCAB_SIZE
+from .config import CONTEXT_WINDOW, D_MODEL, MAX_SEED, MLP_HIDDEN, N_LAYERS, VOCAB_SIZE
 
 PRESETS = ("identity", "toeplitz_fuzzy", "random", "random_autocorr", "zero", "learned")
 EDITABLE_MATRICES = ("W_Q", "W_K", "W_V", "W_O", "embedding")
@@ -143,6 +143,34 @@ def validate_values(matrix: str, values: object) -> np.ndarray:
     return arr
 
 
+def _edit_seed(value: object, n: int) -> int:
+    """An edit's seed as an integer in ``0..MAX_SEED``, or a typed refusal.
+
+    ``int(value or 0)`` accepted everything JSON can express and quietly rewrote it:
+    ``1.5`` selected the seed-1 preset, ``"7"`` and ``True`` selected other people's
+    matrices, ``-1`` reached ``np.random.default_rng`` and came back as an untyped 500,
+    and ``Infinity`` raised ``OverflowError`` — also a 500. A seed picks WHICH matrix you
+    get, so a coerced one is a different matrix than the one requested, reported as though
+    it were the one requested. Same rule as ``api.routes_geo._as_int``.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise InvalidWeightEditError(f"edit {n}: seed must be an integer, got {value!r}")
+    if isinstance(value, float):
+        if not np.isfinite(value):
+            raise InvalidWeightEditError(f"edit {n}: seed must be a finite integer, got {value!r}")
+        if not float(value).is_integer():
+            raise InvalidWeightEditError(
+                f"edit {n}: seed must be an integer, got {value!r} — it is not rounded or "
+                "truncated, because a seed that is not the seed you asked for silently "
+                "selects a different matrix"
+            )
+        value = int(value)
+    seed = int(value)
+    if not 0 <= seed <= MAX_SEED:
+        raise InvalidWeightEditError(f"edit {n}: seed must be in 0..{MAX_SEED}, got {seed}")
+    return seed
+
+
 def build_weight_set(
     base: dict[str, np.ndarray], edits: list[dict]
 ) -> tuple[dict[str, np.ndarray], list[dict]]:
@@ -167,10 +195,14 @@ def build_weight_set(
             raise InvalidWeightEditError(
                 f"edit {n} ({matrix}): exactly one of preset/values must be given"
             )
-        seed = int(edit.get("seed", 0) or 0)
+        seed = _edit_seed(edit.get("seed", 0), n)
         layer = edit.get("layer")
         if matrix != "embedding":
-            if layer is None or not (isinstance(layer, int) and 0 <= layer < N_LAYERS):
+            if (
+                layer is None
+                or isinstance(layer, bool)
+                or not (isinstance(layer, int) and 0 <= layer < N_LAYERS)
+            ):
                 raise InvalidWeightEditError(
                     f"edit {n} ({matrix}): layer must be an int in 0..{N_LAYERS - 1}, "
                     f"got {layer!r}"
@@ -343,23 +375,63 @@ def save_weight_set(
     return token
 
 
-def load_weight_set_vocab(token: str, store: CacheStore | None = None) -> str | None:
-    """The vocabulary JSON stored alongside ``token``, or None for the canonical one."""
+def _missing_entry_error(token: str, store: CacheStore) -> NotFoundError:
+    """The refusal for a token this store cannot serve, saying WHICH kind of gone it is.
+
+    A schema bump orphans every ``geo-weights`` entry an older build wrote, and the store
+    reports that as a plain miss. Reporting it to the user as "evicted" would be a guess,
+    and the remedy differs: an evicted token comes back by re-submitting the edit, while a
+    v14 entry never comes back at all, because the identity it was keyed under no longer
+    names it (see ``config.SCHEMA_VERSION``).
+    """
+    stale = store.stale_schema_version(_artifact_key(token))
+    if stale is not None:
+        return NotFoundError(
+            f"weights_token {token!r} was stored by an earlier build (cache schema "
+            f"v{stale}; this build reads v{SCHEMA_VERSION}) and is not loaded. A model's "
+            "identity now covers the words its ids mean as well as its weights, and a "
+            f"v{stale} entry's word list cannot be checked against the token naming it — "
+            "it may belong to a different model, which is exactly how a model came to be "
+            "labelled with another model's words. Nothing was deleted, and a SAVED MODEL "
+            "FILE still loads: open it again, or train the model again."
+        )
+    return NotFoundError(
+        f"weights_token {token!r} is unknown (never minted here, or evicted); "
+        "re-submit the edit to mint it again"
+    )
+
+
+def weight_set_entry(token: str, store: CacheStore | None = None) -> dict[str, Any]:
+    """The stored artifact for ``token``, or raise — the ONE place a token is resolved.
+
+    Every read of a persisted model goes through here so a store miss cannot mean
+    different things on different routes. It used to: ``load_weight_set`` raised, while
+    the vocabulary lookup answered ``None`` — indistinguishable from "this model reads
+    under the shipped word list" — so ``GET /api/geo/tokenize`` labelled an unknown
+    model's ids with Alice in Wonderland's words and returned 200 while
+    ``GET /api/geo/trace`` 404'd on the same token.
+    """
     store = store or CacheStore()
     entry = store.get(_artifact_key(token))
     if entry is None:
-        return None
+        raise _missing_entry_error(token, store)
+    return entry
+
+
+def load_weight_set_vocab(token: str, store: CacheStore | None = None) -> str | None:
+    """The vocabulary JSON stored alongside ``token``, or None for the canonical one.
+
+    ``None`` means exactly one thing — "this model's ids mean the shipped words". A token
+    that is not stored raises (:func:`weight_set_entry`) rather than sharing that answer.
+    """
+    entry = weight_set_entry(token, store=store)
     vocab = entry["meta"].get("vocab")
     return vocab if isinstance(vocab, str) else None
 
 
 def weight_set_owns_vocab(token: str, store: CacheStore | None = None) -> bool:
     """True iff ``token``'s ids mean its own words rather than the canonical ones."""
-    store = store or CacheStore()
-    entry = store.get(_artifact_key(token))
-    if entry is None:
-        return False
-    meta = entry["meta"]
+    meta = weight_set_entry(token, store=store)["meta"]
     # Entries written before `owns_vocab` existed recorded ownership only implicitly,
     # by carrying a vocabulary; read them the same way rather than guessing.
     return bool(meta.get("owns_vocab", isinstance(meta.get("vocab"), str)))
@@ -431,11 +503,5 @@ def validate_weight_set(ws: dict[str, np.ndarray], context: str = "weight set") 
 
 def load_weight_set(token: str, store: CacheStore | None = None) -> dict[str, np.ndarray]:
     """Load a persisted weight set by token; raise NotFoundError if absent/evicted."""
-    store = store or CacheStore()
-    entry = store.get(_artifact_key(token))
-    if entry is None:
-        raise NotFoundError(
-            f"weights_token {token!r} is unknown (never minted here, or evicted); "
-            "re-submit the edit to mint it again"
-        )
+    entry = weight_set_entry(token, store=store)
     return {name: np.asarray(arr, dtype=np.float32) for name, arr in entry["arrays"].items()}

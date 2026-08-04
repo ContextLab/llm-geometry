@@ -60,9 +60,13 @@ import type { LocalJobRegistry, ProgressFn } from "./jobs";
 // WITHOUT the word list it needs — restoring one would revive exactly the corruption this
 // fix removes, and nothing in the payload can distinguish it from a legitimate fine-tune
 // of the shipped model. `GeoEngine.importWeightSet` REFUSES such a payload outright and
-// `restorePersistedSets` drops it; the version suffix on the key is belt-and-braces, not
-// the defence. (It was the defence once, and a key rename is not one: it hides only the
-// payloads this build wrote, not one copied between profiles or restored from a backup.)
+// records why; the version suffix on the key is belt-and-braces, not the defence. (It was
+// the defence once, and a key rename is not one: it hides only the payloads this build
+// wrote, not one copied between profiles or restored from a backup — and hiding a payload
+// is indistinguishable, to its owner, from deleting the model in it.) The suffix stays at
+// `:v2` deliberately: every payload this build refuses is DETECTED, by hash, so bumping
+// the key would only make those models invisible, and an invisible model cannot be
+// explained to the person who trained it.
 const MINTED_SETS_KEY = "llm-geometry:static-weight-sets:v2";
 const MINTED_SETS_CAP = 8; // LRU; each entry is ~50 KB of JSON, ~60 KB with a vocabulary
 
@@ -89,21 +93,21 @@ function persistMintedSet(engine: GeoEngine, token: string): void {
   }
 }
 
+/**
+ * Re-import every persisted set, and KEEP the ones the engine refuses.
+ *
+ * Deleting them was the wrong half of the round-3 fix. A payload written by an older
+ * build — before a model was named by its word list as well as its weights — is refused
+ * for a good reason, but it is the user's trained model: erasing it on boot destroyed it
+ * with no message, and the next request then reported "unknown (never minted here, or
+ * evicted)", which is not what happened. `GeoEngine.importWeightSet` records WHY it
+ * refused each one and `resolveWeightSet` raises that reason, so leaving the payload in
+ * place keeps the explanation reproducible across reloads instead of only on the first
+ * one. They are bounded: `MINTED_SETS_CAP` still LRU-drops the oldest entries on write.
+ */
 function restorePersistedSets(engine: GeoEngine): void {
-  const all = loadPersistedSets();
-  let changed = false;
-  for (const [token, payload] of Object.entries(all)) {
-    if (!engine.importWeightSet(token, payload)) {
-      delete all[token]; // hash mismatch / corrupted — drop it
-      changed = true;
-    }
-  }
-  if (changed) {
-    try {
-      sessionStorage.setItem(MINTED_SETS_KEY, JSON.stringify(all));
-    } catch {
-      /* best-effort */
-    }
+  for (const [token, payload] of Object.entries(loadPersistedSets())) {
+    engine.importWeightSet(token, payload);
   }
 }
 

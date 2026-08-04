@@ -74,12 +74,52 @@ export function canonicalVocabJson(words: readonly string[]): string {
   // Python does; it leaves non-ASCII literal, which Python does not. Escape per
   // UTF-16 CODE UNIT (not code point), so an astral character becomes its two
   // surrogate escapes — which is exactly what `ensure_ascii` emits for one.
+  //
+  // The boundary is 0x7E, not 0x7F. Python's `ensure_ascii` is not "escape non-ASCII": its
+  // encoder keeps `\x20`–`\x7e` and escapes everything else, DEL (U+007F) included. This
+  // read `code < 0x80` and left DEL raw, so a word list containing it hashed differently in
+  // the two stacks — and since a model's identity now covers its vocabulary, that split the
+  // model id too: a file saved by the full stack was refused by the static build as "this
+  // model file is corrupt", and vice versa. The geo token regex `[^\sa-z0-9]` admits any
+  // single non-space symbol, so DEL really can reach the word list.
   let out = "";
   for (let i = 0; i < raw.length; i++) {
     const code = raw.charCodeAt(i);
-    out += code < 0x80 ? raw[i] : "\\u" + code.toString(16).padStart(4, "0");
+    out += code < 0x7f ? raw[i] : "\\u" + code.toString(16).padStart(4, "0");
   }
   return out;
+}
+
+/** The one vocabulary format a model FILE may carry (`GeoTokenizer.to_json()`). */
+export const VOCAB_FORMAT = "geo-tokenizer-v1";
+
+/** Special-token ids a vocabulary may declare, under either spelling. */
+const EXPECTED_SPECIALS: Record<string, number> = {
+  [UNK_TOKEN]: UNK_ID,
+  [EOS_TOKEN]: EOS_ID,
+  [PAD_TOKEN]: PAD_ID,
+  unk: UNK_ID,
+  eos: EOS_ID,
+  pad: PAD_ID,
+};
+
+/**
+ * Refuse a vocabulary whose declared special ids are not the ones we use. Mirrors
+ * `geo/tokenizer._validate_specials`: Python ignored the block entirely, so a file
+ * declaring `"<unk>": 5` loaded there with 200 and was refused here — the two stacks
+ * disagreed about whether a file was valid at all.
+ */
+function validateSpecials(specials: unknown, where: string): void {
+  if (specials === undefined || specials === null) return;
+  if (typeof specials !== "object" || Array.isArray(specials)) {
+    throw invalidParam(`${where}: \`specials\` must be an object, got ${JSON.stringify(specials)}`);
+  }
+  const sp = specials as Record<string, unknown>;
+  for (const [token, id] of Object.entries(EXPECTED_SPECIALS)) {
+    if (sp[token] !== undefined && sp[token] !== id) {
+      throw invalidParam(`${where}: special ${token} has id ${String(sp[token])}, expected ${id}`);
+    }
+  }
 }
 
 /** Deterministically split `text` into lowercase word/punctuation tokens. */
@@ -142,28 +182,14 @@ export class GeoTokenizer {
     const obj = data as Record<string, unknown>;
     if (
       "format" in obj &&
-      obj.format !== "geo-tokenizer-v1" &&
+      obj.format !== VOCAB_FORMAT &&
       obj.format !== "geo-vocab-v1"
     ) {
       throw invalidParam(`vocab.json: unknown tokenizer format ${JSON.stringify(obj.format)}`);
     }
-    if ("specials" in obj && obj.specials !== null && typeof obj.specials === "object") {
-      const sp = obj.specials as Record<string, unknown>;
-      // Both spellings of the special map are validated when present.
-      const expected: Record<string, number> = {
-        [UNK_TOKEN]: UNK_ID,
-        [EOS_TOKEN]: EOS_ID,
-        [PAD_TOKEN]: PAD_ID,
-        unk: UNK_ID,
-        eos: EOS_ID,
-        pad: PAD_ID,
-      };
-      for (const [token, id] of Object.entries(expected)) {
-        if (sp[token] !== undefined && sp[token] !== id) {
-          throw invalidParam(`vocab.json: special ${token} has id ${String(sp[token])}, expected ${id}`);
-        }
-      }
-    }
+    // Both spellings of the special map are validated when present — and a `specials`
+    // that is not a map at all is refused rather than skipped.
+    validateSpecials(obj.specials, "vocab.json");
     let words: unknown = obj.words;
     if (words === undefined && Array.isArray(obj.tokens)) {
       const tokens = obj.tokens;
@@ -180,6 +206,52 @@ export class GeoTokenizer {
     }
     if (!Array.isArray(words) || !words.every((w) => typeof w === "string")) {
       throw invalidParam("vocab.json: `words` (or `tokens`) must be an array of strings");
+    }
+    return new GeoTokenizer(words as string[]);
+  }
+
+  /**
+   * The vocabulary inside a MODEL FILE — strict, and an exact mirror of the backend's
+   * `GeoTokenizer.from_json`.
+   *
+   * `fromVocabJson` above is the loader for the shipped ASSET, and it deliberately
+   * accepts the site's `geo-vocab-v1` / `tokens` export as well. Using it for a file the
+   * user chose made the two stacks disagree about what a valid file is: a `tokens`-shaped
+   * `vocab` block was accepted here (1000 words recovered) and was an untyped HTTP 500 in
+   * Python. A file carries one format, and that format is `geo-tokenizer-v1`.
+   */
+  static fromModelVocabJson(payload: string): GeoTokenizer {
+    if (typeof payload !== "string") {
+      throw invalidParam(`a vocabulary must be JSON text, got ${typeof payload}`);
+    }
+    let data: unknown;
+    try {
+      data = JSON.parse(payload);
+    } catch (e) {
+      throw invalidParam(`vocabulary is not valid JSON: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    if (data === null || typeof data !== "object" || Array.isArray(data)) {
+      throw invalidParam(
+        `vocabulary must be a JSON object with a \`words\` array, got ${Array.isArray(data) ? "array" : String(data === null ? "null" : typeof data)}`,
+      );
+    }
+    const obj = data as Record<string, unknown>;
+    if (obj.format !== VOCAB_FORMAT) {
+      throw invalidParam(
+        `Unknown tokenizer format ${JSON.stringify(obj.format)} (expected ${JSON.stringify(VOCAB_FORMAT)})`,
+      );
+    }
+    validateSpecials(obj.specials, "vocabulary");
+    const words = obj.words;
+    if (words === undefined && "tokens" in obj) {
+      throw invalidParam(
+        "vocabulary has `tokens` but no `words`: `tokens` is the static site's asset shape " +
+          `(specials included), while a model file carries the ${JSON.stringify(VOCAB_FORMAT)} ` +
+          `\`words\` list of exactly ${VOCAB_WORDS} entries`,
+      );
+    }
+    if (!Array.isArray(words) || !words.every((w) => typeof w === "string")) {
+      throw invalidParam("vocabulary `words` must be an array of strings");
     }
     return new GeoTokenizer(words as string[]);
   }

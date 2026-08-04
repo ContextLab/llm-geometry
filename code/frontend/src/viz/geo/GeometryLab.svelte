@@ -226,7 +226,14 @@
         tokenized = r;
         noteTokens(r.tokens);
       })
-      .catch(() => {}); // the strip is a preview — trace/field errors already surface
+      .catch((e) => {
+        // The strip is a preview, so a 400 on a half-typed prompt stays quiet — but a
+        // token the server does not have is not a preview problem: tokenizing it used to
+        // answer 200 with the SHIPPED word list, and now that it refuses, the answer is
+        // to drop the dead token and say why, not to leave the last model's chips on
+        // screen labelled as this one's.
+        healEvictedToken(e);
+      });
   }, 400);
 
   // Effective layer: force mode is per-layer by definition (the contract 400s on
@@ -269,6 +276,10 @@
     const token = $geoWeightsToken;
     if (token !== vocabForToken) {
       vocabForToken = token;
+      // A model arriving clears the "your model is gone" note — but only a real one:
+      // `healEvictedToken` sets the token to null, and that transition is the note's
+      // own cause, so clearing on it would erase the message before it was read.
+      if (token) lostModelNote = "";
       revalidateVocab();
     }
   });
@@ -293,11 +304,20 @@
     return e instanceof DOMException && e.name === "AbortError";
   }
 
-  // A sessionStorage-restored weights_token can outlive its server-side artifact
-  // (LRU eviction). Rather than wedging the view in a retry loop against a dead
-  // token, drop it — the field/trace effects re-fire against the learned weights.
+  // A sessionStorage-restored weights_token can outlive the artifact it names (LRU
+  // eviction on the backend, an LRU-dropped or refused payload in the static build).
+  // Rather than wedging the view in a retry loop against a dead token, drop it — the
+  // field/trace effects re-fire against the learned weights.
+  //
+  // But SAY SO. Switching the whole tab back to the shipped model in silence is how a
+  // trained model disappeared with no explanation: the view still rendered, the numbers
+  // were still real, and they were another model's. The server's own sentence is shown
+  // verbatim, because it is the only thing that knows which kind of gone this is —
+  // evicted, or written by a build whose model identity no longer names it.
+  let lostModelNote = $state("");
   function healEvictedToken(e: unknown): boolean {
     if (e instanceof ApiError && e.type === "NotFoundError" && $geoWeightsToken) {
+      lostModelNote = friendly(e);
       geoModelNote.set(null); // the note would otherwise describe a model that is gone
       geoWeightsToken.set(null);
       return true;
@@ -578,6 +598,15 @@
       {#if fieldLoading}<span class="computing">computing field…</span>{/if}
     </div>
 
+    {#if lostModelNote}
+      <div class="inline-error lost-model" data-testid="geo-model-lost" role="status">
+        <strong>The model you had loaded is not available, so this view is showing the
+          shipped model instead.</strong>
+        {lostModelNote}
+        <button class="retry" onclick={() => (lostModelNote = "")}>dismiss</button>
+      </div>
+    {/if}
+
     <div class="prompt-row">
       <label class="prompt">
         <span class="ctl-label">prompt</span>
@@ -780,6 +809,18 @@
     border-radius: 10px;
     padding: 0.5rem 0.75rem;
     font-size: 0.8rem;
+  }
+  /* Not an error — a state change the user did not ask for and must be told about. */
+  .lost-model {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    background: rgba(255, 196, 105, 0.12);
+    border-color: rgba(255, 196, 105, 0.32);
+    color: #ffc469;
+    line-height: 1.45;
+  }
+  .lost-model strong {
+    font-weight: 600;
   }
   .inline-error .retry {
     background: transparent;

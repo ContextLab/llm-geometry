@@ -24,6 +24,16 @@ VOCAB_SIZE = 1003  # VOCAB_WORDS + the three specials below
 CONTEXT_WINDOW = 50
 SEED = 0
 
+#: Largest seed any Geometry Lab route accepts, in either direction.
+#:
+#: 2**53 - 1 is the last integer JavaScript reads exactly, and every consumer of these
+#: responses is JavaScript: a larger seed is echoed back as a number the browser silently
+#: rounds, so the run is reported under a seed nobody asked for and the report cannot even
+#: be compared with the request. Identical bound, identical reason, as
+#: ``lex.vacancy.MAX_SEED``; kept here rather than imported so the two tabs' backends do
+#: not depend on each other.
+MAX_SEED = 2**53 - 1
+
 # Special token ids (frozen contract: "special_tokens": {"unk": 0, "eos": 1, "pad": 2}).
 UNK_ID = 0
 EOS_ID = 1

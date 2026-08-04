@@ -10,6 +10,8 @@ phase labels. Every numeric array in a response is plain nested lists rounded to
 
 from __future__ import annotations
 
+import math
+import re
 from typing import Any
 
 import numpy as np
@@ -27,6 +29,7 @@ from ..geo.config import (
     FINETUNE_DEFAULT_MAX_SAMPLES,
     FINETUNE_DEFAULT_STEPS,
     FINETUNE_MAX_STEPS,
+    MAX_SEED,
     MLP_HIDDEN,
     N_HEADS,
     N_LAYERS,
@@ -108,12 +111,17 @@ def spec() -> dict[str, Any]:
 
 
 class TrainBody(BaseModel):
-    seed: int = SEED
+    # Loosely typed on purpose, like WeightsBody: pydantic's lax mode would coerce "7"
+    # and true to integers before the route ever sees them, and the contract's own
+    # refusal (`_as_seed`) says which value was wrong and why.
+    seed: Any = SEED
 
 
 @router.post("/train")
 def train(response: Response, body: TrainBody | None = None) -> dict[str, Any]:
-    result = geo_jobs.request_train(seed=body.seed if body is not None else SEED)
+    # Bounded, not just typed: an unbounded seed was accepted, used, and echoed back as a
+    # number the browser cannot read exactly (`_as_seed`).
+    result = geo_jobs.request_train(seed=_as_seed(body.seed) if body is not None else SEED)
     response.status_code = 200 if result["ready"] else 202
     return result
 
@@ -246,17 +254,91 @@ def weights_post(body: WeightsBody) -> dict[str, Any]:
 
 
 def _as_int(value: Any, name: str) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
+    """A JSON integer, or a typed refusal — never a coercion.
+
+    ``int(value)`` accepted, and silently rewrote, everything JSON can express: ``1.5``
+    became ``1``, ``"7"`` became ``7``, ``true`` became ``1``, ``"٧"`` (Arabic-Indic
+    seven) became ``7``, and ``Infinity`` escaped as an untyped 500
+    (``OverflowError: cannot convert float infinity to integer``). The TypeScript engine
+    refuses all of them, so the two stacks disagreed over the whole non-integer domain —
+    in the direction where Python trains for a *different number of steps than it was
+    asked for*, reports the run, and nothing says it happened.
+
+    ``7.0`` IS accepted as 7: JSON cannot express the int/float distinction and the TS
+    engine reads it as 7, so refusing it would be a divergence of its own. Identical rule,
+    and identical wording, to ``api.routes_lex._as_int``; duplicated rather than shared so
+    the two tabs' route modules stay independent.
+
+    Multipart form fields arrive as strings (there is no other wire encoding for them), so
+    a decimal string is parsed there and only there — see :func:`_form_int`.
+    """
+    if isinstance(value, bool):
         raise InvalidParamError(f"{name} must be an integer, got {value!r}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise InvalidParamError(f"{name} must be a finite integer, got {value!r}")
+        if not value.is_integer():
+            raise InvalidParamError(
+                f"{name} must be an integer, got {value!r} — it is not rounded or "
+                "truncated, because a number that is not the number you asked for is "
+                "worse than a refusal"
+            )
+        return int(value)
+    raise InvalidParamError(f"{name} must be an integer, got {value!r}")
+
+
+def _form_int(value: Any, name: str) -> int:
+    """Like :func:`_as_int`, but a multipart form's string field is parsed first.
+
+    Multipart carries no types: `steps=100` arrives as the STRING "100" and always did.
+    Refusing strings there would break the file-upload form the JSON path shares a body
+    parser with, so the string is parsed strictly (base 10, ASCII digits only, no
+    ``"0x10"``, no ``"٧"``) and then held to exactly the same rule.
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        if not re.fullmatch(r"[+-]?[0-9]+", text):
+            raise InvalidParamError(f"{name} must be an integer, got {value!r}")
+        return int(text)
+    return _as_int(value, name)
 
 
 def _as_float(value: Any, name: str) -> float:
+    """A finite JSON number, or a typed refusal.
+
+    ``float(value)`` mapped ``Infinity``/``NaN`` straight through, and an infinite ``lr``
+    passes ``lr > 0``: the job then starts, every parameter becomes NaN on the first step,
+    and the failure surfaces (if at all) as a late job error rather than as a 422 on the
+    request that caused it.
+    """
+    if isinstance(value, bool):
+        raise InvalidParamError(f"{name} must be a number, got {value!r}")
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         raise InvalidParamError(f"{name} must be a number, got {value!r}")
+    if not math.isfinite(number):
+        raise InvalidParamError(f"{name} must be a finite number, got {value!r}")
+    return number
+
+
+def _as_seed(value: Any, name: str = "seed") -> int:
+    """An integer seed inside the range JavaScript can read back exactly.
+
+    Unbounded, ``POST /api/geo/train`` answered 202 for ``9007199254740993`` and echoed it
+    into a response the browser reads as ...992 — a run reported under a seed nobody asked
+    for. The same bound ``POST /api/lex/train`` enforces.
+    """
+    seed = _as_int(value, name)
+    if abs(seed) > MAX_SEED:
+        raise InvalidParamError(
+            f"{name} must lie in [-{MAX_SEED}, {MAX_SEED}]: outside that range JavaScript "
+            f"cannot read the number back exactly, so the run would be reported under a "
+            f"different seed than it used (got {seed})"
+        )
+    return seed
 
 
 @router.post("/finetune")
@@ -301,7 +383,10 @@ async def finetune_route(request: Request, response: Response) -> dict[str, Any]
             f"got {len(provided)} sources"
         )
 
-    steps = _as_int(payload.get("steps", FINETUNE_DEFAULT_STEPS), "steps")
+    # Multipart fields are strings on the wire; JSON fields are typed. Same rule either
+    # way, one parser per encoding (see `_form_int`).
+    as_int = _form_int if content_type.startswith("multipart/") else _as_int
+    steps = as_int(payload.get("steps", FINETUNE_DEFAULT_STEPS), "steps")
     if not 1 <= steps <= FINETUNE_MAX_STEPS:
         raise InvalidParamError(f"steps must be in 1..{FINETUNE_MAX_STEPS}, got {steps}")
     lr = _as_float(payload.get("lr", FINETUNE_DEFAULT_LR), "lr")
@@ -315,7 +400,7 @@ async def finetune_route(request: Request, response: Response) -> dict[str, Any]
         resolved_text = load_text_from_hf(
             str(hf_dataset),
             split=str(payload.get("hf_split", "train")),
-            max_samples=_as_int(
+            max_samples=as_int(
                 payload.get("max_samples", FINETUNE_DEFAULT_MAX_SAMPLES), "max_samples"
             ),
         )
@@ -379,7 +464,8 @@ async def train_scratch_route(request: Request, response: Response) -> dict[str,
             f"got {len(provided)} sources"
         )
 
-    epochs = _as_int(payload.get("epochs", SCRATCH_DEFAULT_EPOCHS), "epochs")
+    as_int = _form_int if content_type.startswith("multipart/") else _as_int
+    epochs = as_int(payload.get("epochs", SCRATCH_DEFAULT_EPOCHS), "epochs")
     if not 1 <= epochs <= SCRATCH_MAX_EPOCHS:
         raise InvalidParamError(f"epochs must be in 1..{SCRATCH_MAX_EPOCHS}, got {epochs}")
 
@@ -389,7 +475,7 @@ async def train_scratch_route(request: Request, response: Response) -> dict[str,
         resolved_text = load_text_from_hf(
             str(hf_dataset),
             split=str(payload.get("hf_split", "train")),
-            max_samples=_as_int(
+            max_samples=as_int(
                 payload.get("max_samples", SCRATCH_DEFAULT_MAX_SAMPLES), "max_samples"
             ),
         )

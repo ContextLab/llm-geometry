@@ -54,6 +54,41 @@ _TOKEN_RE = re.compile(r"[a-z]+(?:'[a-z]+)*|[0-9]+|[^\sa-z0-9]")
 
 _SPECIAL_TEXTS = {UNK_ID: UNK_TOKEN, EOS_ID: EOS_TOKEN, PAD_ID: PAD_TOKEN}
 
+#: The one vocabulary format a model file may carry (``GeoTokenizer.to_json``).
+_VOCAB_FORMAT = "geo-tokenizer-v1"
+
+#: Special-token ids a vocabulary may declare, under either spelling. Mirrors
+#: ``geoEngine/tokenizer.fromModelVocabJson`` — see :meth:`GeoTokenizer.from_json`.
+_EXPECTED_SPECIALS = {
+    UNK_TOKEN: UNK_ID,
+    EOS_TOKEN: EOS_ID,
+    PAD_TOKEN: PAD_ID,
+    "unk": UNK_ID,
+    "eos": EOS_ID,
+    "pad": PAD_ID,
+}
+
+
+def _validate_specials(specials: Any) -> None:
+    """Refuse a vocabulary whose declared special ids are not the ones we use.
+
+    Ignoring the block (which is what "parse only `words`" amounts to) let a file say
+    ``"<unk>": 5`` and load with 200 while every id it labels is read with ``<unk> = 0``.
+    """
+    if specials is None:
+        return
+    if not isinstance(specials, dict):
+        raise InvalidParamError(
+            f"vocabulary `specials` must be an object, got {type(specials).__name__}"
+        )
+    for token, expected in _EXPECTED_SPECIALS.items():
+        declared = specials.get(token)
+        if declared is not None and declared != expected:
+            raise InvalidParamError(
+                f"vocabulary: special {token} has id {declared!r}, expected {expected}"
+            )
+
+
 # Tokens that should not be preceded by a space when detokenizing.
 _NO_SPACE_BEFORE = set(".,;:!?)]}'…") | {"''"}
 _NO_SPACE_AFTER = set("([{")
@@ -181,10 +216,47 @@ class GeoTokenizer:
 
     @classmethod
     def from_json(cls, payload: str) -> "GeoTokenizer":
-        data = json.loads(payload)
-        if data.get("format") != "geo-tokenizer-v1":
-            raise InvalidParamError(f"Unknown tokenizer format {data.get('format')!r}")
-        return cls(list(data["words"]))
+        """Parse the canonical serialization, refusing anything else with a TYPED error.
+
+        This is the vocabulary half of loading a model file, and it used to be three
+        unguarded lines: ``json.loads``, ``data.get``, ``list(data["words"])``. Seven
+        malformed ``vocab`` blocks therefore reached the user as untyped HTTP 500s whose
+        whole message was a Python exception string (``'list' object has no attribute
+        'get'``, ``unhashable type: 'list'``, ``'words'``) — on a file the user chose, so
+        the one thing the message had to say was which part of THEIR file was wrong.
+
+        ``specials`` is validated rather than ignored, and the ``tokens``-shaped export is
+        refused rather than crashing, because the browser engine
+        (``geoEngine/tokenizer.fromModelVocabJson``) does exactly this: while Python
+        ignored ``specials`` a file declaring ``<unk> = 5`` loaded here with 200 and was
+        refused there, so the two stacks disagreed about whether a file was valid at all.
+        """
+        if not isinstance(payload, str):
+            raise InvalidParamError(f"a vocabulary must be JSON text, got {type(payload).__name__}")
+        try:
+            data = json.loads(payload)
+        except ValueError as exc:  # JSONDecodeError
+            raise InvalidParamError(f"vocabulary is not valid JSON: {exc}")
+        if not isinstance(data, dict):
+            raise InvalidParamError(
+                "vocabulary must be a JSON object with a `words` array, got "
+                f"{type(data).__name__}"
+            )
+        if data.get("format") != _VOCAB_FORMAT:
+            raise InvalidParamError(
+                f"Unknown tokenizer format {data.get('format')!r} (expected " f"{_VOCAB_FORMAT!r})"
+            )
+        _validate_specials(data.get("specials"))
+        words = data.get("words")
+        if words is None and "tokens" in data:
+            raise InvalidParamError(
+                "vocabulary has `tokens` but no `words`: `tokens` is the static site's "
+                "asset shape (specials included), while a model file carries the "
+                f"{_VOCAB_FORMAT!r} `words` list of exactly {VOCAB_WORDS} entries"
+            )
+        if not isinstance(words, list) or any(not isinstance(w, str) for w in words):
+            raise InvalidParamError("vocabulary `words` must be an array of strings")
+        return cls(words)
 
 
 @lru_cache(maxsize=1)
@@ -202,6 +274,13 @@ def tokenizer_for(weights_token: str | None, store: Any = None) -> GeoTokenizer:
     changes the numbers, not what the ids mean (`weights.inherited_vocab`). Only sets
     descended from the canonical checkpoint have no stored vocabulary, and those are
     the ones the canonical tokenizer is right for.
+
+    A token this store does not have RAISES (``weights.weight_set_entry``); it does not
+    fall back. The fallback was the same corruption reached through a different door: an
+    evicted or unknown token answered 200 from ``GET /api/geo/tokenize`` with the user's
+    ids read under Alice in Wonderland's word list, while ``GET /api/geo/trace`` answered
+    404 for the identical request — so the two routes disagreed about whether the model
+    existed, and the one that said yes was the one that was wrong.
     """
     if not weights_token or weights_token == "learned":
         return get_tokenizer()

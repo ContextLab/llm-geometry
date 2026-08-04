@@ -32,6 +32,7 @@ import {
   SCRATCH_LEARNED_MARGIN,
   uniformBaselineLoss,
 } from "../../src/lib/geoEngine/scratch";
+import { sha256Hex, utf8Bytes } from "../../src/lib/geoEngine/hash";
 import { GeoTokenizer, canonicalVocabJson } from "../../src/lib/geoEngine/tokenizer";
 import { FIXTURE_DIR, goldenSources } from "./geoGoldenAssets";
 
@@ -237,7 +238,13 @@ describe("persisted payloads that predate `ownsVocab` are refused, not decided [
 
     const fresh = GeoEngine.fromAssets(src.checkpoint, src.vocab);
     expect(fresh.importWeightSet(preFixToken, preFix)).toBe(false);
-    expect(() => fresh.exportBundle(preFixToken)).toThrowError(/unknown/);
+    // Refused AND accounted for: `/unknown/` (the evicted-token wording) passed while a
+    // model the user trained was being erased on boot with nothing said about it, so the
+    // assertion now pins the sentence the engine actually owes them.
+    expect(() => fresh.exportBundle(preFixToken)).toThrowError(/could not be restored/);
+    expect(() => fresh.exportBundle(preFixToken)).toThrowError(
+      /did not record whether a model's ids mean its own words/,
+    );
     // ...and the same payload with the flag present is decidable, so it restores.
     expect(fresh.importWeightSet(preFixToken, { ...preFix, ownsVocab: false })).toBe(true);
   });
@@ -323,5 +330,182 @@ describe("one canonical vocabulary serialization in both stacks [F6]", () => {
     expect(canonicalVocabJson((src.vocab as { words: string[] }).words)).toMatch(
       /^\{"format":"geo-tokenizer-v1","specials":\{"<eos>":1,"<pad>":2,"<unk>":0\},"words":\[/,
     );
+  });
+});
+
+/**
+ * Round 5. Three wrong-answer paths that survived the identity fix, and one coercion.
+ *
+ * Each case here failed against the build these tests were added to: `tokenize` answered
+ * with the shipped word list for a model this engine does not have; a payload written
+ * under the old identity was deleted on boot with nothing said about it; a model file's
+ * vocabulary was read by the permissive ASSET loader, so the two stacks disagreed about
+ * which files are valid; and an edit's seed was coerced into a different matrix.
+ */
+describe("a model this engine does not have is not the shipped model [round 5, F1]", () => {
+  let engine: GeoEngine;
+  let scratchToken: string;
+
+  beforeAll(() => {
+    engine = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    scratchToken = engine.registerScratchModel(scratchRun.weights, scratchWords);
+  });
+
+  it("refuses to tokenize under an unknown token instead of using Alice's words", () => {
+    // The static build LRU-drops persisted sets while the ACTIVE token is persisted
+    // separately, so this is the ordinary state of a returning tab, not an exotic one.
+    // `tokenize` used to answer 200 with the canonical vocabulary here — and the token
+    // strip's own verification probe compares against exactly that vocabulary, so the
+    // tab reported the word list VERIFIED for a model whose words it had never seen.
+    expect(() => engine.tokenize("the cat sat", "deadbeefdeadbeefdeadbeefdeadbeef")).toThrowError(
+      /unknown \(never minted here, or evicted\)/,
+    );
+    // ...and the two operations now agree, which is the actual defect: they did not.
+    expect(() => engine.trace("the cat sat", "deadbeefdeadbeefdeadbeefdeadbeef")).toThrowError(
+      /unknown \(never minted here, or evicted\)/,
+    );
+  });
+
+  it("still answers for a model it does have, with that model's own words", () => {
+    expect(engine.tokenize(scratchWords[0], scratchToken).tokens[0].unk).toBe(false);
+    expect(engine.tokenizerFor(scratchToken).words).toEqual(scratchWords);
+    // A canonical-descended set has no own vocabulary — absence there is the answer,
+    // not a miss (this is the case a blanket throw would have broken).
+    const ft = engine.finetune({ text: "alice was beginning to get very tired", steps: 1 });
+    expect(engine.tokenizerFor(ft.weights_token!).words).toEqual(engine.tokenizer.words);
+  });
+});
+
+describe("a persisted payload from an older build is explained, not erased [round 5, F2]", () => {
+  it("names the format change for a payload written under the weights-only identity", () => {
+    // Exactly what the previous build wrote for a scratch model: the word list is
+    // present and correct, but the token is `weightsToken(weights)` — the hash from
+    // before the word list joined the model's identity.
+    const preIdentityToken = weightsToken(scratchRun.weights);
+    const weights: Record<string, string> = {};
+    for (const [name, arr] of Object.entries(scratchRun.weights)) {
+      weights[name] = Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength).toString("base64");
+    }
+    const payload = {
+      weights,
+      sources: {},
+      setSource: "scratch",
+      ownsVocab: true,
+      vocabWords: scratchWords,
+    };
+
+    const fresh = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    expect(fresh.importWeightSet(preIdentityToken, payload)).toBe(false);
+    // Refusing is right; refusing SILENTLY is what destroyed the model. The engine must
+    // be able to say which of the two kinds of gone this is.
+    let message = "";
+    try {
+      fresh.exportBundle(preIdentityToken);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toMatch(/could not be restored/);
+    expect(message).toMatch(/named by its weights alone/);
+    expect(message).not.toMatch(/never minted here/);
+  });
+
+  it("keeps saying 'evicted' for a token that really was never here", () => {
+    const fresh = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    expect(() => fresh.exportBundle("0123456789abcdef0123456789abcdef")).toThrowError(
+      /never minted here, or evicted/,
+    );
+  });
+
+  it("distinguishes a tampered payload from an out-of-date one", () => {
+    const engine = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    const token = engine.registerScratchModel(scratchRun.weights, scratchWords);
+    const exported = engine.exportWeightSet(token);
+    const fresh = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    // Someone else's word list under these weights hashes to neither identity.
+    expect(
+      fresh.importWeightSet(token, { ...exported, vocabWords: scratchWords.map((w) => `zz${w}`) }),
+    ).toBe(false);
+    expect(() => fresh.exportBundle(token)).toThrowError(/do not hash to the token/);
+  });
+});
+
+describe("both stacks agree on which model files are valid [round 5, F3]", () => {
+  const engine = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+  const good = engine.exportBundle("learned");
+
+  it("refuses a vocabulary whose declared specials are not the ones we use", () => {
+    // Python IGNORED `specials` entirely, so this file loaded there with HTTP 200 (and
+    // `<unk>` still read as 0) while the browser refused it: two builds, two answers to
+    // "is this file valid?". Both refuse now.
+    const vocab = JSON.stringify({
+      format: "geo-tokenizer-v1",
+      specials: { "<unk>": 5, "<eos>": 1, "<pad>": 2 },
+      words: JSON.parse(good.vocab).words,
+    });
+    expect(() => GeoTokenizer.fromModelVocabJson(vocab)).toThrowError(
+      /special <unk> has id 5, expected 0/,
+    );
+  });
+
+  it("refuses the site's `tokens`-shaped asset export inside a model file", () => {
+    // Accepted here (1000 words recovered from the 1003 entries) and an untyped HTTP 500
+    // in Python — the same file, valid in one stack and a crash in the other.
+    const words = JSON.parse(good.vocab).words as string[];
+    const vocab = JSON.stringify({
+      format: "geo-tokenizer-v1",
+      specials: { unk: 0, eos: 1, pad: 2 },
+      tokens: ["<unk>", "<eos>", "<pad>", ...words],
+    });
+    expect(() => GeoTokenizer.fromModelVocabJson(vocab)).toThrowError(/`tokens` but no `words`/);
+    // Through the whole import path, with the file's own digest honestly recomputed so
+    // the vocabulary check is what refuses it rather than the digest.
+    const file = { ...good, vocab, vocab_sha256: sha256Hex(utf8Bytes(vocab)) };
+    expect(() => engine.importBundle(file)).toThrowError(/`tokens` but no `words`/);
+  });
+
+  it("gives a typed refusal for every malformed vocabulary shape", () => {
+    const cases: [string, RegExp][] = [
+      ["{", /not valid JSON/],
+      ["[1,2]", /must be a JSON object/],
+      ['"hi"', /must be a JSON object/],
+      ["null", /must be a JSON object/],
+      ['{"format":"geo-tokenizer-v1","words":null}', /must be an array of strings/],
+      ['{"format":"geo-tokenizer-v1","words":[["a"]]}', /must be an array of strings/],
+      ['{"format":"geo-tokenizer-v1","specials":"x","words":[]}', /`specials` must be an object/],
+    ];
+    for (const [vocab, pattern] of cases) {
+      expect(() => GeoTokenizer.fromModelVocabJson(vocab), vocab).toThrowError(pattern);
+    }
+  });
+
+  it("still loads a real file", () => {
+    expect(GeoTokenizer.fromModelVocabJson(good.vocab).words).toEqual(engine.tokenizer.words);
+  });
+});
+
+describe("an edit's seed is the seed you asked for [round 5, item 6]", () => {
+  const engine = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+  const edit = (seed: unknown) => () =>
+    engine.postWeights({
+      base: "learned",
+      edits: [{ layer: 0, matrix: "W_Q", preset: "random", seed } as never],
+    });
+
+  it("refuses a non-integer, non-finite or negative seed instead of picking seed 0", () => {
+    // `Math.trunc(Number(seed)) || 0` mapped 1.5 -> 1 (a DIFFERENT preset matrix,
+    // reported as the one requested) and Infinity / NaN / -1 -> 0, which also swallowed
+    // the "that seed is not shipped" refusal the static build owes.
+    expect(edit(1.5)).toThrowError(/seed must be an integer/);
+    expect(edit("7")).toThrowError(/seed must be an integer/);
+    expect(edit(true)).toThrowError(/seed must be an integer/);
+    expect(edit(Infinity)).toThrowError(/seed must be an integer/);
+    expect(edit(NaN)).toThrowError(/seed must be an integer/);
+    expect(edit(-1)).toThrowError(/seed must be in 0\.\./);
+    expect(edit(Number.MAX_SAFE_INTEGER + 2)).toThrowError(/seed must be in 0\.\./);
+  });
+
+  it("accepts the seeds that really exist", () => {
+    expect(edit(0)()).toHaveProperty("weights_token");
+    expect(edit(1)()).toHaveProperty("weights_token");
   });
 });
