@@ -3,8 +3,14 @@
 Estimates a model's total parameter count from HuggingFace **hub metadata only** —
 the safetensors header index via ``get_safetensors_metadata`` (a few small JSON/header
 fetches, never the weights), falling back to a config-based architectural estimate —
-and raises ``ModelTooLargeError`` (HTTP 422) when the count exceeds
-``ARCH_MAX_PARAMS``, *before* any weight download begins.
+and raises ``ModelTooLargeError`` (HTTP 422) when the count exceeds the ceiling that
+applies to it, *before* any weight download begins.
+
+The applied ceiling is ``ARCH_MAX_PARAMS`` when the count came from the safetensors
+header index, and **80 % of it** when the count is an architectural estimate from the
+config — because that estimate can undercount. The rejection message quotes the ceiling
+it applied, not the nominal one; quoting the nominal one told a 1.3 B model it was "over
+the ceiling of 1,500,000,000".
 """
 
 from __future__ import annotations
@@ -50,11 +56,57 @@ def estimate_params_from_config(config: Any) -> int:
     return int(embed + layers * per_layer + hidden)
 
 
+def effective_ceiling_for(source: str) -> int:
+    """The parameter ceiling that applies to a count from `source`.
+
+    The config estimate can undercount (multimodal towers, exotic blocks), so it is held
+    to 80 % of :data:`ARCH_MAX_PARAMS` — a safety margin, so an undercounted giant cannot
+    slip under the ceiling (FR-107). A safetensors header count is exact and gets the
+    full ceiling.
+    """
+    return int(ARCH_MAX_PARAMS if source == "safetensors_metadata" else ARCH_MAX_PARAMS * 0.8)
+
+
+def too_large_error(mid: str, total: int, source: str) -> ModelTooLargeError:
+    """The rejection, quoting the ceiling that was actually APPLIED.
+
+    Quoting :data:`ARCH_MAX_PARAMS` on the config-estimate path produced a
+    self-contradiction: a 1.3 B model was told it "has ~1,300,000,000 parameters, over the
+    … ceiling of 1,500,000,000", which reads as a bug in the gate rather than as the
+    safety margin it is. The margin is now stated outright instead of being invisible.
+    """
+    ceiling = effective_ceiling_for(source)
+    why = (
+        ""
+        if source == "safetensors_metadata"
+        else (
+            f" That is below the {ARCH_MAX_PARAMS:,} this explorer normally allows: "
+            f"'{mid}' publishes no safetensors index, so the count above is an "
+            "architectural estimate from its config, and an estimate that can undercount "
+            "(multimodal towers, exotic blocks) is held to 80 % of the ceiling rather "
+            "than allowed to slip under it (FR-107)."
+        )
+    )
+    return ModelTooLargeError(
+        f"Model '{mid}' has ~{total:,} parameters, over the Architecture Explorer "
+        f"ceiling of {ceiling:,} that applies to it.{why} Choose a smaller open-weights "
+        "model.",
+        detail={
+            "model_id": mid,
+            "total_params": int(total),
+            "max_params": int(ARCH_MAX_PARAMS),
+            "effective_ceiling": ceiling,
+            "source": source,
+        },
+    )
+
+
 def check_model_size(model_id: str) -> dict[str, Any]:
     """Gate a model on total parameters BEFORE download; raises when over the ceiling.
 
-    Returns ``{"model_id", "total_params", "max_params", "source"}`` when the model
-    passes. ``source`` records which metadata path produced the count.
+    Returns ``{"model_id", "total_params", "max_params", "effective_ceiling", "source"}``
+    when the model passes. ``source`` records which metadata path produced the count, and
+    ``effective_ceiling`` is the number the count was actually compared against.
     """
     mid = normalize_model_id(model_id)
 
@@ -84,26 +136,13 @@ def check_model_size(model_id: str) -> dict[str, Any]:
         total = estimate_params_from_config(config)
         source = "config_estimate"
 
-    # The config estimate can undercount (multimodal towers, exotic blocks); give it a
-    # 20% safety margin so an undercounted giant can't slip under the ceiling (FR-107).
-    effective_ceiling = (
-        ARCH_MAX_PARAMS if source == "safetensors_metadata" else ARCH_MAX_PARAMS * 0.8
-    )
-
+    effective_ceiling = effective_ceiling_for(source)
     if total > effective_ceiling:
-        raise ModelTooLargeError(
-            f"Model '{mid}' has ~{total:,} parameters, over the Architecture Explorer "
-            f"ceiling of {ARCH_MAX_PARAMS:,}. Choose a smaller open-weights model.",
-            detail={
-                "model_id": mid,
-                "total_params": int(total),
-                "max_params": int(ARCH_MAX_PARAMS),
-                "source": source,
-            },
-        )
+        raise too_large_error(mid, total, source)
     return {
         "model_id": mid,
         "total_params": int(total),
         "max_params": int(ARCH_MAX_PARAMS),
+        "effective_ceiling": int(effective_ceiling),
         "source": source,
     }

@@ -40,11 +40,23 @@ Every step is verified rather than trusted: the concatenated token bytes must eq
 NFC-normalized once up front because Qwen's tokenizer carries an NFC normalizer while
 gpt2's and SmolLM2's do not — without that, a decomposed character silently shifts every
 span after it, and the check above would fire on a passage that is perfectly fine.
+
+WORD ALPHABET (§8.2). The transform's ``WORD_RE`` is ``[A-Za-z]+(?:['-][A-Za-z]+)*`` —
+ASCII letters only. A passage containing ``café`` or ``naïvely`` therefore does not
+contain those words as far as the transform is concerned: it contains ``caf`` and
+``na``/``vely``, and vacating those produces ``washé`` and ``kitsvely``. That is not a
+rendering wart, it is a *silently wrong measurement*, so :func:`check_word_alphabet`
+refuses such a passage up front with a typed 400 naming the offending word rather than
+letting it through to either the mangled score or the opaque "token spans both a
+preserved and a vacated word" 500 it sometimes produces instead. Widening the alphabet is
+a change to the shared transform (``lex/vacancy.py`` + ``lexEngine/vacancy.ts``) and its
+normative contract, not something this module may do on its own.
 """
 
 from __future__ import annotations
 
 import math
+import re
 import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
@@ -80,6 +92,30 @@ MAX_PASSAGES = 12
 #: §8.3a come from, so the panel's default reproduces the measured configuration.
 DEFAULT_PASSAGE_WORDS = 250
 DEFAULT_PASSAGE_COUNT = 6
+
+#: Paired preserved tokens needed before ANY difference may be reported at float32.
+#:
+#: Two is not a comfort margin, it is the definition: the sample variance of the paired
+#: differences divides by ``n - 1``, so at ``n = 1`` the standard error is NaN and at
+#: ``n = 0`` the mean itself does not exist. The old code produced that NaN by design and
+#: then hit :func:`llm_geometry.api.encoding.jsonable_6sig`, which refuses non-finite
+#: numbers — so an ordinary short passage came back as HTTP 500 ``InternalError:
+#: non-finite value in response payload``. The designed path is now reachable: it is a
+#: typed 400 that names the actual cause.
+#:
+#: The static stack's equivalent gate is ``VACANCY_MIN_POOLED_PRESERVED = 700`` and it is
+#: NOT the same threshold, deliberately. This one is a *sampling* floor (a variance needs
+#: two observations); that one is a *quantization* floor (below ~700 pooled preserved
+#: tokens q8's error on the pooled difference has no measured bound and was seen at 115 %
+#: of a passage's own delta). Both stacks refuse with a typed error naming the count they
+#: got and the count they need; they differ in the number because they differ in the
+#: reason, and a stack that scores at float32 has no quantization error to bound.
+MIN_PAIRED_PRESERVED = 2
+
+#: A run of characters a READER would call one word: Unicode letters, plus the internal
+#: apostrophes and hyphens ``WORD_RE`` already allows. Used only to detect runs that
+#: ``WORD_RE`` (ASCII-only) would split or truncate — see :func:`check_word_alphabet`.
+WORDLIKE_RE = re.compile(r"[^\W\d_]+(?:['\-][^\W\d_]+)*")
 
 #: Fraction of the shipped corpus's 250-word blocks that are front matter (title page +
 #: the alphabetical index of first lines). Measured: the index ends in block 11 of 63.
@@ -225,8 +261,14 @@ def preserved_token_indices(
     drop nearly every one of them.
 
     A token overlapping words with different preserved-ness cannot be attributed, and that
-    RAISES. It cannot happen with the byte-level pretokenizers of the curated models
-    (each token lies within one word plus its leading whitespace), so if it ever does, the
+    RAISES. With the byte-level pretokenizers of the curated models it cannot happen for a
+    passage whose words are inside the transform's ASCII word alphabet: each token then
+    lies within one word plus its leading whitespace. It CAN happen — and did, as an
+    opaque 500 — when ``WORD_RE`` splits one written word into two, which is exactly what
+    it does to ``naïvely`` (``na`` + ``vely``): the tokenizer emits one piece covering
+    both halves, and one half may be vacated while the other is spared. Such passages are
+    now refused up front by :func:`check_word_alphabet`, which names the word instead of a
+    token index. This guard stays as the last line of defence: if it ever fires, the
     assumption behind this whole attribution has changed and the number must not be
     reported (§8.2).
     """
@@ -245,6 +287,54 @@ def preserved_token_indices(
         if flags == {True}:
             out.append(i)
     return out
+
+
+def fragmented_words(text: str) -> list[str]:
+    """Words of `text` that ``WORD_RE`` splits or truncates, in order of appearance.
+
+    A "word" here is a run of Unicode letters (:data:`WORDLIKE_RE`). ``WORD_RE`` is ASCII
+    letters only, so it matches part of such a run — ``caf`` of ``café``, ``na`` and
+    ``vely`` of ``naïvely`` — and the transform then rewrites the part rather than the
+    word. Runs ``WORD_RE`` matches *entirely* (``don't``, ``good-bye``) are fine, and so
+    are runs it does not touch at all (CJK, emoji): those are never vacated, are
+    byte-identical in all three variants, and are attributed to no word — which is the
+    same treatment punctuation gets and is correct.
+    """
+    out: list[str] = []
+    for match in WORDLIKE_RE.finditer(text):
+        run = match.group(0)
+        parts = WORD_RE.findall(run)
+        if parts and (len(parts) > 1 or parts[0] != run):
+            out.append(run)
+    return out
+
+
+def check_word_alphabet(text: str, index: int | None = None) -> None:
+    """Refuse a passage whose words the transform would mangle (§8.2).
+
+    Measured, not hypothetical: with ``café`` in the passage the swap variant of "a café"
+    came back as "a washé" and the score was *returned* — a plausible number computed over
+    a fragment of a word. ``naïvely`` instead produced a 500 from
+    :func:`preserved_token_indices`, because one BPE piece covered both halves. Same root
+    cause, two symptoms, so one refusal covers both, naming the word rather than a token
+    index, before any weights are touched.
+    """
+    bad = fragmented_words(text)
+    if not bad:
+        return
+    where = "" if index is None else f"passage {index}: "
+    shown = ", ".join(repr(w) for w in dict.fromkeys(bad))
+    raise InvalidParamError(
+        f"{where}the vacancy transform's word alphabet is ASCII letters only "
+        r"(WORD_RE = [A-Za-z]+(?:['-][A-Za-z]+)*), so it does not see these words as "
+        f"words and would rewrite a fragment of each instead: {shown}. Refusing rather "
+        "than scoring text the transform mangles — 'a café' vacates to 'a washé', and a "
+        "single BPE piece can then cover both a preserved and a vacated fragment. Use a "
+        "passage written in the ASCII alphabet (emoji and CJK are fine: they are never "
+        "vacated and are identical in all three variants). Widening the alphabet is a "
+        "change to the shared transform and its contract, not to this endpoint.",
+        {"words": list(dict.fromkeys(bad)), **({} if index is None else {"passage": index})},
+    )
 
 
 # --- the three variants (§8.3) ------------------------------------------------------------
@@ -295,6 +385,14 @@ def variant_texts(
     `consistent=True` and `reveal_after=0` are not options here: they are the condition the
     invariance theorem is stated for, and the whole point of this panel is to put the tiny
     arm's exact zero (which holds only there) beside the pretrained number.
+
+    INTERMEDIATE ``p`` IS REFUSED, exactly as the Lexicon Lab refuses it (§5.2a). The swap
+    control's replacements are drawn *from* the domain, so at ``0 < p < 1`` a vacated type
+    can land on a type that was not vacated and two source types share one image. The
+    Lexicon Lab's :func:`~llm_geometry.lex.vacancy.map_vocab_words` raises there; this
+    endpoint used to expose the same configuration at 0.05 steps and quietly report a
+    decomposition computed on a non-injective swap map. The refusal is checked against the
+    map that was actually built (``injective_at_every_p``), not assumed from ``mint``.
     """
     tokens = tokenize(passage)
     domain = vacancy_domain(tokens)
@@ -305,6 +403,17 @@ def variant_texts(
         # `counts` is the passage's own type frequencies: the swap control ranks the
         # replacement pool by them (§8.3), and the nonce strategy ignores them entirely.
         vmap = build_vacancy_map(domain, params, counts)
+        if not vmap.injective_at_every_p and 0.0 < float(p) < 1.0:
+            raise InvalidParamError(
+                f"mint={mint!r} has no injective map at p={p}: its replacements are domain "
+                "types, so a vacated type can collide with an un-vacated one and the map is "
+                "injective only at full vacancy (contract §5.2a — a theorem, not a rough "
+                "edge). The decomposition of §8.3 compares three variants of one passage "
+                "through that map, so it is not defined here either. Use p = 1 (full "
+                "vacancy), which is the configuration the reference numbers were measured "
+                "at, or p = 0 (the identity null).",
+                {"mint": mint, "p": float(p)},
+            )
         texts[variant] = vacate_text(passage, vmap, params)
     return texts
 
@@ -416,6 +525,13 @@ def _stats(scored: ScoredText) -> dict[str, Any]:
     is the count ``nllAll`` averages over — which is what makes
     ``bitsPerChar = nllAll · nTokens / (ln 2 · nChars)`` the passage's total surprisal
     per character rather than an off-by-one approximation of it.
+
+    ``nChars`` is **Unicode code points**, which is what ``len(str)`` means in Python, and
+    the static stack counts the same thing (``[...text].length``, NOT ``text.length`` —
+    JavaScript's ``.length`` is UTF-16 units and reports 77 for a 75-code-point string
+    containing two astral emoji). Bytes remain the unit token→word ATTRIBUTION is done in
+    (§8.2); this is a reporting field, and the contract needs the two stacks to mean the
+    same thing by it, which they now do.
     """
     all_nll = scored.scored
     n_chars = len(scored.text)
@@ -544,6 +660,11 @@ def vacancy_score(
     pretrained weights at float32. Nothing here is cached across requests: the passages
     are user text and the whole computation is a few seconds of CPU on the curated
     models.
+
+    EVERY parameter failure happens before :func:`load_model`. The transform, the word
+    alphabet and the ``p`` gate need no weights, so a bad request is a typed 400 that
+    costs nothing rather than a 500 after a download — the same discipline the size gate
+    of FR-107 applies to the model itself.
     """
     if passages is None:
         passages = default_passages()
@@ -565,18 +686,27 @@ def vacancy_score(
     # check would fire on a passage that is perfectly well formed.
     normalized = [unicodedata.normalize("NFC", passage) for passage in passages]
 
-    lm = load_model(model_id)
-    scored: dict[str, list[ScoredText]] = {name: [] for name in VARIANTS}
-    per_passage: list[dict[str, Any]] = []
+    # Transform first, weights second: everything below this line is pure text work, and
+    # every failure in it is a typed 400 the caller can act on.
+    prepared: list[tuple[int, dict[str, str], list[WordSpan], frozenset[int]]] = []
     for index, passage in enumerate(normalized):
+        check_word_alphabet(passage, index)
         texts = variant_texts(passage, p=p, seed=seed, match_prosody=match_prosody, keep=keep)
         words, preserved = preserved_word_indices(texts)
         if not preserved:
-            raise ComputeError(
+            raise InvalidParamError(
                 f"passage {index} has no word that survives the transform, so there is no "
-                "scaffolding to score. Lower p, or use a passage with closed-class words.",
-                {"passage": index},
+                "scaffolding to score: every one of its "
+                f"{len(words)} words is an open-class stem this transform vacates. Lower "
+                "p, or use a passage with closed-class words (the, and, of, did).",
+                {"passage": index, "nWords": len(words)},
             )
+        prepared.append((index, texts, words, preserved))
+
+    lm = load_model(model_id)
+    scored: dict[str, list[ScoredText]] = {name: [] for name in VARIANTS}
+    per_passage: list[dict[str, Any]] = []
+    for index, texts, words, preserved in prepared:
         row: dict[str, Any] = {
             "index": index,
             "nWords": len(words),
@@ -588,9 +718,46 @@ def vacancy_score(
             # word spans are recomputed because a nonce is a different number of bytes.
             variant_words = word_spans(texts[name])
             result = score_text(lm, texts[name], variant_words, preserved)
+            if not result.preserved:
+                # The words survived but none of their TOKENS is a scored position:
+                # position 0 has no prediction and is excluded, so a passage whose only
+                # preserved word is its first word contributes nothing. Left to itself
+                # this reached `_mean([])` and came back as a 500.
+                raise InvalidParamError(
+                    f"passage {index} has {len(preserved)} preserved word(s) but no scored "
+                    f"token belonging to one in the {name!r} variant: position 0 has no "
+                    "prediction and is excluded, so a preserved word that is the first "
+                    "word of the passage cannot be scored. Put a closed-class word later "
+                    "in the passage, or score more text.",
+                    {"passage": index, "variant": name, "nPreservedWords": len(preserved)},
+                )
             scored[name].append(result)
             row["variants"][name] = _stats(result)
         per_passage.append(row)
+
+    n_pairs = sum(len(s.preserved) for s in scored["english"])
+    if n_pairs < MIN_PAIRED_PRESERVED:
+        raise InvalidParamError(
+            f"this request pooled {n_pairs} paired preserved token(s); a difference and "
+            f"its standard error need at least {MIN_PAIRED_PRESERVED} (the sample variance "
+            "divides by n − 1, so at n = 1 the standard error does not exist). Score a "
+            "longer passage, or add more passages — the shipped default set pools several "
+            "hundred.",
+            {"nPairs": n_pairs, "required": MIN_PAIRED_PRESERVED},
+        )
+
+    # At p = 0 nothing is vacated, so all three variants are the SAME string and every
+    # difference is exactly 0 by construction. That is a genuine null control — the
+    # instrument reading zero when nothing changed — but it is an identity, not a
+    # measurement, and the panel must not print "0.000 ± 0.000 nats" as though a
+    # measurement had come back that way. The flag travels with the numbers so the
+    # renderer says which one it has.
+    identity = float(p) == 0.0
+    identity_note = (
+        "At p = 0 no stem is vacated, so english, swap and nonce are the same string "
+        "character for character and every difference is exactly 0 by construction. This "
+        "is the instrument's null control, not a measurement of anything."
+    )
 
     differences = [
         {
@@ -625,6 +792,10 @@ def vacancy_score(
             **_paired_difference(scored["english"], scored["nonce"], "nonce − english"),
         },
     ]
+    for difference in differences:
+        difference["identity"] = identity
+        if identity:
+            difference["identityNote"] = identity_note
 
     return {
         "model_id": lm.model_id,

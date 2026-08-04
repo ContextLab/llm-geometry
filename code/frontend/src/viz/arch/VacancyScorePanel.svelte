@@ -3,6 +3,16 @@
   import { archModelId } from "../../lib/explorerStores";
   import { client, type ArchVacancyScoreResult } from "../../lib/dataClient";
   import { plainError } from "./archShared";
+  import {
+    errorBarTerms,
+    formCostsLessThanContent,
+    formSharePercent,
+    nats,
+    num,
+    secondaryLine,
+    upperBoundLabel,
+    verdictKind,
+  } from "./vacancyVerdict";
   import Explain from "../../lib/Explain.svelte";
   import StaticNotice from "../../lib/StaticNotice.svelte";
   import { STATIC_MODE } from "../../lib/staticUx";
@@ -62,10 +72,6 @@
     }
   });
 
-  const nats = (v: number | null | undefined): string =>
-    v === null || v === undefined || Number.isNaN(v) ? "—" : v.toFixed(3);
-  const num = (v: number | null | undefined, digits = 3): string =>
-    v === null || v === undefined || Number.isNaN(v) ? "—" : v.toFixed(digits);
   const int = (v: number): string => v.toLocaleString();
 
   const headline = $derived((result?.differences ?? []).filter((d) => d.headline));
@@ -76,22 +82,16 @@
   const total = $derived(result?.differences.find((d) => d.id === "total") ?? null);
 
   /**
-   * Whether the run resolved the "unknown form" effect at all. It is the small one —
-   * a tenth of a nat against a per-token spread of several — so a short passage cannot
-   * see it, and the sign of an unresolved estimate is noise. Drawing the conclusion
-   * anyway is exactly the kind of thing this panel exists to not do, so the verdict
-   * sentence below branches on this rather than asserting the result unconditionally.
+   * Which closing sentence this run licenses — decided in `vacancyVerdict.ts`, against
+   * real payloads, under test. Rendering is this file's job; deciding what may be said
+   * about a number is the part that was wrong on the live site, so it lives where it can
+   * be asserted with the numbers that were actually observed.
    */
-  const resolved = $derived(
-    unknownForm !== null &&
-      unknownForm.nats !== null &&
-      unknownForm.se !== null &&
-      Math.abs(unknownForm.nats) > 2 * unknownForm.se,
-  );
-  /** The share of the total damage attributable to the form, as a whole percent. */
-  const formShare = $derived(
-    unknownForm?.nats && total?.nats ? Math.round((unknownForm.nats / total.nats) * 100) : 0,
-  );
+  const verdict = $derived(verdictKind(unknownForm));
+  /** `null` where "N% of the total damage" would not be a share of anything. */
+  const formShare = $derived(formSharePercent(unknownForm, total));
+  /** Whether the closing ordering claim is one THIS run supports. */
+  const formCostsLess = $derived(formCostsLessThanContent(unknownForm, wrongContent));
 
   let seq = 0;
   async function score(): Promise<void> {
@@ -200,6 +200,25 @@
     Nothing runs while you type: this is real inference, so it waits for the button.
   </p>
 
+  <!--
+    The `p` control used to be a bare number input at 0.05 steps with nothing saying what
+    `p` was — and 19 of its 21 values are configurations in which the swap map is provably
+    non-injective, which the Lexicon Lab refuses by name (contract §5.2a) while this panel
+    reported a decomposition through them anyway. The engine refuses them here too now;
+    this says why before the reader spends a run finding out, exactly as the Lexicon Lab's
+    mint note does.
+  -->
+  <p class="pnote" data-testid="arch-vac-pnote">
+    <b><code>p</code> is the vacancy rate</b> — the fraction of eligible open-class stems replaced.
+    The decomposition needs the <code>swap</code> control, and a swap map is injective only at
+    <code>p = 0</code> and <code>p = 1</code>: its replacements are drawn <i>from</i> the passage's
+    own types, so in between a vacated type can land on one that was not vacated. That is a
+    theorem (contract §5.2a), not a rough edge, so intermediate values are <b>refused</b> rather
+    than scored. <code>p = 1</code> is full vacancy and the configuration the reference numbers
+    were measured at; <code>p = 0</code> is the null control, where all three variants are one
+    string and every difference is exactly 0 <i>by construction</i>.
+  </p>
+
   {#if busy}
     <div class="running" data-testid="arch-vac-busy">
       <div class="bar"><div class="fill"></div></div>
@@ -212,7 +231,21 @@
   {/if}
 
   {#if error}
-    <div class="err" data-testid="arch-vac-error">{error}</div>
+    <div class="err" data-testid="arch-vac-error">
+      <span>{error}</span>
+      {#if error.includes("§5.2a")}
+        <!-- The Lexicon Lab offers the two defined ends rather than moving the control
+             silently; so does this. Nothing is substituted for the refused run. -->
+        <div class="actions">
+          <button data-testid="arch-vac-set-p1" onclick={() => ((p = 1), void score())}>
+            Set p = 1 — full vacancy
+          </button>
+          <button data-testid="arch-vac-set-p0" onclick={() => ((p = 0), void score())}>
+            Set p = 0 — the null control
+          </button>
+        </div>
+      {/if}
+    </div>
   {/if}
 
   {#if result}
@@ -229,12 +262,13 @@
                 {nats(d.nats)}<span class="unit">nats</span>
               </span>
               <span class="derr" data-testid={`arch-vac-${d.id}-err`}>
-                ± {num(d.se)} (sampling, {int(d.nPairs)} paired tokens){#if d.quantizationUncertaintyNats}
-                  &nbsp;· ± {d.quantizationUncertaintyNats} (quantization, measured){/if}
+                {errorBarTerms(d).join(" · ")}
               </span>
             {/if}
             {#if d.upperBound && !d.refused}
-              <span class="bound">upper bound — see below</span>
+              <span class="bound" data-testid={`arch-vac-${d.id}-bound`}>
+                {upperBoundLabel(d)}
+              </span>
             {/if}
           </div>
         {/each}
@@ -252,18 +286,36 @@
       <p class="twobytwo" data-testid="arch-vac-verdict">
         That juxtaposition is the whole result: a word's form is worth <b>exactly nothing</b> to a
         model trained from scratch with no lexical entries, and
-        {#if !unknownForm || unknownForm.refused}
+        {#if verdict === "refused" || !unknownForm}
           a quantity this build may not report to one that has them (see the refusal above).
-        {:else if !resolved}
+        {:else if verdict === "identity"}
+          <b>exactly nothing</b> to one that has them either — but by construction, not by
+          measurement: {unknownForm.identityNote}
+        {:else if verdict === "unresolved"}
           <b>{nats(unknownForm.nats)} ± {num(unknownForm.se)} nats</b> to one that has them — an
           effect this sample does not resolve, because the standard error is more than half of it.
           Score more text (the pooled corpus excerpts above are the measured configuration) before
           reading anything into the sign.
+        {:else if verdict === "backwards"}
+          <b>{nats(unknownForm.nats)} nats</b> to one that has them — which is
+          <b>negative</b>, and a cost cannot be. It says the nonce variant was <i>easier</i> to
+          predict than the swap variant, so on this sample the contrast ran backwards and no
+          conclusion is drawn from it. That happens at intermediate <code>p</code> and on short
+          passages, where the swap variant's own replacements can be rarer than the nonce forms
+          that replace them; it is not the measured configuration. Score the pooled corpus
+          excerpts at <code>p = 1</code> — the run the reference numbers come from — before
+          reading a direction into this.
         {:else}
           <b>{nats(unknownForm.nats)} nats</b> to one that has them — against
           <b>{nats(wrongContent?.nats)} nats</b>
-          for simply saying the wrong thing, i.e. {formShare}% of the total damage. Even where a
-          location exists, losing it costs far less than losing the content.
+          for simply saying the wrong thing{#if formShare}, i.e. {formShare} of the total damage{/if}.
+          {#if formCostsLess}
+            Even where a location exists, losing it costs far less than losing the content.
+          {:else}
+            On this sample the form cost at least as much as the content did — the reverse of the
+            ordering the pooled corpus run finds, so read it as this sample's result rather than
+            as the finding.
+          {/if}
         {/if}
       </p>
 
@@ -302,10 +354,19 @@
         />
       {/if}
 
+      <!--
+        A secondary row is still a number with an error bar, and it gets EVERY term of it.
+        This row rendered `nll(nonce) − nll(english) = 0.879 ± 0.074` on the live static
+        site while ignoring the `quantizationUncertaintyNats: 0.2` the same response
+        carried — and the interval it stated, [0.805, 0.953], excludes the float32 truth
+        0.9892. FR-720a: a stated ± that was never measured is a fabricated error bar and
+        is worse than no number; so is a measured one that was dropped. The two headline
+        cards above render both terms, and so does this.
+      -->
       {#each secondary as d (d.id)}
         <p class="secondary" data-testid={`arch-vac-${d.id}`}>
           <span class="sname">{d.label}</span>
-          <span class="mono">{d.expr} = {nats(d.nats)} ± {num(d.se)}</span>
+          <span class="mono" data-testid={`arch-vac-${d.id}-err`}>{secondaryLine(d)}</span>
           <span class="snote">{d.note}</span>
         </p>
       {/each}
@@ -495,12 +556,39 @@
     }
   }
   .err {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
     background: rgba(255, 122, 144, 0.1);
     color: var(--bad);
     border: 1px solid rgba(255, 122, 144, 0.3);
     border-radius: 10px;
     padding: 0.6rem 0.8rem;
     font-size: 0.8rem;
+    line-height: 1.5;
+  }
+  .err .actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .err .actions button {
+    background: transparent;
+    color: var(--bad);
+    border: 1px solid rgba(255, 122, 144, 0.5);
+    border-radius: 8px;
+    padding: 0.25rem 0.7rem;
+    font-size: 0.74rem;
+  }
+  .pnote {
+    margin: 0;
+    font-size: 0.72rem;
+    line-height: 1.55;
+    color: var(--text-dim);
+    max-width: 84ch;
+  }
+  .pnote code {
+    font-family: var(--mono);
   }
   .grid {
     display: flex;

@@ -172,18 +172,29 @@
     weights ? idxLabels("col", weights.c0, weights.c1, weights.grid_shape[1]) : undefined,
   );
 
-  // STATIC build: downsampled windows come from ONE precomputed whole-tensor overview
-  // tile, so a downsampled response always reports r0..c1 = the FULL tensor (a
-  // sub-window overview can't be honestly derived from it — 003-C). Label it for what
-  // it is, keyed off the response DATA, never the request.
+  // STATIC build: an over-budget window comes from ONE precomputed whole-tensor overview
+  // tile, so it always reports r0..c1 = the FULL tensor (a sub-window overview can't be
+  // honestly derived from it — 003-C). Label it for what it is, keyed off the response
+  // DATA, never the request: `quantized` is set only by the static client and only on
+  // that tile path.
   const fullOverview = $derived(
     STATIC_MODE &&
       weights !== null &&
-      weights.downsampled &&
+      weights.quantized === "uint8" &&
       weights.r0 === 0 &&
       weights.c0 === 0 &&
       weights.r1 === (weights.shape[0] ?? 1) &&
       weights.c1 === (weights.shape[1] ?? 1),
+  );
+  // Two independent facts about that tile, and it used to assert the wrong one: every
+  // 1-D parameter's tile is a FULL-RESOLUTION strip (no cells averaged) that is
+  // nonetheless 8-bit. The caption now says which of the two applies.
+  const overviewNote = $derived(
+    weights === null
+      ? ""
+      : weights.downsampled
+        ? "strided mean, 8-bit"
+        : "full resolution, 8-bit",
   );
 </script>
 
@@ -239,7 +250,7 @@
     {:else if weights}
       <div class="viewmeta">
         {#if fullOverview}
-          {weights.shape.join(" × ")} · <b>overview (whole tensor, downsampled)</b>
+          {weights.shape.join(" × ")} · <b>overview (whole tensor, {overviewNote})</b>
         {:else}
           {#if zoom}
             rows {weights.r0}–{weights.r1 - 1} · cols {weights.c0}–{weights.c1 - 1}

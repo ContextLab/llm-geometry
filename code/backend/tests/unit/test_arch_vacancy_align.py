@@ -15,14 +15,16 @@ from transformers import AutoTokenizer
 
 from llm_geometry.arch.vacancy_score import (
     byte_decoder,
+    check_word_alphabet,
     default_passages,
+    fragmented_words,
     preserved_token_indices,
     preserved_word_indices,
     token_byte_spans,
     variant_texts,
     word_spans,
 )
-from llm_geometry.errors import ComputeError
+from llm_geometry.errors import ComputeError, InvalidParamError
 
 # Every curated model is a byte-level BPE; gpt2 and SmolLM2 have no normalizer and Qwen
 # has an NFC one, which is the case the up-front normalization exists for.
@@ -137,6 +139,48 @@ def test_variants_preserve_word_count_and_the_scaffolding() -> None:
     nonce_words = word_spans(texts["nonce"])
     assert any(swap_words[i].word != words[i].word for i in vacated)
     assert any(nonce_words[i].word != swap_words[i].word for i in vacated)
+
+
+def test_a_diacritic_word_is_refused_by_name_rather_than_mangled() -> None:
+    """Red team F6. `WORD_RE` is ASCII-only, so `café` is the word `caf` to the transform.
+
+    Two symptoms, one cause. Left alone, "a café" vacated to "a washé" and the endpoint
+    RETURNED a number computed over a fragment of a word (a plausible wrong answer, the
+    worst class), while `naïvely` split into `na` + `vely` and produced an opaque HTTP 500
+    naming a token index. Both are refused up front now, and the refusal names the word.
+    """
+    assert fragmented_words("a café on the table") == ["café"]
+    assert fragmented_words("done naïvely") == ["naïvely"]
+    # …and the transform really did see only a fragment: proof the refusal is not fussy.
+    assert [w.word for w in word_spans("a café")] == ["a", "caf"]
+
+    for text in ("The dog sat by a café.", "He did it naïvely.", "a résumé"):
+        with pytest.raises(InvalidParamError, match="ASCII letters only") as exc:
+            check_word_alphabet(text, 0)
+        assert exc.value.detail["words"], "the refusal must name the offending word"
+
+    # Runs WORD_RE matches in full, and runs it never touches, are both fine: an emoji or
+    # a CJK run is never vacated and is byte-identical in all three variants.
+    for ok in ("don't good-bye o'clock", "The cat sat. 🙂🙂 The dog ran.", "the 猫が座った cat"):
+        assert fragmented_words(ok) == []
+        check_word_alphabet(ok, 0)
+
+
+def test_intermediate_p_is_refused_exactly_as_the_lexicon_lab_refuses_it() -> None:
+    """Red team F7. §5.2a: swap's images are domain types, so the map is injective only
+    at p ∈ {0, 1}. The Lexicon Lab raises there; this arm used to expose it at 0.05 steps
+    and report a decomposition computed through a non-injective map."""
+    passage = default_passages(count=1)[0]
+    for p in (0.05, 0.5, 0.95):
+        with pytest.raises(InvalidParamError, match="§5.2a") as exc:
+            variant_texts(passage, p=p, seed=0, match_prosody=True, keep=frozenset())
+        assert exc.value.detail["p"] == p
+    # The two defined ends still work, and p = 1 really does vacate.
+    for p in (0.0, 1.0):
+        texts = variant_texts(passage, p=p, seed=0, match_prosody=True, keep=frozenset())
+        assert set(texts) == {"english", "swap", "nonce"}
+    assert len({variant_texts(passage, p=0.0, seed=0, match_prosody=True, keep=frozenset())[n]
+                for n in ("english", "swap", "nonce")}) == 1
 
 
 def test_default_passages_are_deterministic_and_sized() -> None:

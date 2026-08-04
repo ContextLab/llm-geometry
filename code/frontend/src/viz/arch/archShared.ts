@@ -1,5 +1,12 @@
 // Shared helpers for the Architecture Explorer (src/viz/arch/**).
-import { ApiError, client, type ArchGraph, type ArchNode, type ArchNodeKind } from "../../lib/dataClient";
+import {
+  ApiError,
+  client,
+  type ArchGeneratedToken,
+  type ArchGraph,
+  type ArchNode,
+  type ArchNodeKind,
+} from "../../lib/dataClient";
 import { STATIC_MODE } from "../../lib/staticUx";
 
 // ---------------------------------------------------------------------------
@@ -63,6 +70,32 @@ export function paramCount(n: ArchNode): number {
   let total = 0;
   for (const p of n.params) total += p.shape.reduce((a, b) => a * b, 1);
   return total;
+}
+
+/**
+ * The reply tooltip for one generated token, at the temperature it was DRAWN AT.
+ *
+ * `temperature` is a required argument, not a store read, because that is the whole bug
+ * this signature exists to make impossible: the caller must hand over the temperature
+ * belonging to the reply it is labelling. Reading the live slider instead made a greedy
+ * reply announce "chance of being drawn at T=1.20: 100.0%" for a token whose plain-softmax
+ * probability the same tooltip printed as 8.5% — two numbers about two different runs in
+ * one sentence.
+ *
+ * The two probabilities are genuinely different distributions and the text says so:
+ * `t.prob` is the chosen token's probability under the SAMPLING distribution (one-hot at
+ * T = 0, hence 100%), while `t.topk.probs` is always the model's plain softmax.
+ */
+export function tokenTip(t: ArchGeneratedToken, temperature: number): string {
+  const alts = t.topk.texts
+    .map((s, i) => `${JSON.stringify(s)} ${(t.topk.probs[i] * 100).toFixed(1)}%`)
+    .join(" · ");
+  const note = t.note ? ` · ⚠ ${t.note}` : "";
+  const chosen =
+    temperature === 0
+      ? "greedy pick (chosen with certainty)"
+      : `chance of being drawn at T=${temperature.toFixed(2)}: ${(t.prob * 100).toFixed(1)}%`;
+  return `${chosen} · the model's own top-5: ${alts}${note}`;
 }
 
 // One-line explainer per node kind — parameterless (functional) ops get these

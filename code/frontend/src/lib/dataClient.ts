@@ -325,6 +325,15 @@ export interface ArchWeightsData {
   values: number[][]; // gr×gc
   stats: { min: number; max: number; mean: number; std: number };
   method: "exact" | "strided_mean";
+  /**
+   * STATIC BUILD ONLY, and never sent by the HTTP API (the contract's response has no
+   * such field). Set when the values came from a precomputed overview tile, which is
+   * 8-bit quantized at build time. `downsampled`/`method` describe whether cells were
+   * AVERAGED; this describes their precision, and the two are independent: every 1-D
+   * parameter's tile is a full-resolution strip (`downsampled: false, method: "exact"`)
+   * that is nonetheless uint8. The inspector needs both to caption the map truthfully.
+   */
+  quantized?: "uint8";
 }
 
 export interface ArchTraceParams {
@@ -434,6 +443,14 @@ export interface ArchVacancyDifference {
   note?: string;
   /** Stated only where it was MEASURED for the dtype that ran; never invented. */
   quantizationUncertaintyNats?: number;
+  /**
+   * True when `p = 0`: no stem is vacated, so all three variants are the same string and
+   * every difference is exactly 0 BY CONSTRUCTION. A real zero, but an identity rather
+   * than a measurement, and the panel has to say which one it is showing.
+   */
+  identity?: boolean;
+  /** The stack's own words for that identity — rendered, never paraphrased here. */
+  identityNote?: string;
   refused?: ArchVacancyRefusal;
 }
 

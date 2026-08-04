@@ -12,6 +12,7 @@ import math
 
 import pytest
 
+from llm_geometry.api.encoding import jsonable_6sig
 from llm_geometry.arch.vacancy_score import (
     VARIANTS,
     default_passages,
@@ -136,12 +137,79 @@ def test_pooling_is_token_weighted_across_passages() -> None:
 
 
 def test_p_zero_is_the_identity_and_costs_nothing() -> None:
-    """u ∈ [0,1), so p = 0 vacates nothing and every variant is the same text."""
+    """u ∈ [0,1), so p = 0 vacates nothing and every variant is the same text.
+
+    Red team F7: the zero is real, but it is an IDENTITY, not a measurement, and the
+    payload has to say which one it is — the panel was rendering "0.000 ± 0.000 nats
+    (sampling, 20 paired tokens)" for "the cost of wrong content" with nothing on screen
+    saying the three variants were character-identical.
+    """
     result = vacancy_score(MODEL, default_passages(count=1), p=0.0, seed=0)
     previews = {v["preview"] for v in result["variants"]}
     assert len(previews) == 1
     for d in result["differences"]:
         assert d["nats"] == pytest.approx(0.0, abs=1e-9)
+        assert d["identity"] is True
+        assert "exactly 0 by construction" in d["identityNote"]
+    # …and a real run is flagged as NOT an identity, so the flag distinguishes something.
+    real = vacancy_score(MODEL, default_passages(count=1), p=1.0, seed=0)
+    assert all(d["identity"] is False for d in real["differences"])
+    assert all("identityNote" not in d for d in real["differences"])
+
+
+@pytest.mark.parametrize(
+    "passage",
+    [
+        "I like cats and dogs.",  # 1 paired preserved token -> se = NaN
+        "the the",  # 1 paired preserved token
+        "the dog",  # the only preserved word is token 0, which has no prediction
+        "The dog barked.",
+        "Hello world",  # no word survives the transform at all
+    ],
+)
+def test_short_passages_get_a_typed_400_naming_the_cause(passage: str) -> None:
+    """Red team F2. Every one of these returned HTTP 500 to a first-try user input.
+
+    Two of them as `InternalError: non-finite value in response payload` — the designed
+    "standard error undefined at n = 1" path met `jsonable_6sig`, which refuses non-finite
+    numbers, so the design was unreachable through the API and the panel's red box showed
+    the reader that string. The rest as untyped `ComputeError`s about averaging no tokens.
+    """
+    with pytest.raises(InvalidParamError) as exc:
+        vacancy_score(MODEL, [passage], p=1.0, seed=0)
+    assert exc.value.http_status == 400
+    message = str(exc.value)
+    assert "non-finite" not in message
+    # The message has to name the real cause, in terms of the reader's own input.
+    assert any(
+        phrase in message
+        for phrase in ("paired preserved token", "no scored token", "no word that survives")
+    ), message
+
+
+def test_a_result_that_is_returned_always_encodes(scored: dict) -> None:
+    """The endpoint's own encoder is the thing that turned NaN into a 500, so the
+    invariant is stated where it belongs: anything `vacancy_score` returns must survive
+    `jsonable_6sig`. There is no path that computes a number the API cannot express."""
+    jsonable_6sig(scored)
+    jsonable_6sig(vacancy_score(MODEL, default_passages(count=1), p=0.0, seed=0))
+
+
+def test_intermediate_p_is_refused_end_to_end() -> None:
+    """Red team F7, through the endpoint: 0 < p < 1 is where swap is non-injective."""
+    with pytest.raises(InvalidParamError, match="§5.2a"):
+        vacancy_score(MODEL, default_passages(count=1), p=0.5, seed=4)
+
+
+def test_a_diacritic_passage_is_refused_before_any_number_is_computed() -> None:
+    """Red team F6, through the endpoint. `café` used to score and return `washé`."""
+    with pytest.raises(InvalidParamError, match="ASCII letters only"):
+        vacancy_score(
+            MODEL,
+            ["The dog and the cat sat on the mat with a café and a résumé on the table."],
+            p=1.0,
+            seed=0,
+        )
 
 
 def test_bad_parameters_raise_typed_errors() -> None:

@@ -19,7 +19,7 @@
  * pieces are not `utf8(text)` byte for byte, this raises rather than mis-attributing.
  */
 
-import { computeError } from "./errors";
+import { computeError, invalidParamError } from "./errors";
 
 /** GPT-2's unicode→byte table: the inverse of `bytes_to_unicode`. */
 function buildByteDecoder(): Map<string, number> {
@@ -94,6 +94,21 @@ export function tokenByteSpans(pieces: readonly string[], text: string): ByteSpa
   return spans;
 }
 
+/**
+ * `nChars` for the contract's §8.1 stats: **Unicode code points**, matching Python's
+ * `len(str)`.
+ *
+ * Never `text.length`. JavaScript's `.length` counts UTF-16 units, so it reported 77 for
+ * the same probe string the backend reported 75 for — two astral emoji, two surrogate
+ * pairs, two extra units. One field, one name, one contract, two stacks: they have to be
+ * counting the same thing, and `bitsPerChar` is derived from it in the full stack.
+ * (Attribution stays in BYTES — see the header — because that is a unit both stacks can
+ * partition text with. This is a reporting count, not an index.)
+ */
+export function nCharsOf(text: string): number {
+  return [...text].length;
+}
+
 export interface WordSpan {
   index: number;
   word: string;
@@ -118,6 +133,57 @@ export function wordSpans(text: string, wordRe: RegExp): WordSpan[] {
 }
 
 /**
+ * A run of characters a READER would call one word — Unicode letters plus the internal
+ * apostrophes and hyphens `WORD_RE` allows. Only used to find runs `WORD_RE` mangles.
+ */
+const WORDLIKE_RE = /\p{L}+(?:['\-]\p{L}+)*/gu;
+
+/**
+ * Words of `text` that `wordRe` splits or truncates, in order of appearance.
+ *
+ * MIRROR of `fragmented_words` (Python). The transform's `WORD_RE` is
+ * `[A-Za-z]+(?:['-][A-Za-z]+)*` — ASCII letters only — so `café` is the word `caf` to it
+ * and `naïvely` is the two words `na` + `vely`. Vacating those rewrites a fragment: "a
+ * café" became "a washé", which the full stack RETURNED as a score. Runs `wordRe` matches
+ * entirely (`don't`, `good-bye`) are fine, and so are runs it never touches (CJK, emoji):
+ * those are never vacated, are byte-identical in all three variants, and are attributed
+ * to no word — the same treatment punctuation gets.
+ */
+export function fragmentedWords(text: string, wordRe: RegExp): string[] {
+  const runs = new RegExp(WORDLIKE_RE.source, "gu");
+  const inner = new RegExp(wordRe.source, wordRe.flags.includes("g") ? wordRe.flags : `${wordRe.flags}g`);
+  const out: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = runs.exec(text)) !== null) {
+    const run = m[0];
+    const parts = run.match(inner) ?? [];
+    if (parts.length > 0 && (parts.length > 1 || parts[0] !== run)) out.push(run);
+  }
+  return out;
+}
+
+/**
+ * Refuse a passage whose words the transform would mangle. MIRROR of
+ * `check_word_alphabet` (Python), including its message, so a reader who runs both stacks
+ * is told the same thing.
+ */
+export function checkWordAlphabet(text: string, wordRe: RegExp, index?: number): void {
+  const bad = [...new Set(fragmentedWords(text, wordRe))];
+  if (bad.length === 0) return;
+  const where = index === undefined ? "" : `passage ${index}: `;
+  throw invalidParamError(
+    `${where}the vacancy transform's word alphabet is ASCII letters only ` +
+      `(WORD_RE = [A-Za-z]+(?:['-][A-Za-z]+)*), so it does not see these words as words ` +
+      `and would rewrite a fragment of each instead: ${bad.map((w) => JSON.stringify(w)).join(", ")}. ` +
+      "Refusing rather than scoring text the transform mangles — 'a café' vacates to " +
+      "'a washé', and a single BPE piece can then cover both a preserved and a vacated " +
+      "fragment. Use a passage written in the ASCII alphabet (emoji and CJK are fine: " +
+      "they are never vacated and are identical in all three variants). Widening the " +
+      "alphabet is a change to the shared transform and its contract, not to this panel.",
+  );
+}
+
+/**
  * Indices of the tokens belonging to a PRESERVED word.
  *
  * A token belongs to a word when their byte ranges OVERLAP — not "starts inside". A
@@ -126,9 +192,13 @@ export function wordSpans(text: string, wordRe: RegExp): WordSpan[] {
  * would drop nearly all of them.
  *
  * A token overlapping both a preserved and a vacated word cannot be attributed, and that
- * raises: the curated models' pretokenizers never merge across a word boundary, so if it
- * happens the assumption behind this attribution has changed and no number may be
- * reported from it.
+ * raises. For a passage inside the transform's ASCII word alphabet it cannot happen — the
+ * curated models' pretokenizers never merge across a word boundary — but it CAN happen,
+ * and did as an opaque 500, when `WORD_RE` splits one written word in two: `naïvely` is
+ * `na` + `vely` and one BPE piece covers both halves, so one may be preserved while the
+ * other is vacated. `checkWordAlphabet` refuses such passages up front, naming the word
+ * instead of a token index. This stays as the last line of defence: if it fires, the
+ * assumption behind this attribution has changed and no number may be reported from it.
  */
 export function preservedTokenIndices(
   spans: readonly ByteSpan[],

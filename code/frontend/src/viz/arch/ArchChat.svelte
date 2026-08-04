@@ -10,7 +10,7 @@
   } from "../../lib/explorerStores";
   import { client, type ArchGenerateResult, type ArchGeneratedToken } from "../../lib/dataClient";
   import { showTip, hideTip } from "../../lib/tooltip";
-  import { plainError } from "./archShared";
+  import { plainError, tokenTip } from "./archShared";
   import StaticRuntimeBadge from "../../lib/StaticRuntimeBadge.svelte";
   import { STATIC_MODE } from "../../lib/staticUx";
 
@@ -36,6 +36,18 @@
   let error = $state("");
   let result = $state<ArchGenerateResult | null>(null);
   let forModel = ""; // replies are model-specific — drop them when the model changes
+  /**
+   * The temperature the reply on screen was DRAWN AT, captured with it.
+   *
+   * `t.prob` is the chosen token's probability under the sampling distribution that
+   * produced this reply, so the tooltip that explains it has to name that reply's
+   * temperature — not whatever the slider says now. Reading the live store made a greedy
+   * reply claim, after the slider moved to 1.2, that a token whose plain-softmax
+   * probability is 8.5 % had a "chance of being drawn at T=1.20: 100.0%". The reply is
+   * not re-sampled when the slider moves (that would be a new forward pass the reader
+   * did not ask for), so the label has to be pinned instead.
+   */
+  let forTemperature = $state(0);
 
   $effect(() => {
     const m = $archModelId;
@@ -53,16 +65,18 @@
     error = "";
     try {
       const sys = get(archSystemPrompt).trim();
+      const temperature = get(archTemperature);
       const r = await client.archGenerate({
         model_id: m,
         prompt: get(archPrompt),
         system_prompt: sys ? sys : null,
-        temperature: get(archTemperature),
+        temperature,
         max_new_tokens: get(archMaxNewTokens),
       });
       if (my !== seq) return;
       result = r;
       forModel = m;
+      forTemperature = temperature;
     } catch (e) {
       if (my !== seq) return;
       error = plainError(e);
@@ -82,21 +96,12 @@
     return text.slice(2, -2); // "<|im_end|>" -> "im_end"
   }
 
-  // These are two DIFFERENT distributions and the tooltip has to say so. `prob` is the
-  // chosen token's probability under the SAMPLING distribution (one-hot at T=0, so
-  // 100%); `topk.probs` is always the model's plain softmax. Labelling the first a bare
-  // "p =" let the same token read as 100% and 86.8% in one line.
-  function tokenTip(t: ArchGeneratedToken): string {
-    const alts = t.topk.texts
-      .map((s, i) => `${JSON.stringify(s)} ${(t.topk.probs[i] * 100).toFixed(1)}%`)
-      .join(" · ");
-    const note = t.note ? ` · ⚠ ${t.note}` : "";
-    const chosen =
-      $archTemperature === 0
-        ? "greedy pick (chosen with certainty)"
-        : `chance of being drawn at T=${$archTemperature.toFixed(2)}: ${(t.prob * 100).toFixed(1)}%`;
-    return `${chosen} · the model's own top-5: ${alts}${note}`;
-  }
+  // The temperature handed to `tokenTip` is `forTemperature` — the one this reply was
+  // drawn at — never the live slider. The slider describes the NEXT run; the reply
+  // describes the last one.
+  const tip = (t: ArchGeneratedToken): string => tokenTip(t, forTemperature);
+  /** True once the slider has moved away from what the reply on screen was drawn at. */
+  const staleTemperature = $derived(result !== null && $archTemperature !== forTemperature);
 
   // Surprise coloring: confident tokens underline cool (--accent), unlikely draws warm
   // (--bad) — the reply doubles as a per-token probability readout.
@@ -125,7 +130,14 @@
   <div class="knobs">
     <label class="knob">
       <span class="klabel">temperature <b>{$archTemperature.toFixed(2)}</b></span>
-      <input type="range" min="0" max="1.6" step="0.05" bind:value={$archTemperature} />
+      <input
+        type="range"
+        min="0"
+        max="1.6"
+        step="0.05"
+        data-testid="arch-temperature"
+        bind:value={$archTemperature}
+      />
     </label>
     <label class="knob">
       <span class="klabel">max tokens <b>{$archMaxNewTokens}</b></span>
@@ -158,14 +170,25 @@
           class="tok"
           class:special={isSpecial(t.text)}
           role="note"
-          aria-label={tokenTip(t)}
+          aria-label={tip(t)}
           style:border-bottom-color={isSpecial(t.text) ? undefined : probColor(t.prob)}
-          onmousemove={(e) => showTip(e, tokenTip(t))}
+          onmousemove={(e) => showTip(e, tip(t))}
           onmouseleave={hideTip}>{isSpecial(t.text) ? specialLabel(t.text) : t.text}</span>{/each}
     </div>
-    <div class="replymeta">
-      {result.tokens.length} tokens · finish: {result.finish_reason} · hover a token for how likely the model thought it was
+    <div class="replymeta" data-testid="arch-reply-meta">
+      {result.tokens.length} tokens · finish: {result.finish_reason} · drawn at T={forTemperature.toFixed(
+        2,
+      )} · hover a token for how likely the model thought it was
     </div>
+    {#if staleTemperature}
+      <!-- The slider now describes a run that has not happened. Say so rather than let
+           the reader assume the reply on screen belongs to the current setting. -->
+      <div class="stalenote" data-testid="arch-temp-stale">
+        The slider is at <b>T={$archTemperature.toFixed(2)}</b>, but this reply was drawn at
+        <b>T={forTemperature.toFixed(2)}</b> — the per-token numbers still describe that draw.
+        Re-run to sample at the new temperature.
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -304,5 +327,14 @@
     font-size: 0.7rem;
     color: var(--text-dim);
     font-family: var(--mono);
+  }
+  .stalenote {
+    font-size: 0.72rem;
+    line-height: 1.45;
+    color: #ffb454;
+    background: rgba(255, 180, 84, 0.1);
+    border: 1px solid rgba(255, 180, 84, 0.3);
+    border-radius: 8px;
+    padding: 0.4rem 0.55rem;
   }
 </style>

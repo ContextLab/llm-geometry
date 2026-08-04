@@ -27,6 +27,8 @@ interface TilesJson {
     param: string;
     shape: number[];
     grid_shape: number[];
+    downsampled: boolean;
+    method: "exact" | "strided_mean";
     stats: { min: number; max: number; mean: number; std: number };
     offset: number;
     nbytes: number;
@@ -123,6 +125,25 @@ describe("arch precomputed serving", () => {
         expect(v).toBeLessThanOrEqual(tile.vmax + 1e-9);
       }
     }
+  });
+
+  it("does not describe an EXACT 1-D tile as a strided mean (red team F8)", async () => {
+    // Every 1-D parameter fits its grid exactly, so the exporter recorded
+    // `downsampled: false, method: "exact"` for it. The over-budget branch used to
+    // hardcode `strided_mean`/`true` — and `ArchInspector` asks for these with
+    // `max_cells: 128`, so a 768-row strip took that branch on every click.
+    const c = makeClient();
+    const tiles = await readStaticJson<TilesJson>("arch/gpt2/tiles.json");
+    const oneD = tiles.tiles.find((t) => (t.shape[1] ?? 1) === 1 && !t.downsampled);
+    expect(oneD, "no exact 1-D tile in the export to test against").toBeDefined();
+    expect(oneD!.method).toBe("exact");
+    const w = await c.getArchWeights({ model_id: "gpt2", param: oneD!.param, max_cells: 128 });
+    // It really did take the tile branch: the whole tensor came back, not a 128-cell window.
+    expect([w.r0, w.r1, w.c0, w.c1]).toEqual([0, oneD!.shape[0], 0, 1]);
+    expect(w.method).toBe("exact");
+    expect(w.downsampled).toBe(false);
+    // …and it says the thing that IS true of it: uint8, from the precomputed export.
+    expect(w.quantized).toBe("uint8");
   });
 
   it("dequantizes tiles exactly per the manifest encoding", () => {

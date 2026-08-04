@@ -28,10 +28,14 @@ import {
   VACANCY_PER_PASSAGE_REFUSAL,
 } from "../../src/lib/staticClient/arch";
 import {
+  checkWordAlphabet,
+  fragmentedWords,
+  nCharsOf,
   preservedTokenIndices,
   tokenByteSpans,
   wordSpans,
 } from "../../src/lib/staticClient/byteSpans";
+import type { ApiError } from "../../src/lib/dataClient";
 import { readStaticJson } from "./staticTestUtils";
 import golden from "../fixtures/arch-vacancy-passages.json";
 
@@ -125,6 +129,66 @@ describe("the three variants (§8.3)", () => {
     const passage = "The cow jumped over the moon and the little dog laughed.";
     const texts = vacancyVariantTexts(passage, { p: 0, seed: 0, matchProsody: true, keep: [] });
     expect(new Set(Object.values(texts)).size).toBe(1);
+  });
+
+  it("refuses intermediate p, exactly as the Lexicon Lab does (§5.2a)", () => {
+    // Red team F7: the panel exposed p at 0.05 steps and scored a decomposition through
+    // a swap map that is injective only at p ∈ {0, 1}. The Lexicon Lab's engine raises
+    // there; this arm did not.
+    const passage = "The cow jumped over the moon and the little dog laughed at the cat.";
+    for (const p of [0.05, 0.5, 0.95]) {
+      expect(() =>
+        vacancyVariantTexts(passage, { p, seed: 0, matchProsody: true, keep: [] }),
+      ).toThrowError(/§5\.2a/);
+    }
+    for (const p of [0, 1]) {
+      expect(() =>
+        vacancyVariantTexts(passage, { p, seed: 0, matchProsody: true, keep: [] }),
+      ).not.toThrow();
+    }
+  });
+});
+
+describe("the word alphabet (§8.2) — red team F6", () => {
+  it("names the words WORD_RE would split or truncate", () => {
+    // `WORD_RE` is ASCII-only, so `café` is the word `caf` and `naïvely` is `na`+`vely`.
+    expect(fragmentedWords("a café on the table", WORD_RE)).toEqual(["café"]);
+    expect(fragmentedWords("done naïvely", WORD_RE)).toEqual(["naïvely"]);
+    expect(wordSpans("a café", WORD_RE).map((w) => w.word)).toEqual(["a", "caf"]);
+  });
+
+  it("leaves alone what WORD_RE matches whole, and what it never touches", () => {
+    for (const ok of ["don't good-bye o'clock", "The cat sat. 🙂🙂 The dog ran.", "the 猫が座った cat"]) {
+      expect(fragmentedWords(ok, WORD_RE)).toEqual([]);
+      expect(() => checkWordAlphabet(ok, WORD_RE, 0)).not.toThrow();
+    }
+  });
+
+  it("refuses such a passage with a typed error naming the word", () => {
+    // The full stack RETURNED a score for this one: "a café" vacated to "a washé".
+    expect(() =>
+      checkWordAlphabet("The dog and the cat sat with a café on the table.", WORD_RE, 0),
+    ).toThrowError(/ASCII letters only/);
+    const err = (() => {
+      try {
+        checkWordAlphabet("He did it naïvely.", WORD_RE, 2);
+        return null;
+      } catch (e) {
+        return e as ApiError;
+      }
+    })();
+    expect(err?.type).toBe("InvalidParamError");
+    expect(err?.message).toContain("naïvely");
+    expect(err?.message).toContain("passage 2");
+  });
+});
+
+describe("nChars is the same count in both stacks — red team F9", () => {
+  it("counts Unicode code points, never UTF-16 units", () => {
+    const probe = "The cat sat on the mat. 🙂🙂 It was a very good day for the dog and the bird.";
+    // Verbatim from the red team's probe: python len() = 75, JS .length = 77.
+    expect(probe.length).toBe(77);
+    expect(nCharsOf(probe)).toBe(75);
   });
 });
 
