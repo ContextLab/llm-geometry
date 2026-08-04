@@ -90,10 +90,12 @@ import {
 import {
   buildVacancyMap,
   mapVocabWords,
+  typeCounts,
   vacancyDomain,
   vacancyParams as vacancyParamsWithDefaults,
   vacancyStats,
   vacateText,
+  type MintStrategy,
   type VacancyMap,
   type VacancyParams,
   type VacancyStats,
@@ -240,6 +242,12 @@ export interface LexVacancyParamsBody {
   match_prosody?: boolean;
   reveal_after?: number;
   keep?: readonly string[];
+  /**
+   * §8.3's minting strategy. Typed as `string`, not `MintStrategy`, because this is a WIRE
+   * field: it arrives from a caller who may send anything, and the point of parsing it is
+   * to refuse what is not one of the two rather than to assume it away.
+   */
+  mint?: string;
 }
 
 export interface LexVacancyBody extends LexCoverageBody, LexVacancyParamsBody {
@@ -280,6 +288,12 @@ export interface LexVacancyResult {
   match_prosody: boolean;
   reveal_after: number;
   keep: string[];
+  /**
+   * Which minting strategy actually ran. Echoed for the same reason the five knobs above
+   * are: a caller must be able to see WHICH transform produced `vacated_sha256`, not infer
+   * it from what it asked for.
+   */
+  mint: MintStrategy;
   /** Which of §7.2's two rules produced `words`. */
   vocabulary_rule: "mapped" | "rebuilt";
   words: string[];
@@ -458,6 +472,12 @@ export const VACANCY_PREVIEW_MAX = 20000;
  * Written as a spread over the engine's defaults rather than as an object literal on
  * purpose: the transform's parameter set is still growing (§8.3's swap mint), and a
  * literal here would silently drop whatever is added next.
+ *
+ * That comment used to be aspirational: `mint` was in the engine's params, in the UI and
+ * in the transform, and NOT read here — so this function answered `mint="swap"` with nonce
+ * output. Every knob the engine declares must be read out of the body below, and an
+ * unrecognised value must be REFUSED, because a control silently replaced by its default
+ * is indistinguishable from a control that worked.
  */
 function vacancyParamsFrom(body: LexVacancyParamsBody): VacancyParams {
   const keep = body.keep;
@@ -476,14 +496,58 @@ function vacancyParamsFrom(body: LexVacancyParamsBody): VacancyParams {
   }
   const revealAfter = asInt(body.reveal_after, "reveal_after", 0);
   if (revealAfter < 0) throw invalidParamError(`reveal_after must be >= 0, got ${revealAfter}`);
+  const mint = body.mint === undefined ? "nonce" : body.mint;
+  if (!(typeof mint === "string" && mint in MINT_STRATEGIES)) {
+    throw invalidParamError(
+      `mint must be one of ${Object.keys(MINT_STRATEGIES).join(", ")}, got ` +
+        `${JSON.stringify(body.mint)}`,
+    );
+  }
+  const consistent = asBool(body.consistent, "consistent", true);
+  // Mirrors `VacancyParams.__post_init__`, which refuses the same pair, so the two stacks
+  // answer this request with the same typed error rather than one 400 and one 200. (The
+  // engine checks it again at map-build time; this is the wire boundary's copy, in the
+  // same place and for the same reason as the `p` and `reveal_after` range checks above.)
+  if (mint === "swap" && !consistent) {
+    throw invalidParamError(
+      "mint = 'swap' requires consistent = true — the inconsistent control needs a fresh " +
+        "type per occurrence and the corpus has 1680 open-class stems against 8202 vacated " +
+        "tokens, so there is no supply of real words (architecture.md §8.3)",
+    );
+  }
   return vacancyParamsWithDefaults({
     p,
     seed: asInt(body.seed, "seed", 0),
-    consistent: asBool(body.consistent, "consistent", true),
+    consistent,
     matchProsody: asBool(body.match_prosody, "match_prosody", true),
     revealAfter,
     keep: keep == null ? [] : keep.map(String),
+    mint: mint as MintStrategy,
   });
+}
+
+/**
+ * The runtime spelling of `MintStrategy`, which is a compile-time union and therefore
+ * cannot be iterated. Declared as a `Record<MintStrategy, true>` so that adding a third
+ * strategy to the union fails to compile HERE — the alternative, an array cast to the
+ * union, would keep compiling while quietly refusing the new strategy on the wire.
+ */
+const MINT_STRATEGIES: Record<MintStrategy, true> = { nonce: true, swap: true };
+
+/**
+ * The map for these parameters, with the frequency counts `mint = "swap"` needs.
+ *
+ * `buildVacancyMap` throws rather than inventing a ranking when they are missing, so this
+ * is not defensive: it is the one place both call sites (`lexVacancy` and `lexTrain`) get
+ * the same corpus's counts, which is what makes `swap` the same transform in both.
+ */
+function buildMapFor(text: string, params: VacancyParams): VacancyMap {
+  const tokens = tokenize(text);
+  return buildVacancyMap(
+    vacancyDomain(tokens),
+    params,
+    params.mint === "swap" ? typeCounts(tokens) : undefined,
+  );
 }
 
 /**
@@ -1021,7 +1085,7 @@ export class LexSection {
       );
     }
 
-    const vmap = buildVacancyMap(vacancyDomain(tokenize(original)), params);
+    const vmap = buildMapFor(original, params);
     const vacated = vacateText(original, vmap, params);
     const { vocab, rule } = this.vacancyVocab(body, params, vmap, original, vacated);
     const stats = vacancyStats(original, vacated, vmap, params);
@@ -1033,6 +1097,7 @@ export class LexSection {
       match_prosody: params.matchProsody,
       reveal_after: params.revealAfter,
       keep: [...params.keep].map(String).sort(),
+      mint: params.mint,
       vocabulary_rule: rule,
       words: [...vocab.words],
       budget: {
@@ -1109,12 +1174,12 @@ export class LexSection {
       if (typeof body.vacancy !== "object" || Array.isArray(body.vacancy)) {
         throw invalidParamError(
           "vacancy must be an object of the transform's parameters " +
-            "(p, seed, consistent, match_prosody, reveal_after, keep), got " +
+            "(p, seed, consistent, match_prosody, reveal_after, keep, mint), got " +
             JSON.stringify(body.vacancy),
         );
       }
       vacParams = vacancyParamsFrom(body.vacancy);
-      vmap = buildVacancyMap(vacancyDomain(tokenize(originalText)), vacParams);
+      vmap = buildMapFor(originalText, vacParams);
       text = vacateText(originalText, vmap, vacParams);
     }
 
@@ -1215,6 +1280,12 @@ export class LexSection {
           seed,
           elapsed_s: elapsed,
           base: body.base ?? null,
+          // What these weights ARE, in the block that travels with them. A bundle carrying
+          // losses and no provenance leaves the reader that opens it later with no way to
+          // find out — and the Lexicon Lab's loader now says so rather than assuming.
+          provenance: "trained",
+          trained: true,
+          edited: false,
         }),
         first_loss: sig6(done.initialTrainLoss, "first_loss"),
         final_loss: sig6(done.finalTrainLoss, "final_loss"),

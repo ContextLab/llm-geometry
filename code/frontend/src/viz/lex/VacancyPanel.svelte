@@ -77,6 +77,59 @@
   import Progress from "../../lib/Progress.svelte";
   import { view } from "../../lib/stores";
 
+  /**
+   * The largest seed this control accepts — and the largest either stack can carry without
+   * changing it.
+   *
+   * `u(stem, seed)` is `sha256(`${seed}:${stem}`)`, so the seed reaches the digest as
+   * DIGITS. JavaScript has one numeric type, so every integer above 2⁵³−1 is stored as the
+   * nearest representable double and stringifies as that instead: `9007199254740993`
+   * becomes `9007199254740992`, a different string, a different digest, a different map —
+   * while Python, whose ints are arbitrary precision, hashes the digits that were actually
+   * sent. Two stacks, one seed, two corpora, no error on either side.
+   *
+   * The box used to declare `max="9999"` and accept anything, silently substituting the
+   * rounded double for what was typed. A control must not accept a value it will not use:
+   * the declared range and the accepted range are the same number here, and anything
+   * outside it is refused visibly rather than rewritten.
+   */
+  const MAX_SEED = Number.MAX_SAFE_INTEGER;
+
+  /**
+   * What the seed box does with what was typed: a seed to apply, or a sentence saying why
+   * nothing was applied. Never a third thing — in particular, never a *different* seed.
+   */
+  function parseSeed(raw: string): { seed: number } | { error: string } {
+    const text = raw.trim();
+    if (text === "") {
+      return { error: `the seed box is empty — still using seed ${params.seed}` };
+    }
+    // Digits only, deliberately: `Number()` accepts "1e3", " 12 ", "0x10" and "3.0" and
+    // turns each into an integer that is not what the reader typed.
+    if (!/^\d+$/.test(text)) {
+      return {
+        error:
+          `a seed is a whole number from 0 to ${MAX_SEED.toLocaleString("en-US")} — ` +
+          `${JSON.stringify(raw)} is not one, so seed ${params.seed} is still in use`,
+      };
+    }
+    // Compared as an integer, not as a double: `Number("9007199254740993") <= MAX_SEED` is
+    // TRUE, because the parse has already rounded it down to the bound.
+    if (BigInt(text) > BigInt(MAX_SEED)) {
+      return {
+        error:
+          `${Number(text).toLocaleString("en-US")} is above the largest seed this build can ` +
+          `use exactly (${MAX_SEED.toLocaleString("en-US")}). Above it, the browser stores ` +
+          `the nearest representable number instead and would hash a seed you did not ` +
+          `choose — so seed ${params.seed} is still in use.`,
+      };
+    }
+    return { seed: Number(text) };
+  }
+
+  /** Why the last thing typed into the seed box was not applied, or `""`. */
+  let seedError = $state("");
+
   interface Props {
     /** The untransformed corpus — the `p = 0` reference for every comparison here. */
     corpusText: string;
@@ -573,17 +626,32 @@
       <input
         type="number"
         min="0"
-        max="9999"
+        max={MAX_SEED}
         step="1"
         class="num"
+        class:bad={seedError !== ""}
+        aria-invalid={seedError !== "" ? "true" : undefined}
+        aria-describedby={seedError !== "" ? "lex-vacancy-seed-error" : undefined}
         data-testid="lex-vacancy-seed"
         value={params.seed}
         oninput={(e) => {
-          const v = Math.trunc(Number(e.currentTarget.value));
-          if (Number.isFinite(v)) onSeed(Math.max(0, v));
+          // `max` on a number input does not block a typed value, so the bound is enforced
+          // here — and enforced by REFUSING, never by substituting a nearby number.
+          const parsed = parseSeed(e.currentTarget.value);
+          if ("seed" in parsed) {
+            seedError = "";
+            onSeed(parsed.seed);
+          } else {
+            seedError = parsed.error;
+          }
         }}
       />
     </label>
+    {#if seedError}
+      <p class="seed-error" id="lex-vacancy-seed-error" role="alert" data-testid="lex-vacancy-seed-error">
+        {seedError}
+      </p>
+    {/if}
 
     <div class="ctl">
       <span class="ctl-label" id="lex-vacancy-condition-label">condition</span>
@@ -1275,6 +1343,16 @@
   .num:focus {
     border-color: var(--accent);
     outline: none;
+  }
+  .num.bad {
+    border-color: var(--bad);
+  }
+  .seed-error {
+    flex-basis: 100%;
+    margin: 0;
+    font-size: 0.7rem;
+    line-height: 1.45;
+    color: var(--bad);
   }
   .check {
     display: flex;

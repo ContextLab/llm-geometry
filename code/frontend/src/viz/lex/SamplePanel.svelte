@@ -41,9 +41,13 @@
     {
       trained: "from the model you trained",
       untrained: "from the untrained model — noise, in budget, which is the point",
+      unrecorded:
+        "from a model loaded from a file that does not say whether it was ever trained",
       "edited-trained": "from hand-edited weights, not from the model you trained",
       "edited-untrained":
         "from hand-edited weights over an untrained model — still noise, still in budget",
+      "edited-unrecorded":
+        "from hand-edited weights over a loaded model of unrecorded training history",
     }[provenance],
   );
 

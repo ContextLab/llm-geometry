@@ -22,7 +22,10 @@ import {
   baseLabelOf,
   hasTrainedBase,
   isEdited,
+  originOf,
+  provenanceFromMetrics,
   provenanceOf,
+  trainedFlagOf,
   type Provenance,
 } from "../../src/viz/lex/provenance";
 import { LexModel, defaultConfig } from "../../src/lib/lexEngine/model";
@@ -471,11 +474,23 @@ describe("residualNorms", () => {
  * trained the active weights are neither the trained model nor the random initialization.
  */
 describe("provenance", () => {
-  it("distinguishes all four states, including the one that used to be missing", () => {
-    expect(provenanceOf(false, false)).toBe("untrained");
-    expect(provenanceOf(true, false)).toBe("trained");
-    expect(provenanceOf(false, true)).toBe("edited-untrained");
-    expect(provenanceOf(true, true)).toBe("edited-trained");
+  it("distinguishes every state, including the one that used to be missing", () => {
+    expect(provenanceOf("untrained", false)).toBe("untrained");
+    expect(provenanceOf("trained", false)).toBe("trained");
+    expect(provenanceOf("untrained", true)).toBe("edited-untrained");
+    expect(provenanceOf("trained", true)).toBe("edited-trained");
+    // The third origin (feature 007 red-team F1): a file whose `metrics` block does not
+    // say what its weights are. Not "untrained", which would be a claim of its own.
+    expect(provenanceOf("unrecorded", false)).toBe("unrecorded");
+    expect(provenanceOf("unrecorded", true)).toBe("edited-unrecorded");
+  });
+
+  it("round-trips through the origin it was built from", () => {
+    for (const origin of ["untrained", "trained", "unrecorded"] as const) {
+      for (const edit of [false, true]) {
+        expect(originOf(provenanceOf(origin, edit))).toBe(origin);
+      }
+    }
   });
 
   it("separates 'came from training' from 'is what training produced'", () => {
@@ -483,18 +498,60 @@ describe("provenance", () => {
     expect(isEdited("edited-trained")).toBe(true);
     expect(hasTrainedBase("edited-untrained")).toBe(false);
     expect(isEdited("trained")).toBe(false);
+    expect(isEdited("edited-unrecorded")).toBe(true);
+    // `false` here means "this page cannot say it was trained", never "it was not" — which
+    // is why the saved flag is `null` rather than `false` in that state.
+    expect(hasTrainedBase("unrecorded")).toBe(false);
+    expect(trainedFlagOf("unrecorded")).toBeNull();
+    expect(trainedFlagOf("edited-unrecorded")).toBeNull();
+    expect(trainedFlagOf("untrained")).toBe(false);
+    expect(trainedFlagOf("edited-trained")).toBe(true);
   });
 
   it("names the model an edit returns to, which is never the edit itself", () => {
     const labels: Record<Provenance, string> = {
       untrained: baseLabelOf("untrained"),
       trained: baseLabelOf("trained"),
+      unrecorded: baseLabelOf("unrecorded"),
       "edited-untrained": baseLabelOf("edited-untrained"),
       "edited-trained": baseLabelOf("edited-trained"),
+      "edited-unrecorded": baseLabelOf("edited-unrecorded"),
     };
     expect(labels.untrained).toBe("random init");
-    expect(labels["edited-untrained"]).toBe("random init");
     expect(labels.trained).toBe("trained");
-    expect(labels["edited-trained"]).toBe("trained");
+    expect(labels.unrecorded).toBe("the loaded file");
+    // A base that arrived already edited is the FILE's weights, not a model this tab
+    // trained — the restore button returns to the file, and the label says so.
+    expect(labels["edited-untrained"]).toContain("loaded file");
+    expect(labels["edited-trained"]).toContain("loaded file");
+    expect(labels["edited-unrecorded"]).toContain("loaded file");
+  });
+
+  /**
+   * The `metrics` block is a CLAIM, not a fact — it is outside all three digests. What is
+   * not negotiable is that an absent claim must not become a flattering one.
+   */
+  it("reads a file's own account of its weights, and refuses to invent one", () => {
+    expect(provenanceFromMetrics({ provenance: "untrained", trained: false })).toEqual({
+      provenance: "untrained",
+      declared: true,
+    });
+    expect(provenanceFromMetrics({ provenance: "edited-trained" }).provenance).toBe(
+      "edited-trained",
+    );
+    // Booleans alone, the shape a writer that knows nothing of `provenance` would emit.
+    expect(provenanceFromMetrics({ trained: true, edited: true }).provenance).toBe(
+      "edited-trained",
+    );
+    expect(provenanceFromMetrics({ trained: false }).provenance).toBe("untrained");
+    // A backend bundle: real losses, no provenance field. Unknown, and said to be unknown.
+    expect(provenanceFromMetrics({ final_loss: 2.26, steps: 400 })).toEqual({
+      provenance: "unrecorded",
+      declared: false,
+    });
+    expect(provenanceFromMetrics({}).provenance).toBe("unrecorded");
+    // Garbage is not a state either, and must not fall through to "trained".
+    expect(provenanceFromMetrics({ provenance: "excellent" }).provenance).toBe("unrecorded");
+    expect(provenanceFromMetrics({ trained: "yes" }).provenance).toBe("unrecorded");
   });
 });

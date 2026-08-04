@@ -152,7 +152,8 @@ event) — a real training failure, surfaced verbatim, never replaced by a parti
 
 ### Feature 007: the optional `vacancy` object
 
-← `"vacancy": { "p", "seed", "consistent", "match_prosody", "reveal_after", "keep" }`
+← `"vacancy": { "p", "seed", "consistent", "match_prosody", "reveal_after", "keep",
+   "mint" }`
 
 **Optional and additive: absent, everything above is unchanged, byte for byte.**
 Present, the resolved corpus is vacated (`POST /api/lex/vacancy` below defines the
@@ -193,13 +194,21 @@ changes nothing that existed. Same corpus-source and budget rules as
      "p": <float ∈ [0,1] = 0>, "seed": <int = 0>,
      "consistent": <bool = true>, "match_prosody": <bool = true>,
      "reveal_after": <int ≥ 0 = 0>, "keep": [<str>, …],
+     "mint": "nonce" | "swap" = "nonce",
      "preview_chars": <int ∈ 0..20000 = 2000> }`
 
-All fields optional. The five transform knobs are architecture.md §7.1's, in this
+All fields optional. The six transform knobs are architecture.md §7.1's, in this
 API's `snake_case`; `keep` must be a **list**, since a bare string would be read
 letter by letter and quietly protect six single letters.
 
+`mint` selects §8.3's replacement strategy: `"nonce"` invents a phonotactically legal
+form, `"swap"` draws a REAL open-class word from the domain's own types by frequency
+rank. Any other value is a `400 InvalidParamError` naming the two choices, and so is
+`"swap"` with `"consistent": false` (§8.3: 1 680 open-class stems against 8 202 vacated
+tokens — there is no supply of real words to mint a fresh one per occurrence).
+
 → `200 { "p", "seed", "consistent", "match_prosody", "reveal_after", "keep": [<str>, …],
+         "mint": "nonce" | "swap",
          "vocabulary_rule": "mapped" | "rebuilt",
          "words": [<str>, …],
          "budget": { "source", "budget", "size", "rows", "coverage": {…} },
@@ -228,6 +237,13 @@ unprefixed `types*` is forbidden there; every count names its scope (`domainType
 `corpusTypes*`). `bijective` and `remint_rounds` also appear at the top level, because
 injectivity is the guarantee the mapped vocabulary rests on and a caller checking it
 should not have to reach into a statistics block.
+
+**Every knob is echoed, `mint` included.** A caller must be able to see WHICH transform
+produced `vacated_sha256`, not infer it from what it asked for. `mint` was added to this
+response after a red-team run found the route accepting the parameter and dropping it:
+`"swap"` and `"bogus"` alike returned nonce output under HTTP 200 and a byte-identical
+digest, so §8.3's control was unreachable through the API and no field in the payload
+said so.
 
 `vocabulary_rule` says which of §7.2's two rules produced `words`, and a client must
 not have to infer it from the parameters: `"mapped"` is the only condition under which
@@ -354,8 +370,23 @@ model. All three are computed as:
 - `vocab_sha256` — `sha256(canonical({budget, source, specials, words}))`, full 64 hex.
 
 `canonical` is `cache/keys.py::_canonical` (sorted keys, no whitespace, `ensure_ascii`).
-`metrics` is deliberately outside every digest: it is the one block that cannot mislabel
-a token.
+`metrics` is deliberately outside every digest, so that a file can be re-labelled
+without becoming a different model, and so that a `model_token` never depends on prose.
+
+**What that means for a reader, stated precisely.** This paragraph used to justify the
+exclusion by calling `metrics` "the one block that cannot mislabel a token". That claim
+was too strong: it cannot mislabel a *token id*, because the vocabulary is inside
+`model_token` — but a red-team run showed the Lexicon Lab reading `metrics.provenance`
+to decide whether the weights on screen had ever been trained, with every
+provenance-conditioned sentence in the tab following the answer. `metrics` round-trips
+verbatim through both stacks: a forged `final_loss` of `1e-05` beside a random
+initialization is stored and re-served unchanged.
+
+So: the digests establish that these weights and this word list are the ones the file
+was written with. `metrics` establishes nothing, and any surface that repeats it must
+attribute it to the file rather than present it as checked. A writer SHOULD record
+`provenance` / `trained` / `edited` there (`/api/lex/train` does); a reader MUST treat
+their absence as "unknown" rather than as either answer.
 
 ## POST /api/lex/model
 

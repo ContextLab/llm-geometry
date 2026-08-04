@@ -265,6 +265,13 @@ describe("bad vacancy parameters are refused in the shared envelope", () => {
     ["a bare string for keep", { keep: "little" as unknown as string[] }],
     ["size on a Dolch budget", { source: "dolch", size: 50 }],
     ["an unknown budget", { budget: "not-a-budget" }],
+    // An unrecognised mint used to be accepted and answered with nonce output: the
+    // parameter was never read, so `"bogus"` and `"swap"` alike became the default.
+    ["an unknown mint", { mint: "bogus" }],
+    ["a non-string mint", { mint: 3 as unknown as string }],
+    // §8.3: swap needs one replacement per TYPE; the inconsistent control needs one per
+    // OCCURRENCE. The engine refuses the pair and the client must carry that refusal.
+    ["swap under the inconsistent control", { mint: "swap", consistent: false }],
   ];
   for (const [what, body] of bad) {
     it(`rejects ${what}`, async () => {

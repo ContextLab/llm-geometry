@@ -75,7 +75,7 @@
   import { sha256Hex, utf8Bytes } from "../../lib/geoEngine/hash";
   import Explain from "../../lib/Explain.svelte";
   import { view } from "../../lib/stores";
-  import { baseLabelOf, provenanceOf } from "./provenance";
+  import { baseLabelOf, isEdited, originOf, provenanceOf, type Provenance } from "./provenance";
   import BudgetPanel from "./BudgetPanel.svelte";
   import ForwardPassPanel from "./ForwardPassPanel.svelte";
   import LexWeightLab from "./LexWeightLab.svelte";
@@ -139,17 +139,29 @@
   let vacMint = $state<MintStrategy>("nonce");
 
   /**
-   * What a training run produced, or null while nothing has been trained at the CURRENT
-   * shape. Its vocabulary travels with it (FR-619): fine-tuning and generation both use
-   * THIS vocabulary, never the one the controls happen to show. Any change of budget or
+   * The base weight set: what a training run produced, or what a `.llmlex.json` file
+   * brought in — or null while the page is still on its random initialization at the
+   * CURRENT shape. Its vocabulary travels with it (FR-619): fine-tuning and generation both
+   * use THIS vocabulary, never the one the controls happen to show. Any change of budget or
    * dimension retires it — those weights have the wrong shape, and describing their
    * geometry would describe a model that is no longer on screen.
+   *
+   * **`provenance` is part of it, not derived from its existence.** `base !== null` used to
+   * be read as "something was trained", which made every loaded file a trained model: a
+   * `.llmlex.json` recording `"provenance":"untrained","trained":false` cleared every
+   * untrained warning on the page and the sampler offered to generate "from the model you
+   * trained" (red-team F1). A file's own account of its weights travels with the weights.
    */
-  let trained = $state<{ model: LexModel; vocab: LexVocab; note: string } | null>(null);
+  let base = $state<{
+    model: LexModel;
+    vocab: LexVocab;
+    note: string;
+    provenance: Provenance;
+  } | null>(null);
 
   /**
-   * A hand-edited weight set (US-6), or null. It never REPLACES `trained` — it sits in
-   * front of it, so `trained` is always the way back, and every panel below reads the
+   * A hand-edited weight set (US-6), or null. It never REPLACES `base` — it sits in
+   * front of it, so `base` is always the way back, and every panel below reads the
    * active model rather than deciding for itself which weights are current.
    */
   let edited = $state<{ model: LexModel; token: string; note: string } | null>(null);
@@ -332,18 +344,39 @@
     dropout,
   });
 
-  /** Every choice a set of weights depends on. A change here retires the trained model. */
+  /** Every choice a set of weights depends on. A change here retires the base model. */
   const shapeKey = $derived(
     `${budgetSource}/${budgetName}/${vocab?.rows ?? 0}/${dModel}/${nLayers}/${nHeads}/${ctx}/${tied}`,
   );
+
+  /**
+   * The same key, read off a weight set and the vocabulary its ids mean something in.
+   *
+   * Retirement is decided by comparing THIS against the controls, not by comparing the
+   * controls against a snapshot taken when the model was adopted. The snapshot version had
+   * a race with the corpus fetch: `shapeKey` contains `vocab?.rows ?? 0`, so a model loaded
+   * from a file before the corpus arrived was measured against `rows = 0`, and the moment
+   * the fetch landed the key "changed" and the model was thrown away — silently, one line
+   * under a load message that had just said the file verified.
+   */
+  function shapeKeyOf(m: LexModel, v: LexVocab): string {
+    return `${v.source}/${v.budgetName}/${v.rows}/${m.cfg.dModel}/${m.cfg.nLayers}/${m.cfg.nHeads}/${m.cfg.ctx}/${m.cfg.tied}`;
+  }
+
   let lastShapeKey = "";
   $effect(() => {
     const key = shapeKey;
-    if (key !== lastShapeKey) {
-      lastShapeKey = key;
-      trained = null;
-      edited = null; // those weights have the wrong shape now too
-    }
+    // No vocabulary yet means no shape yet: the corpus is still loading and `rows = 0`
+    // matches no real model. Deciding anything here would be deciding it against a
+    // placeholder.
+    if (vocab === null) return;
+    if (key === lastShapeKey) return;
+    lastShapeKey = key;
+    // A base whose own shape IS this key is current, whatever the key used to be — that is
+    // the corpus arriving, or the controls being moved to match a file that just loaded.
+    if (base !== null && shapeKeyOf(base.model, base.vocab) === key) return;
+    base = null;
+    edited = null; // those weights have the wrong shape now too
   });
 
   /**
@@ -355,18 +388,27 @@
     vocab && vocab.rows > 4 ? LexModel.fresh(cfg, DEFAULT_SEED) : null,
   );
 
-  /** What an edit departs from and returns to: the trained model, or the random init. */
-  const baseModel = $derived(trained?.model ?? freshModel);
+  /** What an edit departs from and returns to: the base model, or the random init. */
+  const baseModel = $derived(base?.model ?? freshModel);
   const activeModel = $derived(edited?.model ?? baseModel);
-  const activeVocab = $derived(trained?.vocab ?? vocab);
+  const activeVocab = $derived(base?.vocab ?? vocab);
   /**
-   * What the weights every panel below is describing actually ARE. `trained !== null` is
-   * not that question: an edit sits in front of the base model, so with nothing trained
-   * one preset click leaves the page running weights that are neither the trained model
-   * nor the random initialization. Panels take this, never a boolean.
+   * What the weights every panel below is describing actually ARE. `base !== null` is not
+   * that question, twice over: an edit sits in front of the base model, so with nothing
+   * trained one preset click leaves the page running weights that are neither the trained
+   * model nor the random initialization — and a base that arrived from a FILE is whatever
+   * the file says it is, which may be an untrained model or may be unrecorded. Panels take
+   * this state, never a boolean.
+   *
+   * The edit flag is a disjunction because a loaded file can already be hand-edited: the
+   * tab's own `edited` slot is empty right after such a load, and the weights on screen are
+   * hand-edited all the same.
    */
-  const provenance = $derived(provenanceOf(trained !== null, edited !== null));
-  const activeNote = $derived(edited?.note ?? trained?.note ?? "");
+  const baseProvenance = $derived<Provenance>(base?.provenance ?? "untrained");
+  const provenance = $derived(
+    provenanceOf(originOf(baseProvenance), isEdited(baseProvenance) || edited !== null),
+  );
+  const activeNote = $derived(edited?.note ?? base?.note ?? "");
 
   const embedSpectrum = $derived.by<SpectrumResult | null>(() => {
     if (!activeModel) return null;
@@ -398,7 +440,8 @@
   function onTrained(model: LexModel, modelVocab: LexVocab, note: string): void {
     // Written together, and read together: a model and the vocabulary its ids mean
     // something in are one object here, never two loosely-associated pieces of state.
-    trained = { model, vocab: modelVocab, note };
+    // This is the one path that may assert "trained": the training run happened here.
+    base = { model, vocab: modelVocab, note, provenance: "trained" };
     edited = null; // an edit of the PREVIOUS weights says nothing about these
     lastShapeKey = shapeKey; // this IS the current shape — do not retire what just landed
   }
@@ -409,7 +452,12 @@
    * the file being reinterpreted through whatever the controls happened to say — and then
    * `lastShapeKey` is re-baselined, because this IS the shape now.
    */
-  function onLoadedModel(model: LexModel, modelVocab: LexVocab, note: string): void {
+  function onLoadedModel(
+    model: LexModel,
+    modelVocab: LexVocab,
+    note: string,
+    fileProvenance: Provenance,
+  ): void {
     dModel = model.cfg.dModel;
     nLayers = model.cfg.nLayers;
     nHeads = model.cfg.nHeads;
@@ -422,7 +470,11 @@
     if (modelVocab.source === "frequency" || isDolchBudgetName(modelVocab.budgetName)) {
       budgetName = modelVocab.budgetName;
     }
-    trained = { model, vocab: modelVocab, note };
+    // The FILE's account of its own weights, not this tab's guess about them. Anything
+    // else is F1: a file that records `"trained": false` cannot be allowed to clear the
+    // untrained warnings, and a file that records nothing must land on `unrecorded` rather
+    // than on the flattering choice.
+    base = { model, vocab: modelVocab, note, provenance: fileProvenance };
     edited = null;
     lastShapeKey = shapeKey;
   }
@@ -693,9 +745,9 @@
       corpusText={vacatedText}
       corpusLabel={activeCorpusLabel}
       vocabWords={vacated ? (vocab?.words ?? null) : null}
-      trainedModel={trained?.model ?? null}
-      trainedVocab={trained?.vocab ?? null}
-      trainedNote={trained?.note ?? ""}
+      baseModel={base?.model ?? null}
+      baseVocab={base?.vocab ?? null}
+      baseNote={base?.note ?? ""}
       {onTrained}
       onAdoptCorpus={adoptCorpus}
     />
@@ -734,7 +786,7 @@
   <div class="card">
     <LexWeightLab
       base={baseModel}
-      baseLabel={baseLabelOf(provenance)}
+      baseLabel={baseLabelOf(baseProvenance)}
       vocab={activeVocab}
       {edited}
       onEdited={(model, token, note) => (edited = { model, token, note })}

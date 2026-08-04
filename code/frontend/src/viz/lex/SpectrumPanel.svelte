@@ -147,7 +147,15 @@
           <span class="d">
             against a ceiling of <b>{s.ceiling}</b> = min(|V|−1, d) = min({vocabRows - 1}, {dModel}),
             and <b>{fmt2(base.effectiveRank)}</b> for an untrained model at this exact shape
-            {#if provenance === "untrained"}
+            {#if provenance === "unrecorded"}
+              — and what you are looking at came from a file that does not record whether
+              it was ever trained, so the distance between these two numbers is a real
+              measurement of an unknown history
+            {:else if provenance === "edited-unrecorded"}
+              — and what you are looking at is a loaded model of unrecorded history with
+              your edits applied, so part of the distance is the edit and the rest is
+              whatever the file's weights already were
+            {:else if provenance === "untrained"}
               — which is what you are looking at: nothing has been trained yet, so these
               two are the same model
             {:else if provenance === "edited-untrained"}
@@ -216,7 +224,17 @@
       {/if}
     {/if}
 
-    {#if provenance === "untrained"}
+    {#if provenance === "unrecorded" || provenance === "edited-unrecorded"}
+      <p class="untrained" data-testid="lex-spectrum-unrecorded">
+        These weights came from a file that does not record whether they were ever
+        trained{provenance === "edited-unrecorded"
+          ? ", and they have since been hand-edited"
+          : ""}. The bars are their real spectrum and the outline is a random
+        initialization at the same shape, so the distance between them is measured rather
+        than assumed — but a gap here is not evidence of training, and no gap is not
+        evidence of its absence.
+      </p>
+    {:else if provenance === "untrained"}
       <p class="untrained" data-testid="lex-spectrum-untrained">
         This model has not been trained. The bars, the baseline and both rank markers
         coincide because they are the same random initialization — train it and watch them

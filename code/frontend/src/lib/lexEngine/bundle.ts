@@ -34,8 +34,32 @@
  * when the field was absent, so tampered weights loaded cleanly the moment you DELETED
  * the field rather than edited it. `tests/unit/lexBundle.test.ts` runs that attack.
  *
- * `metrics` is provenance and is deliberately outside every digest — it is the one block
- * that cannot mislabel a token — exactly as the backend's `_model_token` excludes it.
+ * ## `metrics` is outside every digest, and is therefore a CLAIM
+ *
+ * `metrics` is excluded from all three hashes, exactly as the backend's `_model_token`
+ * excludes it, so that a file can be re-labelled without becoming a different model.
+ *
+ * This comment used to justify that by calling `metrics` "the one block that cannot
+ * mislabel a token". That was false as shipped, and red-team finding F1 is the proof: the
+ * Lexicon Lab reads `metrics.provenance` to decide whether the weights on screen were ever
+ * trained, and every provenance-conditioned sentence in the tab follows the answer. The
+ * block cannot mislabel a *token id* — the vocabulary is inside `model_token`, which is a
+ * genuinely narrower statement than the one that stood here.
+ *
+ * So the rule is a division of labour, stated where a reader of a bundle can act on it:
+ *
+ *   * the three digests establish that these weights and this word list are the ones the
+ *     file was written with, and a mismatch or an absence is fatal;
+ *   * `metrics` establishes nothing. It round-trips verbatim — a forged `final_loss` of
+ *     `1e-05` beside a random initialization survives an export/import cycle intact — so
+ *     every surface that repeats it must attribute it to the file rather than present it
+ *     as checked. `viz/lex/ModelFile.svelte` does that on load; `viz/lex/provenance.ts`
+ *     documents what may and may not be concluded from it.
+ *
+ * Bringing `metrics` inside a digest was the alternative, and is rejected: the backend's
+ * `_model_token` is the contract's hash (`api-lex.md`), a bundle written by either stack
+ * must verify in the other, and a token that changed when a note was edited would make the
+ * cache key depend on prose. The honest fix is the attribution, not a fourth hash.
  */
 
 import { invalidParam } from "../geoEngine/errors";

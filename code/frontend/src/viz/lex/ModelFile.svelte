@@ -32,21 +32,37 @@
     type BudgetSource,
   } from "../../lib/lexEngine";
   import Explain from "../../lib/Explain.svelte";
-  import { hasTrainedBase, isEdited, type Provenance } from "./provenance";
+  import {
+    isEdited,
+    provenanceFromMetrics,
+    trainedFlagOf,
+    type Provenance,
+  } from "./provenance";
 
   interface Props {
     /** The model currently driving the page — trained, edited, or the random init. */
     model: LexModel | null;
     vocab: LexVocab | null;
     /**
-     * What these weights are. Saving is allowed in all four states — but the file's own
-     * `metrics` block and the note beside the button must say WHICH of the four, or a
+     * What these weights are. Saving is allowed in every state — but the file's own
+     * `metrics` block and the note beside the button must say WHICH one, or a
      * `.llmlex.json` full of hand-edited weights arrives somewhere else labelled "trained".
      */
     provenance: Provenance;
     /** Provenance line for the active model, written into the file. */
     note: string;
-    onLoaded: (model: LexModel, vocab: LexVocab, note: string) => void;
+    /**
+     * A loaded model, and WHAT THE FILE SAYS IT IS. The provenance travels with the
+     * weights: dropping it here is red-team finding F1 — every file loaded cleanly as
+     * "trained", including one whose own `metrics` recorded `"trained": false`, and the
+     * whole page's prose followed the wrong answer with a green checkmark beside it.
+     */
+    onLoaded: (
+      model: LexModel,
+      vocab: LexVocab,
+      note: string,
+      provenance: Provenance,
+    ) => void;
   }
   let { model, vocab, provenance, note, onLoaded }: Props = $props();
 
@@ -54,19 +70,36 @@
   const DEFAULT_NOTES: Record<Provenance, string> = {
     trained: "trained in the Lexicon Lab",
     untrained: "untrained random initialization",
+    unrecorded: "loaded from a file that does not record whether it was ever trained",
     "edited-trained": "trained in the Lexicon Lab, then hand-edited in the Weight Lab",
     "edited-untrained": "untrained random initialization, hand-edited in the Weight Lab",
+    "edited-unrecorded":
+      "loaded from a file that does not record whether it was ever trained, then " +
+      "hand-edited in the Weight Lab",
+  };
+
+  /** How the load line names what the file claimed about itself. */
+  const LOADED_AS: Record<Provenance, string> = {
+    trained: "a trained model",
+    untrained: "an untrained random initialization",
+    unrecorded: "weights it does not describe",
+    "edited-trained": "a trained model with hand-edited weights",
+    "edited-untrained": "a random initialization with hand-edited weights",
+    "edited-unrecorded": "hand-edited weights it does not otherwise describe",
   };
 
   let fileInput: HTMLInputElement | undefined = $state();
   let error = $state("");
   let ok = $state("");
+  /** What the last loaded file CLAIMED its weights are, attributed as a claim. */
+  let claimed = $state("");
 
   const ready = $derived(model !== null && vocab !== null && vocab.rows === model.cfg.vocabRows);
 
   function save(): void {
     error = "";
     ok = "";
+    claimed = "";
     if (!model || !vocab) return;
     try {
       const bundle = exportLexBundle({
@@ -75,8 +108,10 @@
         vocabWords: vocab.words,
         budgetSource: vocab.source,
         budgetName: vocab.budgetName,
-        // `metrics` is the contract's free provenance block — outside every digest, and
-        // the only block that cannot mislabel a token.
+        // `metrics` is the contract's free provenance block, outside every digest — so
+        // what it says is a claim by whoever wrote the file, and the loader below treats
+        // it as one. It is written here because a file that says nothing about its own
+        // weights leaves the next reader with no way to find out at all.
         metrics: {
           // The state ALWAYS leads, and the tab's own note (a training summary, or the
           // edit that was applied) follows it — "embed scaled by 0.5" alone would not tell
@@ -86,7 +121,9 @@
           // are still what training produced. One flag could not tell those apart, and a
           // reader downstream would have to guess.
           provenance,
-          trained: hasTrainedBase(provenance),
+          // `null`, not `false`, when the active weights themselves came from a file that
+          // did not say: this tab is not in a position to assert they were never trained.
+          trained: trainedFlagOf(provenance),
           edited: isEdited(provenance),
         },
       });
@@ -106,6 +143,7 @@
   async function load(event: Event): Promise<void> {
     error = "";
     ok = "";
+    claimed = "";
     const input = event.currentTarget as HTMLInputElement;
     const f = input.files?.[0];
     input.value = ""; // so re-picking the same file fires change again
@@ -120,14 +158,31 @@
       );
       const nextModel = new LexModel(loaded.config, loaded.weights);
       const carried = typeof loaded.metrics.note === "string" ? loaded.metrics.note : "";
+      // The file's own account of its weights, carried into the tab instead of discarded.
+      // A file that records nothing usable lands on `unrecorded` — never on "trained",
+      // which is what every load used to become.
+      const claim = provenanceFromMetrics(loaded.metrics);
       onLoaded(
         nextModel,
         nextVocab,
         carried ? `loaded from ${f.name} · ${carried}` : `loaded from ${f.name}`,
+        claim.provenance,
       );
+      // Two sentences, because they rest on different evidence and a reader has to be able
+      // to tell them apart. The digests are recomputed HERE, from the file's own bytes, so
+      // "verified" is earned. What the weights ARE is only ever the file's word: `metrics`
+      // is outside all three digests, and nothing in this browser can check it.
       ok =
         `loaded ${f.name} · ${nextVocab.budgetSize}-word ${loaded.budgetSource} budget ` +
-        `(${loaded.config.vocabRows} rows) · model ${loaded.modelToken.slice(0, 12)}… verified`;
+        `(${loaded.config.vocabRows} rows) · model ${loaded.modelToken.slice(0, 12)}… ` +
+        "weights + vocabulary verified";
+      claimed = claim.declared
+        ? `The file describes these weights as ${LOADED_AS[claim.provenance]}. That is the ` +
+          "file's own label, in its unhashed `metrics` block — the checksums prove the " +
+          "weights and word list are the ones it was written with, not what they are."
+        : "The file does not record whether these weights were ever trained, so this page " +
+          "does not say either. Losses, spectra and samples below are real measurements " +
+          "of these weights; what produced them is unknown.";
     } catch (e) {
       error =
         e instanceof SyntaxError
@@ -168,7 +223,20 @@
     />
   </div>
 
-  {#if provenance === "untrained"}
+  {#if provenance === "unrecorded"}
+    <p class="hint small" data-testid="lex-save-unrecorded">
+      These weights came from a file that does not record whether they were ever trained,
+      so a save right now writes <b>the same unanswered question</b> along with them: a
+      real model file, whose <code>metrics</code> block says the training history is
+      unknown rather than inventing one.
+    </p>
+  {:else if provenance === "edited-unrecorded"}
+    <p class="hint small" data-testid="lex-save-unrecorded">
+      These weights came from a file that does not record whether they were ever trained,
+      and they have since been hand-edited. A save right now writes <b>the edited
+      weights</b>, and records both facts — unknown history, edited since.
+    </p>
+  {:else if provenance === "untrained"}
     <p class="hint small" data-testid="lex-save-untrained">
       Nothing has been trained yet, so a save right now writes the <b>random
       initialization</b> — a real model file, of a model that has learned nothing.
@@ -190,6 +258,7 @@
 
   {#if error}<div class="err" data-testid="lex-file-error">{error}</div>{/if}
   {#if ok}<div class="ok" data-testid="lex-file-ok">{ok}</div>{/if}
+  {#if claimed}<div class="claim" data-testid="lex-file-claim">{claimed}</div>{/if}
 
   <Explain
     title="What is inside the file, and what is checked"
@@ -233,7 +302,21 @@
     <p>
       Loading a file replaces the active model <i>and</i> its vocabulary together, and the
       controls follow it, because a model's ids are only meaningful against the budget it
-      was trained on.
+      was trained on. Its <code>metrics</code> block travels with it too — that is where a
+      file records whether its weights were ever trained, and this page repeats what it
+      finds there rather than assuming.
+    </p>
+    <p>
+      <b>What the digests do not cover.</b> <code>metrics</code> is outside all three of
+      them, by design and in both stacks: the backend's <code>_model_token</code> hashes
+      the config, the word list and the weights, and nothing else, so that one file can be
+      re-labelled without becoming a different model. The consequence is that everything in
+      that block — the note, the losses, the training history — is a <i>claim by whoever
+      wrote the file</i>, and this tab attributes it as one after a load instead of
+      presenting it beside the word "verified". A forged <code>final_loss</code> of
+      <code>1e-05</code> will round-trip through this format intact; what cannot be forged
+      is the pairing of these weights with this vocabulary, which is the thing every label
+      on this page depends on.
     </p>
   </Explain>
 </div>
@@ -304,6 +387,14 @@
     padding: 0.45rem 0.6rem;
     font-size: 0.76rem;
     line-height: 1.45;
+  }
+  .claim {
+    border: 1px dashed var(--border);
+    border-radius: 9px;
+    padding: 0.45rem 0.6rem;
+    font-size: 0.72rem;
+    line-height: 1.5;
+    color: var(--text-dim);
   }
   .ok {
     background: rgba(91, 224, 176, 0.08);
