@@ -47,6 +47,11 @@ WHAT THE CASES COVER, and why each is here rather than being one more of the sam
   membership (§10) — the definition the stacks split on.
 * `p07-seed0-frequency100` — a frequency budget, whose word list is drawn from the corpus
   rather than from a fixed list, plus a non-default `preview_chars`.
+* `mint-swap-p1-seed0` — §8.3's swap control, at the only `p` where §5.2a permits it. Every
+  other case runs the nonce mint, so without this one the two stacks could agree perfectly
+  while `swap` did something different on each side — which is close to what happened: the
+  backend dropped `mint` entirely and answered `swap` with nonce output under a
+  byte-identical `vacated_sha256`.
 """
 
 from __future__ import annotations
@@ -118,6 +123,17 @@ CASES: tuple[tuple[str, dict[str, Any]], ...] = (
             "reveal_after": 2,
             "source": "dolch",
             "budget": "primer",
+            "preview_chars": 400,
+        },
+    ),
+    (
+        "mint-swap-p1-seed0",
+        {
+            "p": 1.0,
+            "seed": 0,
+            "mint": "swap",
+            "source": "dolch",
+            "budget": "pre_primer",
             "preview_chars": 400,
         },
     ),

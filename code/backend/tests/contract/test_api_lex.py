@@ -859,8 +859,78 @@ def test_vacancy_rejects_parameters_outside_the_contract() -> None:
         {"source": "dolch", "size": 50},
         {"budget": "not-a-budget"},
         {"text": "!!! ???"},
+        # An unknown mint used to be answered with 200 and nonce output — the transform
+        # silently substituting its default for a control the caller explicitly asked for.
+        {"mint": "bogus"},
+        {"mint": 3},
+        {"mint": None},
+        # §8.3: swap needs one replacement per TYPE, and the inconsistent control wants one
+        # per OCCURRENCE. The transform refuses the combination; the route must carry that.
+        {"mint": "swap", "consistent": False},
     ):
         _assert_error_envelope(client.post("/api/lex/vacancy", json=body), 400, "InvalidParamError")
+
+
+def test_vacancy_params_reads_every_knob_the_transform_declares() -> None:
+    """A knob the dataclass has and `_vacancy_params` omits is a SILENT default, not a 400.
+
+    `mint` was exactly that: `VacancyParams` declared it, `__post_init__` validated it,
+    `_vacancy_key` hashed it, the UI exposed it — and the route never parsed it, so
+    `mint="swap"` and `mint="bogus"` both returned nonce output under HTTP 200. This
+    asserts the wiring rather than the symptom, so the next knob cannot repeat it.
+    """
+    import dataclasses
+
+    from llm_geometry.api.routes_lex import _vacancy_params
+    from llm_geometry.lex.vacancy import VacancyParams
+
+    knobs = [f.name for f in dataclasses.fields(VacancyParams) if not f.name.startswith("_")]
+    defaults = _vacancy_params({})
+    for knob in knobs:
+        assert hasattr(defaults, knob), knob
+    # Every knob must be REACHABLE: a non-default value for each one must survive the parse.
+    non_default = {
+        "p": 0.5,
+        "seed": 7,
+        "consistent": False,
+        "match_prosody": False,
+        "reveal_after": 2,
+        "keep": ["little"],
+        "mint": "swap",
+    }
+    assert set(non_default) == set(knobs), (
+        f"the transform's knobs are {sorted(knobs)} but this test only drives "
+        f"{sorted(non_default)} — add the new one here and to `_vacancy_params`"
+    )
+    for knob, value in non_default.items():
+        # `swap` is refused under `consistent=False` (§8.3), so drive it on its own.
+        parsed = _vacancy_params({knob: value})
+        actual = getattr(parsed, knob)
+        actual = sorted(actual) if isinstance(actual, frozenset) else actual
+        assert actual == value, (
+            f"_vacancy_params dropped {knob!r}: asked for {value!r}, got {actual!r} "
+            "— the caller's setting was silently replaced by the dataclass default"
+        )
+
+
+def test_vacancy_honours_and_echoes_the_swap_mint_control() -> None:
+    """§8.3's swap control, end to end through the route.
+
+    `nonce` invents a phonotactically legal form; `swap` draws a REAL open-class word from
+    the domain by frequency rank. Two different transforms, so two different corpora and
+    two different digests — the defect this pins produced ONE digest for both.
+    """
+    nonce = _vacancy(p=1.0, seed=0, source="dolch", budget="pre_primer")
+    swap = _vacancy(p=1.0, seed=0, source="dolch", budget="pre_primer", mint="swap")
+
+    assert nonce["mint"] == "nonce"  # the default, stated rather than left to inference
+    assert swap["mint"] == "swap"
+    assert swap["vacated_sha256"] != nonce["vacated_sha256"]
+    assert swap["preview"] != nonce["preview"]
+    # Swap's images ARE domain types, so at full vacancy it is a permutation of the
+    # open-class vocabulary: injective (§5.2a's `p ∈ {0, 1}` case) but not disjoint.
+    assert swap["bijective"] is True
+    assert swap["vacancy_stats"]["imageSize"] == nonce["vacancy_stats"]["imageSize"]
 
 
 def test_vacancy_matches_the_static_client_fixture() -> None:

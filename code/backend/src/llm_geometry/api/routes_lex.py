@@ -573,6 +573,14 @@ def _vacancy_params(payload: dict[str, Any]) -> Any:
     Passed by keyword on purpose: the transform's parameter set is still growing (the
     swap-mint control of §8.3), and a keyword call keeps a new optional field from
     landing in the wrong slot here.
+
+    **Every knob the dataclass declares must be listed below.** A knob the dataclass has
+    and this function omits does not become an error — it becomes the dataclass default,
+    silently, under a 200. That is exactly what happened to ``mint``: §8.3's swap control
+    was reachable in the UI and in the transform, and unreachable through this route,
+    which answered ``mint="swap"`` and ``mint="bogus"`` alike with nonce output under a
+    byte-identical ``vacated_sha256``. :func:`test_vacancy_params_reads_every_knob_the_
+    transform_declares` fails the day another one is added and forgotten.
     """
     from ..lex.vacancy import VacancyParams
 
@@ -598,6 +606,11 @@ def _vacancy_params(payload: dict[str, Any]) -> Any:
         match_prosody=_as_bool(payload.get("match_prosody", True), "match_prosody"),
         reveal_after=_as_int(payload.get("reveal_after", 0), "reveal_after"),
         keep=frozenset(str(w) for w in keep),
+        # Handed over unconverted: ``__post_init__`` checks membership in
+        # ``MINT_STRATEGIES``, so an unknown strategy — or a number — is refused there with
+        # a typed InvalidParamError naming the choices. Coercing it to ``str`` here would
+        # turn `mint: 3` into the string "3" and lose that message.
+        mint=payload.get("mint", VacancyParams.mint),
     )
 
 
@@ -632,10 +645,18 @@ def _vacate(text: str, params: Any) -> tuple[Any, str]:
     Deliberately not cached. The whole thing is ~70 ms on the shipped corpus, and a cache
     keyed on the parameters that exist today would silently serve the wrong map the day
     the transform grows another one.
-    """
-    from ..lex.vacancy import build_vacancy_map, vacancy_domain, vacate_text
 
-    vmap = build_vacancy_map(vacancy_domain(tokenize(text)), params)
+    ``mint="swap"`` ranks its replacement pool by corpus frequency, so it needs the TOKEN
+    STREAM's counts; ``nonce`` never looks at them, and ``build_vacancy_map`` raises rather
+    than inventing a ranking if they are missing. Passed here, from this corpus, for the
+    same reason `VacancyPanel` passes them in the browser — the two stacks must rank the
+    pool off the same numbers or `swap` is a different transform on each side.
+    """
+    from ..lex.vacancy import build_vacancy_map, type_counts, vacancy_domain, vacate_text
+
+    tokens = tokenize(text)
+    counts = type_counts(tokens) if params.mint == "swap" else None
+    vmap = build_vacancy_map(vacancy_domain(tokens), params, counts)
     return vmap, vacate_text(text, vmap, params)
 
 
@@ -743,6 +764,10 @@ async def vacancy(request: Request) -> dict[str, Any]:
             "match_prosody": params.match_prosody,
             "reveal_after": params.reveal_after,
             "keep": sorted(params.keep),
+            # Echoed for the same reason the five above are: a caller must be able to see
+            # WHICH transform ran. Without it, a request asking for §8.3's swap control got
+            # nonce output back and nothing in the payload said so.
+            "mint": params.mint,
             # Which of §7.2's two rules produced `words`. A client must not have to infer
             # it from the parameters: "mapped" is the only condition under which the ids
             # are the English ids, and that is the difference between an invariance result
@@ -822,7 +847,7 @@ async def train(request: Request, response: Response) -> dict[str, Any]:
         if not isinstance(vacancy_payload, dict):
             raise InvalidParamError(
                 "vacancy must be an object of the transform's parameters "
-                "(p, seed, consistent, match_prosody, reveal_after, keep), "
+                "(p, seed, consistent, match_prosody, reveal_after, keep, mint), "
                 f"got {vacancy_payload!r}"
             )
         vac_params = _vacancy_params(vacancy_payload)
@@ -1016,6 +1041,14 @@ def _run_train(
                     "seed": result.seed,
                     "elapsed_s": result.elapsed_s,
                     "base": base,
+                    # What these weights ARE, in the block that travels with them through
+                    # `GET /api/lex/model`. A bundle carrying losses and no provenance
+                    # leaves whoever opens it later with no way to find out — and the
+                    # Lexicon Lab's loader now reports that honestly ("unrecorded") rather
+                    # than assuming the flattering answer, which is red-team finding F1.
+                    "provenance": "trained",
+                    "trained": True,
+                    "edited": False,
                 },
             )
         payload = _jsonable(
