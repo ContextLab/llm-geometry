@@ -151,11 +151,17 @@ not undocumented.)*
 ← a bundle from `GET /api/geo/model` → `200 { "weights_token", "vocab_size" }`.
 
 Validation is strict, and in this order: format, version, every `config` field, per-
-tensor decode, **completeness and shape of the whole weight set**, a re-hash of the
-decoded weights against the declared `weights_token`, then the vocabulary and a re-hash
-of it against the declared `vocab_sha256`. Any failure is `400 InvalidParamError`, never
-a partial load — pairing the wrong vocabulary with a set of weights would make every
-label in the UI quietly wrong.
+tensor decode, **completeness and shape of the whole weight set**, the `vocab` block and
+a re-hash of it against the declared `vocab_sha256`, then a re-hash of the decoded
+weights **and that vocabulary** against the declared `weights_token`. Any failure is
+`400 InvalidParamError`, never a partial load — pairing the wrong vocabulary with a set
+of weights would make every label in the UI quietly wrong.
+
+*(The vocabulary now precedes the token check because it is one of that hash's inputs —
+amendment of 2026-08-04 with the token change above. It closes the one hole the two
+digests could not: a file with genuine weights, a substituted word list, and
+`vocab_sha256` recomputed over the substitute used to load with a 200, because each
+digest verified what it covered and nothing covered the pair.)*
 
 *(The completeness/shape step is an amendment of 2026-08-04, red-team 007 F4: a bundle
 carrying one tensor, with every digest honestly recomputed over that one tensor, was
@@ -234,8 +240,23 @@ now also a typed `400`, never a raw `KeyError`.)*
 → `422 InvalidWeightEditError` (bad shape, bad name, both/neither preset+values,
    non-finite values).
 
-Tokens are content hashes over the *full resulting weight set*: stateless,
-deduplicating, valid across workers/restarts; artifacts LRU-evicted with the cache.
+Tokens are content hashes over the *full resulting weight set* **and the vocabulary its
+token ids mean**: stateless, deduplicating, valid across workers/restarts; artifacts
+LRU-evicted with the cache. A model that reads under the shipped vocabulary hashes the
+weights alone (so `checkpoint_id` is unchanged); a model with a word list of its own —
+trained from scratch, imported from a file, or derived from one of those — hashes the
+weights, a fixed separator, and the canonical vocabulary serialization.
+
+*(Amendment of 2026-08-04, red-team 007 F1 third path. The hash used to cover the weights
+alone, and the artifact store deduplicates on it and wrote its metadata first-write-wins,
+so two models with identical weights and different word lists shared ONE vocabulary:
+loading a model file and then training from scratch to the same weights discarded the
+scratch run's 1,000 words and saved its file under the loaded file's list, with every
+digest recomputed over the substitute and therefore verifying. The two stacks resolved the
+collision in opposite directions — Python kept the first word list, the browser engine the
+last — so which model was corrupted depended on which build wrote the file. Identical
+weights with different vocabularies are different models; a hash that says otherwise is
+the defect, not the caching policy.)*
 
 ### POST /api/geo/finetune
 
@@ -251,8 +272,10 @@ deduplicating, valid across workers/restarts; artifacts LRU-evicted with the cac
 → `200 { "weights_token": …, "loss_before": …, "loss_after": …, "n_tokens": …,
    "n_unk": …, "unk_rate": …, "ready": true }` on content-hash cache hit.
 → `400` no source / more than one source; `422` unusable dataset id.
-→ `400 InvalidParamError` when more than 90 % of the tokenized text is `<unk>` under
-   the base model's vocabulary.
+→ `400 InvalidParamError` when **90 % or more** of the tokenized text is `<unk>` under
+   the base model's vocabulary. (The bound was `> 90 %` until 2026-08-04, so a stream
+   that was EXACTLY 90 % unknown was accepted and reported as a clean loss drop, one
+   token below a refusal whose message rounds to the same "(90%)".)
 Never mutates the canonical checkpoint.
 
 **Amended 2026-08-04 (red-team 007 F1/F2, issue #6).** Two changes, both to stop a
@@ -263,7 +286,7 @@ believable number coming out of a meaningless run:
    `<unk>`, and the response still reported a clean loss drop. `n_tokens` / `n_unk` /
    `unk_rate` are **additive** and report how much of the text that vocabulary actually
    knew; a client showing the loss MUST be able to show them (absent ⇒ unknown, from a
-   cache entry that predates the fields — never reported as zero). Above 90 % the
+   cache entry that predates the fields — never reported as zero). At 90 % or above the
    request is refused instead.
 2. The minted checkpoint **inherits `base`'s vocabulary**, as `POST /api/geo/weights`
    also now does. This is not a response-shape change; it is what `GET /api/geo/model`
