@@ -631,7 +631,8 @@ buys structural rather than argued cross-language equality.
 `vacancyStats(originalText, vacatedText, map, p, seed, …)` returns, with these exact names:
 
 ```
-typesTotal, typesEligible, typesVacated,
+domainTypesTotal, domainTypesEligible, domainTypesVacated,
+corpusTypesTotal, corpusTypesEligible, corpusTypesVacated,
 stemsTotal, stemsVacated,
 tokensTotal, tokensVacated,
 meanSyllablesBefore, meanSyllablesAfter,
@@ -644,20 +645,33 @@ bijective, imageSize, remintRounds
 
 Both stacks compute these from the same definitions; the golden fixture (§11) pins them.
 
-**Counting, pinned.** The two implementations agreed on `tokensVacated` to the token (8 202 at
-`p = 1`) while reporting different type counts — 1 922 against 1 665 — which is a definitional
-gap in this section, not a disagreement about the transform. The definitions are:
+**Counting: the scope is in the name.** This section cost two round trips between the stacks,
+both times because "types" is ambiguous between the **corpus** (2 211 types of *Mother Goose*)
+and the **domain** (2 233 = corpus ∪ the full Dolch list). The two stacks agreed on
+`tokensVacated` to the token (8 202 at `p = 1`) and disagreed only on the type counts — a
+reporting gap, never a disagreement about the transform.
 
-- `typesTotal` — distinct lowercased types in the **domain** (corpus types ∪ budget words)
-- `typesEligible` — domain types whose **stem** is eligible per §2.2
-- `typesVacated` — domain types whose transformed output differs from the input at this `p`
-- `stemsTotal` — distinct eligible stems, i.e. the size of the map
-- `stemsVacated` — stems with `u(stem) < p`
-- `tokensTotal` / `tokensVacated` — over the **corpus** token stream, not the domain
+An unprefixed `types*` is therefore **forbidden**. Every count names its scope:
 
-`typesEligible ≥ stemsTotal` always, since inflected forms share a stem. At `p = 1` every
+- `domainTypes{Total,Eligible,Vacated}` — over the domain of §5.2. This is what governs the map
+  and the vocabulary, so it is the diagnostic number.
+- `corpusTypes{Total,Eligible,Vacated}` — over the corpus's own type set. This is what the panel
+  shows a reader, because the 22 domain-only words (`funny`, `squirrel`, `today`, …) are in the
+  budget but never appear in the text, and counting words the reader cannot see inflates the
+  vacancy rate they are being shown.
+- `stemsTotal` — distinct eligible stems, i.e. the size of the map; `stemsVacated` — stems with
+  `u(stem) < p`
+- `tokensTotal` / `tokensVacated` — over the **corpus** token stream
+
+`domainTypesEligible ≥ stemsTotal` always, since inflected forms share a stem, and
+`domainTypesEligible = corpusTypesEligible + 22` on the shipped corpus. At `p = 1` every
 eligible stem vacates, because `u ∈ [0, 1)` by construction, so `stemsVacated == stemsTotal` and
-`typesVacated == typesEligible` — an identity worth asserting, since it caught this.
+`{domain,corpus}TypesVacated == {domain,corpus}TypesEligible` — identities worth asserting,
+since the first of them is what exposed all of this.
+
+Measured on the shipped corpus (seed 0 / seed 7, `p = 0/.25/.5/.75/1`):
+`corpusTypesVacated` 0/461/954/1430/1922 and 0/434/975/1440/1922;
+`domainTypesVacated` 0/469/966/1448/1944 and 0/440/985/1455/1944.
 
 **Where each token's stress came from.** The first draft asked for a single
 `stressTableCoverage`, which is ambiguous the moment minted forms exist: read literally it counts
