@@ -898,8 +898,27 @@ function transformWordWith(
     // fixed while the learnable identity is destroyed. It has, deliberately, no stability
     // property — the nonce is a function of (stem, occurrenceIndex) in document order.
     // `#` is not a legal WORD_RE character, so the key can never collide with a stem.
+    //
+    // CONDITION B APPLIES HERE TOO (§5.8): the nonce may equal neither a domain type nor
+    // THE STEM IT REPLACES. The second clause is not implied by the first — a stem need not
+    // be a type. Measured: at seed 7, `p = 1`, `tak` minted `tak`, so `Taking -> Taking` and
+    // a token silently failed to vacate. §7.1 denies this control a *stability* property,
+    // which is about reusing a nonce across occurrences; it does not license a word
+    // surviving the transform, and a control whose vacancy rate is not the stated rate is
+    // not a control. Forbidding the stem routes the collision through §5.5's ordinary
+    // re-mint loop, so the replacement meets the same quality bar as any other nonce.
+    // The stem is forbidden for THIS mint only, then restored — the set is threaded through
+    // the whole rewrite, and a stem left in it would forbid that string to every later
+    // occurrence of every OTHER stem, which condition B does not ask for.
     const pattern = params.matchProsody ? stress(stem) : "1";
-    const minted = mintNonce(`${stem}#${index}`, pattern, params.seed, state.forbidden, 0);
+    const stemWasForbidden = state.forbidden.has(stem);
+    state.forbidden.add(stem);
+    let minted;
+    try {
+      minted = mintNonce(`${stem}#${index}`, pattern, params.seed, state.forbidden, 0);
+    } finally {
+      if (!stemWasForbidden) state.forbidden.delete(stem);
+    }
     nonce = minted.nonce;
     state.forbidden.add(nonce);
     vmap.mintedStress.set(nonce, pattern);
@@ -975,7 +994,9 @@ export interface VacancyStats {
   domainTypesTotal: number;
   /** Domain types whose STEM is eligible per §2.2. */
   domainTypesEligible: number;
-  /** Domain types whose transformed output differs from the input at this `p`. */
+  /** Domain types the MAP would rewrite at this `p` — map membership, not text. The
+   *  domain's 22 Dolch-only words never occur in the corpus, so there is nothing to
+   *  measure for them; this scope is a diagnostic about the map. */
   domainTypesVacated: number;
   /** Distinct lowercased types of the CORPUS itself. **This is the scope a panel shows a
    *  reader**: the domain-only words (`funny`, `squirrel`, `today`, …) are in the budget
@@ -986,7 +1007,17 @@ export interface VacancyStats {
   corpusTypesTotal: number;
   /** Corpus types whose STEM is eligible per §2.2. */
   corpusTypesEligible: number;
-  /** Corpus types whose transformed output differs from the input at this `p`. */
+  /**
+   * Corpus types MEASURED FROM THE TWO TEXTS: a type counts as vacated iff at least one of
+   * its occurrences actually changed.
+   *
+   * NOT map membership, which is what the golden fixture caught. Under `revealAfter > 0` a
+   * type whose every occurrence falls inside the reveal window is still listed in the map
+   * yet has changed nowhere in the text — map membership over-reports it by ~2x on this
+   * corpus. The readings coincide at `revealAfter = 0`, which is why it took a control
+   * condition to expose. The text reading is what this number claims to a reader looking at
+   * "N of M types vacated" about the text in front of them.
+   */
   corpusTypesVacated: number;
   /** Distinct eligible stems — the size of the map. `typesEligible >= stemsTotal` always,
    *  since inflected forms share a stem. */
@@ -1052,34 +1083,41 @@ function stressSplit(
   return { table: table / n, mintedFrac: mintedHits / n, rule: (n - table - mintedHits) / n };
 }
 
+/** Types whose stem passes §2.2. Shared by both scopes — eligibility is a property of the
+ *  stem alone, so there is only one reading of it to get wrong. */
+function countEligible(types: ReadonlySet<string>, keep: ReadonlySet<string>): number {
+  let eligible = 0;
+  for (const t of types) if (isEligible(stemAndSuffix(t)[0], keep)) eligible++;
+  return eligible;
+}
+
 /**
- * `eligible` and `vacated` over ONE set of lowercased types.
+ * `vacated` BY MAP MEMBERSHIP: the types the map would rewrite at this `p`.
  *
- * Both §10 scopes call this same function, which is the point: the domain/corpus split was
- * a definitional gap that let two stacks report different numbers for the same transform,
- * and the fix is that the scopes differ ONLY in the set handed in here.
+ * This is the DOMAIN scope's reading, and the choice is forced rather than preferred: the
+ * domain contains the 22 Dolch words that never occur in the corpus, so they have no
+ * occurrences to measure. Under a text-measured reading the domain scope would silently
+ * collapse onto the corpus scope and stop being a separate diagnostic. The domain number
+ * answers "what does the map do", and this computes exactly that.
  *
- * `vacated` is "the transformed output differs from the input", computed through the map —
- * i.e. the mapped condition. `consistent = false` mints a different form per occurrence but
- * vacates exactly the same types, so the count is condition-independent.
+ * It is deliberately NOT the corpus scope's reading — see `vacancyStats`, where the two
+ * readings are named and contrasted rather than left to look like one mechanism.
  */
-function countTypes(
+function countVacatedByMap(
   types: ReadonlySet<string>,
   vmap: VacancyMap,
   params: VacancyParams,
   keep: ReadonlySet<string>,
-): { eligible: number; vacated: number } {
-  let eligible = 0;
+): number {
   let vacated = 0;
   for (const t of types) {
     const [stem, suffix] = stemAndSuffix(t);
     if (!isEligible(stem, keep)) continue;
-    eligible++;
     if (!(vacancyU(stem, params.seed) < params.p)) continue;
     const nonce = vmap.mapping.get(stem);
     if (nonce !== undefined && surfaceForm(stem, suffix, nonce, params.seed) !== t) vacated++;
   }
-  return { eligible, vacated };
+  return vacated;
 }
 
 /**
@@ -1105,27 +1143,44 @@ export function vacancyStats(
 
   const keep = effectiveKeepSet(params.keep);
   const corpusTypes = new Set(before.map((w) => w.toLowerCase()));
-  const domainCounts = countTypes(vmap.domain, vmap, params, keep);
-  const corpusCounts = countTypes(corpusTypes, vmap, params, keep);
+
+  // TWO SCOPES, TWO DELIBERATELY DIFFERENT READINGS — stated here rather than left to be
+  // inferred, because the golden fixture caught them being silently different mechanisms.
+  //
+  //   domain: MAP MEMBERSHIP. A diagnostic about the map. The 22 Dolch-only words have no
+  //           occurrences in the text, so a text reading cannot see them at all.
+  //   corpus: MEASURED FROM THE TWO TEXTS. A type counts as vacated iff at least one of its
+  //           occurrences actually changed — which is what the number claims to a reader,
+  //           who is looking at "N of M types vacated" about the text in front of them.
+  //
+  // The readings coincide at `revealAfter = 0`, which is why only a control condition
+  // exposed the difference. At `revealAfter > 0` a type whose every occurrence falls inside
+  // the reveal window is still in the map but has changed nowhere in the text; counting it
+  // over-reports by roughly 2x on this corpus.
+  const domainVacated = countVacatedByMap(vmap.domain, vmap, params, keep);
+
+  let tokensVacated = 0;
+  const changedTypes = new Set<string>();
+  for (let i = 0; i < before.length; i++) {
+    const was = before[i].toLowerCase();
+    if (was === after[i].toLowerCase()) continue;
+    tokensVacated++;
+    changedTypes.add(was);
+  }
 
   let stemsVacated = 0;
   for (const stem of vmap.mapping.keys()) if (vacancyU(stem, params.seed) < params.p) stemsVacated++;
-
-  let tokensVacated = 0;
-  for (let i = 0; i < before.length; i++) {
-    if (before[i].toLowerCase() !== after[i].toLowerCase()) tokensVacated++;
-  }
 
   const splitBefore = stressSplit(before, vmap.mintedStress);
   const splitAfter = stressSplit(after, vmap.mintedStress);
 
   return {
     domainTypesTotal: vmap.domain.size,
-    domainTypesEligible: domainCounts.eligible,
-    domainTypesVacated: domainCounts.vacated,
+    domainTypesEligible: countEligible(vmap.domain, keep),
+    domainTypesVacated: domainVacated,
     corpusTypesTotal: corpusTypes.size,
-    corpusTypesEligible: corpusCounts.eligible,
-    corpusTypesVacated: corpusCounts.vacated,
+    corpusTypesEligible: countEligible(corpusTypes, keep),
+    corpusTypesVacated: changedTypes.size,
     stemsTotal: vmap.mapping.size,
     stemsVacated,
     tokensTotal: before.length,

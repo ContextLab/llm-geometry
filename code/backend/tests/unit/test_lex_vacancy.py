@@ -643,6 +643,82 @@ def test_inconsistent_assignment_destroys_type_identity(corpus, maps):
     assert len(set(tokenize(text))) > len(set(tokenize(corpus)))
 
 
+def test_the_inconsistent_mint_key_never_reaches_the_prosody_lookup(corpus, maps):
+    """§5.8. The key `f"{stem}#{idx}"` feeds the byte stream and the uniqueness check ONLY.
+
+    Let it reach the prosody lookup and the pattern becomes `stress("little#0") == "10"`
+    instead of `stress("little") == "100"`, so `Little` mints as a disyllable. §7.1 says the
+    nonce carries THE STEM'S syllable count and stress; a mint key is not a word, and the
+    spelling rule has no business being asked about one. Caught by the golden fixture, not by
+    either stack's tests — hence this one.
+    """
+    assert stress("little") == "100" != stress("little#0") == "10"
+    # At the minter: the key drives the byte stream, `stem` drives the pattern.
+    correct = _mint("little#0", 0, True, frozenset(), stem="little")
+    as_if_key_were_the_stem = _mint("little#0", 0, True, frozenset())
+    assert correct[1] == "100" and syllables(correct[0]) == 3
+    assert as_if_key_were_the_stem[1] == "10"
+    assert correct[0] != as_if_key_were_the_stem[0]
+
+    # End to end: every minted form still carries its stem's syllable count, occurrence by
+    # occurrence. Restricted to un-suffixed words so the seam repair of §5.7 cannot muddy
+    # the comparison — it is covered by its own test.
+    params = VacancyParams(p=1.0, seed=0, consistent=False)
+    text = vacate_text(corpus, maps[0], params)
+    checked = 0
+    for src, out in zip(WORD_RE.findall(corpus), WORD_RE.findall(text)):
+        stem, suffix = stem_and_suffix(src)
+        if src == out or suffix:
+            continue
+        assert maps[0].minted_stress[out.lower()] == stress(stem.lower())
+        assert syllables(out.lower()) == syllables(stem.lower())
+        checked += 1
+    assert checked > 4000
+
+
+def test_condition_b_applies_to_the_per_occurrence_path_too(corpus, maps):
+    """§5.8, and the `tak` case that exposed it.
+
+    Condition B — no minted form may equal a domain type — was enforced when building the
+    map and NOT on the `consistent=False` minting path. The gap is observable: at seed 7,
+    `p = 1`, the stem `tak` (of `taking`) minted the nonce `tak`, so `Taking -> Taking` and
+    one token silently failed to vacate. `corpus_types_vacated` read 1921 against the
+    consistent path's 1922 and `tokens_vacated` 8201 against 8202.
+
+    §7.1 denies this control a STABILITY property — that is about a nonce being reused
+    across occurrences — and it does not license a word surviving the transform. A control
+    whose vacancy rate is not the stated rate is not a control, so a per-occurrence nonce
+    must equal neither a domain type nor the stem it replaces, under the same re-mint loop.
+    """
+    # `tak` is a stem, not a type, which is exactly why the domain did not already forbid
+    # it: the domain is the corpus's TYPES (`taking`, `takes`, …) plus the Dolch list.
+    assert stem_and_suffix("taking") == ("tak", "ing")
+    assert "tak" not in maps[7].domain and "taking" in maps[7].domain
+
+    for seed in (0, 7):
+        params = VacancyParams(p=1.0, seed=seed, consistent=False)
+        # A fresh map per condition: `consistent=False` writes to `minted_stress`.
+        vmap = build_vacancy_map(vacancy_domain(set(tokenize(corpus))), params)
+        text = vacate_text(corpus, vmap, params)
+        stats = vacancy_stats(corpus, text, vmap, params)
+        # At `p = 1` every eligible type vacates (§10) — in this control exactly as in the
+        # mapped condition, which is the whole claim.
+        assert stats["corpusTypesVacated"] == stats["corpusTypesEligible"] == 1922, seed
+        assert stats["tokensVacated"] == 8202, seed
+
+        # No token survives the transform, and none survives as itself least of all.
+        for src, out in zip(WORD_RE.findall(corpus), WORD_RE.findall(text)):
+            stem = stem_and_suffix(src)[0]
+            if is_eligible(stem):
+                assert out.lower() != src.lower(), (seed, src)
+
+    # And the mechanism, directly: forbidding the stem is not implied by forbidding the
+    # domain, so `_mint` must be handed it. The losing draw is the FOURTH occurrence of
+    # `tak` in document order — `tak#3` at seed 7 mints `tak` on its first attempt.
+    assert _mint("tak#3", 7, True, frozenset(), stem="tak")[0] == "tak"
+    assert _mint("tak#3", 7, True, frozenset({"tak"}), stem="tak")[0] != "tak"
+
+
 def test_reveal_after_keeps_the_first_n_occurrences(corpus, maps):
     params = VacancyParams(p=1.0, seed=0, reveal_after=3)
     text = vacate_text(corpus, maps[0], params)
@@ -780,6 +856,43 @@ def test_stats_are_measured_not_asserted(corpus, corpus_types, maps, vacated):
             assert 0.0 <= stats["stressFromTableAfter"] <= 1.0
         assert stats["corpusTypesVacated"] == len(eligible)
         assert stats["tokensVacated"] > 0
+
+
+def test_corpus_types_vacated_is_measured_from_the_texts_not_from_map_membership(corpus, maps):
+    """§10. A type counts as vacated iff at least one of its occurrences ACTUALLY changed.
+
+    Under `reveal_after` the two readings diverge sharply: a type whose every occurrence falls
+    inside the reveal window is still in the map and still has `u(stem) < p`, so asking the map
+    over-reports roughly 2x. The panel would then tell a reader that 1337 types are vacant in a
+    text where 665 of them are printed in plain English.
+    """
+    params = VacancyParams(p=0.7, seed=0, reveal_after=2)
+    text = vacate_text(corpus, maps[0], params)
+    stats = vacancy_stats(corpus, text, maps[0], params)
+
+    measured = len(_changed_types(corpus, text))
+    by_membership = len(
+        {
+            t
+            for t in set(tokenize(corpus))
+            if is_eligible(stem_and_suffix(t)[0])
+            and vacancy_u(stem_and_suffix(t)[0], params.seed) < params.p
+        }
+    )
+    assert stats["corpusTypesVacated"] == measured == 665
+    assert by_membership == 1337  # the map-membership reading, over-reporting 2.01x
+    # Every type the two readings disagree about really is still English in the output.
+    unchanged = {w for w, surfaces in _images(corpus, text).items() if surfaces == {w}}
+    assert len(unchanged & {t.lower() for t in tokenize(corpus)}) >= by_membership - measured
+    assert not (unchanged & _changed_types(corpus, text))
+    # tokensVacated is measured the same way, and the reveal window is why it drops.
+    without_reveal = VacancyParams(p=0.7, seed=0)
+    assert (
+        stats["tokensVacated"]
+        < vacancy_stats(
+            corpus, vacate_text(corpus, maps[0], without_reveal), maps[0], without_reveal
+        )["tokensVacated"]
+    )
 
 
 def test_the_two_counting_scopes_and_their_identities(corpus, corpus_types, maps, vacated):

@@ -621,6 +621,48 @@ describe("the control conditions really are different conditions", () => {
     expect(new Set(tokenize(inconsistent)).size).toBeGreaterThan(new Set(tokenize(consistent)).size);
   });
 
+  it("condition B applies to the per-occurrence path too — the seed-7 `tak` case", () => {
+    // §5.8. Condition B — no minted form may equal a domain type — was enforced when
+    // building the map and NOT on the `consistent = false` minting path. Observable at
+    // seed 7, `p = 1`: the stem `tak` (of `taking`) minted the nonce `tak`, so
+    // `Taking -> Taking` and one token silently failed to vacate — `corpusTypesVacated`
+    // 1921 against the consistent path's 1922, `tokensVacated` 8201 against 8202.
+    //
+    // §7.1 denies this control a STABILITY property, which is about a nonce being reused
+    // across occurrences; it does not license a word surviving the transform. A control
+    // whose vacancy rate is not the stated rate is not a control, so a per-occurrence nonce
+    // must equal neither a domain type nor the stem it replaces.
+    //
+    // `tak` is a stem, not a type, which is why the domain did not already forbid it: the
+    // domain holds the corpus's TYPES (`taking`, `takes`, …) plus the Dolch list.
+    expect(stemAndSuffix("taking")).toEqual(["tak", "ing"]);
+    expect(DOMAIN.includes("tak")).toBe(false);
+    expect(DOMAIN.includes("taking")).toBe(true);
+
+    for (const s of SEEDS) {
+      // A fresh map per condition: `consistent = false` writes to `mintedStress`.
+      const cfg = params({ seed: s, p: 1, consistent: false });
+      const vmap = buildVacancyMap(DOMAIN, cfg);
+      const text = vacateText(CORPUS, vmap, cfg);
+      const stats = vacancyStats(CORPUS, text, vmap, cfg);
+      // At `p = 1` every eligible type vacates (§10) — in this control exactly as in the
+      // mapped condition, which is the whole claim.
+      expect(stats.corpusTypesVacated, `seed ${s}`).toBe(1922);
+      expect(stats.corpusTypesEligible, `seed ${s}`).toBe(1922);
+      expect(stats.tokensVacated, `seed ${s}`).toBe(8202);
+
+      // No eligible token survives the transform as itself.
+      const before = tokenize(CORPUS);
+      const after = tokenize(text);
+      const survivors: string[] = [];
+      for (let i = 0; i < before.length; i++) {
+        if (!isEligible(stemAndSuffix(before[i])[0], effectiveKeepSet([]))) continue;
+        if (after[i] === before[i]) survivors.push(before[i]);
+      }
+      expect(survivors, `seed ${s}`).toEqual([]);
+    }
+  });
+
   it("revealAfter > 0 leaves the first occurrences in English", () => {
     const revealed = vacateText(CORPUS, mapFor(seed), params({ seed, p: 1, revealAfter: 2 }));
     const pure = vacated(seed, 1);
@@ -749,6 +791,70 @@ describe("§10 statistics", () => {
       const s = vacancyStats(CORPUS, vacated(seed, 1), mapFor(seed), params({ seed, p: 1 }));
       expect(s.domainTypesEligible).toBe(s.corpusTypesEligible + 22);
       expect(s.domainTypesTotal).toBe(s.corpusTypesTotal + 22);
+    }
+  });
+
+  it("measures corpusTypesVacated from the texts, not from map membership, under revealAfter", () => {
+    // The defect the golden fixture caught. A type whose every occurrence falls inside the
+    // reveal window is STILL LISTED IN THE MAP but has changed nowhere in the text, so map
+    // membership over-reports it. The two readings coincide at revealAfter = 0, which is
+    // why only a control condition exposed it.
+    const seed = 0;
+    const cfg = params({ seed, p: 1, revealAfter: 1 });
+    const revealed = vacateText(CORPUS, mapFor(seed), cfg);
+    const s = vacancyStats(CORPUS, revealed, mapFor(seed), cfg);
+
+    // The text-measured count, computed here independently of the implementation.
+    const beforeToks = tokenize(CORPUS);
+    const afterToks = tokenize(revealed);
+    const changed = new Set<string>();
+    for (let i = 0; i < beforeToks.length; i++) {
+      if (beforeToks[i] !== afterToks[i]) changed.add(beforeToks[i]);
+    }
+    expect(s.corpusTypesVacated).toBe(changed.size);
+
+    // ...and it is strictly smaller than what map membership would have said, which is the
+    // number the domain scope still reports (deliberately — see below).
+    const byMap = [...CORPUS_TYPES].filter((t) => {
+      const [stem] = stemAndSuffix(t);
+      return isEligible(stem, effectiveKeepSet()) && vacancyU(stem, seed) < 1;
+    }).length;
+    expect(s.corpusTypesVacated).toBeLessThan(byMap);
+    expect(byMap).toBe(s.corpusTypesEligible);
+  });
+
+  it("pins the exact golden-fixture case the defect was found at: p = 0.7, revealAfter = 2", () => {
+    // The coordinate the two stacks split on, reproduced to the type. Map membership says
+    // 1337 and the texts say 665 — the 2x over-report, at the golden fixture's own p.
+    const seed = 0;
+    const cfg = params({ seed, p: 0.7, revealAfter: 2 });
+    const s = vacancyStats(CORPUS, vacateText(CORPUS, mapFor(seed), cfg), mapFor(seed), cfg);
+    const byMap = [...CORPUS_TYPES].filter((t) => {
+      const [stem] = stemAndSuffix(t);
+      return isEligible(stem, effectiveKeepSet()) && vacancyU(stem, seed) < 0.7;
+    }).length;
+    expect(byMap).toBe(1337);
+    expect(s.corpusTypesVacated).toBe(665);
+    // The domain scope keeps the map reading, and so is unmoved by revealAfter.
+    expect(s.domainTypesVacated).toBe(1354);
+  });
+
+  it("agrees at revealAfter = 0 and diverges at revealAfter > 0", () => {
+    // The property that would have caught the defect, asserted directly.
+    for (const seed of SEEDS) {
+      const pure = params({ seed, p: 1, revealAfter: 0 });
+      const held = params({ seed, p: 1, revealAfter: 1 });
+      const sPure = vacancyStats(CORPUS, vacated(seed, 1), mapFor(seed), pure);
+      const sHeld = vacancyStats(CORPUS, vacateText(CORPUS, mapFor(seed), held), mapFor(seed), held);
+
+      // At revealAfter = 0 the text reading and the map reading are the same number.
+      expect(sPure.corpusTypesVacated).toBe(sPure.corpusTypesEligible);
+      // At revealAfter > 0 the text-measured count is STRICTLY smaller...
+      expect(sHeld.corpusTypesVacated).toBeLessThan(sPure.corpusTypesVacated);
+      // ...while the domain scope, which reads map membership, does not move at all.
+      expect(sHeld.domainTypesVacated).toBe(sPure.domainTypesVacated);
+      // Tokens are text-measured in both, so they drop too — by one per revealed type.
+      expect(sHeld.tokensVacated).toBeLessThan(sPure.tokensVacated);
     }
   });
 

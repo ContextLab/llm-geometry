@@ -60,53 +60,43 @@ stress pattern on the map's ``minted_stress``, i.e. it MUTATES the map. Every co
 therefore builds its own map, and the test must do the same or its statistics will be
 scored against patterns left behind by a previous case.
 
-TWO MEASURED DISAGREEMENTS BETWEEN THE STACKS, pinned rather than papered over. Each is a
-real defect in one implementation, each is reported, and NEITHER implementation was touched
-to build this fixture — a golden file that quietly matched the two would destroy the
-evidence. Both sit in the CONTROL conditions; every mapped-condition case (both seeds, both
-``matchProsody`` settings, every `p`) agrees field for field, string for string, digest for
-digest.
+NO DISAGREEMENTS REMAIN BETWEEN THE STACKS. Every case in this fixture — both seeds, both
+``matchProsody`` settings, every `p`, and both control conditions — agrees field for field,
+string for string, digest for digest. That was not true when the fixture was first written,
+and the history is worth keeping because it is what the mechanism below exists for.
 
-**1. ``corpusTypesVacated`` under ``revealAfter > 0``** — Python 665, TypeScript 1337.
+Three defects were pinned here as ``knownDivergence`` blocks and have since been fixed in
+the stack the contract said was wrong. Each was fixed in the IMPLEMENTATION; none was fixed
+by loosening this file:
 
-* Python (``vacancy.py::vacancy_stats``) MEASURES it: ``len({b.lower() for b, a in
-  zip(before, after) if b.lower() != a.lower()})``, i.e. types that actually changed in the
-  text.
-* TypeScript (``vacancy.ts::countTypes``) computes it THROUGH THE MAP: a type counts if
-  ``u(stem) < p`` and its surface form differs, whatever the rewrite did.
+1. **``corpusTypesVacated`` under ``revealAfter > 0``** — Python 665, TypeScript 1337.
+   Python MEASURED the count from the two texts; TypeScript computed it through the map, so
+   a type whose every occurrence fell inside the reveal window was still counted. §10 says
+   ``corpusTypes*`` is "what the panel shows a reader", and the reader is looking at the
+   text, so the measured reading was the contract's. TypeScript now measures the texts too
+   (``domainTypes*`` keeps map membership, which §10 also requires — the 22 Dolch-only words
+   have no occurrences to measure).
+2. **Prosody of the per-occurrence mint under ``consistent = false``.** §5.8 pins the key as
+   ``f"{stem}#{idx}"`` and §5.5's mint read its stress pattern off the string it was handed,
+   so Python got ``stress("little#0") == "10"`` instead of ``stress("little") == "100"`` and
+   ``Little`` minted as ``Wrerken`` rather than ``Wrerkenle``. §7.1 says the nonce carries
+   THE STEM's syllable count and stress, so the key must not reach the prosody lookup.
+   Python's ``_mint`` now takes ``stem`` separately from ``key``.
+3. **Condition B on the per-occurrence path** (§5.8, added to the contract with this fix).
+   It was enforced when building the map and not in the ``consistent = false`` control, so
+   at seed 7, `p = 1`, the stem ``tak`` minted the nonce ``tak`` and ``Taking -> Taking``:
+   ``corpusTypesVacated`` 1921 against the consistent path's 1922, ``tokensVacated`` 8201
+   against 8202. Both stacks now forbid a per-occurrence nonce from equalling the stem it
+   replaces as well as any domain type, and the control vacates 1922 types / 8202 tokens at
+   both seeds, exactly as ``consistent = true`` does.
 
-They agree everywhere except ``revealAfter > 0``, where a type all of whose occurrences fall
-inside the reveal window stays English in the text while the map still assigns it a nonce.
-§10 says ``corpusTypes*`` is "what the panel shows a reader", and the reader is looking at
-the text — so the MEASURED reading (Python's) is the contract's, and the map-based one
-over-reports by 2x in exactly the condition this control exists to measure. ``countTypes``'s
-own comment argues condition-independence only for ``consistent = false``, where it is
-right; it is silent on ``revealAfter``, where it is wrong.
-
-**2. The minted forms under ``consistent = false``** — the two stacks mint DIFFERENT nonces,
-so the vacated text, its digest, its length and four prosody means all differ.
-
-§5.8 pins the per-occurrence KEY as ``f"{stem}#{idx}"`` and §5.5's mint reads its stress
-pattern off the string it is handed. Python passes the key and therefore mints to
-``stress("little#0") == "10"`` — two syllables, via the spelling rule, because ``little#0``
-is not in the hand table. TypeScript computes ``stress("little") == "100"`` — three
-syllables, from the table — and passes the key only to the byte stream. So ``Little`` becomes
-``Wrerken`` in one stack and ``Wrerkenle`` in the other.
-
-§7.1 defines ``matchProsody`` as "the nonce carries **the stem's** syllable count and
-stress", and §10 defines ``stressFromMinted`` as the pattern we registered for a form — both
-describe the STEM's prosody, not a synthetic key's. TypeScript's reading is therefore the
-contract's; Python's derives prosody from a string containing ``#`` and a digit. The contract
-pins the key and says nothing about the pattern, and that silence is the gap. Note the
-control still controls: every count, ``tokensVacated`` included, agrees exactly, so SC-705's
-measurement is unaffected.
-
-Until each is fixed, both readings are pinned. ``knownDivergence`` on the affected case
-carries, per field, the Python value from THIS run and the MEASURED TypeScript value, plus
-the explanation above; the golden test asserts each side against its own. Fixing either
-stack turns the test red at that block — and ``attach_divergence`` refuses to write a fixture
-at all once Python agrees with the recorded TypeScript reading, so the exemption cannot
-outlive the defect.
+``KNOWN_DIVERGENCES`` is therefore EMPTY, and it is kept — with ``attach_divergence`` and
+``DIVERGENCE_STATUS`` — rather than deleted, because it is the honest way to ship a fixture
+while a real cross-stack defect is outstanding: record BOTH readings, assert each side
+against its own, and refuse to write the fixture at all the moment Python starts agreeing
+with the recorded TypeScript value. That guard is what retired all three entries above; it
+fired on ``control-inconsistent.vacatedSha256`` and would not let the stale exemption be
+regenerated. An entry added here must be MEASURED on both sides, never predicted.
 """
 
 from __future__ import annotations
@@ -210,75 +200,27 @@ HEAD_CHARS = 400
 NESTING_SEED = 0
 NESTING_PS: tuple[float, ...] = (0.0, 0.35, 0.7, 1.0)
 
-#: The two measured cross-stack disagreements — see the module docstring for what they are
-#: and why they are recorded instead of reconciled. Both live in the CONTROL conditions;
-#: every mapped-condition case agrees field for field.
+#: Measured cross-stack disagreements, recorded instead of reconciled — see the module
+#: docstring. **Currently EMPTY: the two stacks agree on every case in this fixture.** The
+#: three entries this dict used to carry are listed there, with what each one was and which
+#: stack was fixed; none of them was retired by editing this file.
 #:
-#: Every ``typescript`` value below is MEASURED, by running the real browser engine on the
-#: real corpus at that case's parameters:
+#: The mechanism stays because it is the honest way to ship a fixture over an outstanding
+#: defect. To add an entry, every ``typescript`` value must be MEASURED, by running the real
+#: browser engine on the real corpus at that case's parameters:
 #:
 #:     const vmap = buildVacancyMap(vacancyDomain(new Set(tokenize(CORPUS))), params);
 #:     const vacated = vacateText(CORPUS, vmap, params);
 #:     const stats = vacancyStats(CORPUS, vacated, vmap, params);
 #:
-#: None of them is a prediction and none is derived here. ``build_document`` asserts that
-#: the Python side still disagrees with each one, so if either stack is fixed this exporter
-#: fails loudly rather than shipping a stale exemption.
-KNOWN_DIVERGENCES: dict[str, dict[str, Any]] = {
-    "control-reveal-after-2": {
-        "cause": (
-            "corpusTypesVacated: Python MEASURES it from the two texts "
-            "(vacancy.py::vacancy_stats), TypeScript computes it through the map "
-            "(vacancy.ts::countTypes). They agree everywhere except revealAfter > 0, where "
-            "a type all of whose occurrences fall inside the reveal window stays English in "
-            "the text while the map still assigns it a nonce. §10 defines corpusTypes* as "
-            "what the panel shows a READER — i.e. what the text does — so the measured "
-            "reading is the contract's and countTypes over-reports by 2x in exactly the "
-            "condition this control exists to measure. countTypes's own comment argues "
-            "condition-independence only for consistent = false, where it is right; it is "
-            "silent on revealAfter, where it is wrong."
-        ),
-        "fields": {"stats.corpusTypesVacated": 1337},
-    },
-    "control-inconsistent": {
-        "cause": (
-            "the per-occurrence mint derives its stress pattern from different strings. "
-            "§5.8 pins the KEY as f'{stem}#{idx}' and §5.5's mint reads its pattern off the "
-            "string it is handed, so Python calls _mint('little#0') and gets "
-            "stress('little#0') = '10' (2 syllables, via the spelling rule, because "
-            "'little#0' is not in the hand table); TypeScript computes stress('little') = "
-            "'100' (3 syllables, from the table) and passes the key only to the byte "
-            "stream. §7.1 defines matchProsody as 'the nonce carries THE STEM's syllable "
-            "count and stress', and §10 defines stressFromMinted as the pattern we "
-            "registered for a form — both of which describe the stem's prosody, not a "
-            "synthetic key's, so TypeScript's reading is the contract's. The contract pins "
-            "the key and is silent on the pattern; that silence is the gap. Only the minted "
-            "FORMS differ: every count, including tokensVacated and both vacated-type "
-            "counts, agrees exactly, so the control still measures what SC-705 says it does."
-        ),
-        "fields": {
-            "vacatedSha256": (
-                "610a0d8375890ec68a788457b957d248e5e8a279644fc5b339aa7849451a68cf"
-            ),
-            "vacatedChars": 94748,
-            "stats.meanSyllablesAfter": 1.28975,
-            "stats.meanAnapestAfter": 0.3215726757806852,
-            "stats.stressFromMintedAfter": 0.303375,
-            "stats.stressFromRuleAfter": 0.67925,
-            "head400": (
-                "      THE GLAIRN\n    SCIRRDER PLERNT\n\n  _Wroormowyed by_\nBlanche "
-                "Thursper Styn\n\n1916\n\n\n\nA HURF OF THE YORCKES\n\nWrerkenle "
-                "Bo-Peep\nFlorlkishle Boy Poun\nRain\nThe Sqyft\nWinter\nNietens and "
-                "Klisks\nA Gnuntingenle Jai\nSculk Mursh and Her Cat\nThree Thoochousish on "
-                "the Ice\nNefs Gask\nThe Soamp Therltle Under a Gloang\nTweedle-Dum and "
-                "Tweedle-Dee\nOh Steb!\nSwouck Felkid Rarp\nLainowid Yersking Snof\n"
-                "Pat-a-Cake\nSt"
-            ),
-        },
-    },
-}
+#: Never a prediction, and never derived here. ``attach_divergence`` then asserts that the
+#: Python side still disagrees with each recorded value, so the moment the defect is fixed
+#: this exporter refuses to write a fixture at all rather than shipping a stale exemption.
+#: Shape: ``{case label: {"cause": str, "fields": {field path: typescript value}}}``, where
+#: a field path is a case key (``head400``) or ``stats.<name>``.
+KNOWN_DIVERGENCES: dict[str, dict[str, Any]] = {}
 
-#: Shared by both entries above, so the wording cannot drift between them.
+#: Shared by every entry, so the wording cannot drift between them.
 DIVERGENCE_STATUS = (
     "reported, unfixed — neither implementation was modified to build this fixture. Both "
     "readings are pinned exactly, so fixing either stack turns vacancyGolden.test.ts red at "
@@ -541,8 +483,17 @@ def build_document(generated: str) -> dict[str, Any]:
     # --- the two control conditions (§7.1), each on its OWN map -----------------------
     # `consistent = false` writes to `minted_stress`; sharing a map across cases would let
     # one case's minted patterns score another case's text.
+    #
+    # `control-inconsistent-seed7` is the seed-7 CONDITION-B regression, pinned as data.
+    # It is at `p = 1` and not `0.7` deliberately: §10's identity says every eligible type
+    # vacates at full vacancy, so this case must read `corpusTypesVacated == 1922` and
+    # `tokensVacated == 8202` — exactly what `consistent = true` reads. Before the fix it
+    # read 1921 / 8201, because the stem `tak` minted the nonce `tak` and `Taking` survived
+    # the transform. Seed 0 shows nothing here (no stem mints itself), which is why the
+    # defect lived in the one control the fixture already had.
     for label, params in (
         ("control-inconsistent", VacancyParams(seed=0, p=0.7, consistent=False)),
+        ("control-inconsistent-seed7", VacancyParams(seed=7, p=1.0, consistent=False)),
         ("control-reveal-after-2", VacancyParams(seed=0, p=0.7, reveal_after=2)),
     ):
         fresh = build_vacancy_map(domain, params)

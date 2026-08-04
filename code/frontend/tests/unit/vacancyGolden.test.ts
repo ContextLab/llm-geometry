@@ -45,29 +45,35 @@
  * `tolerance`, and the measured worst deviation is printed at the end of the run so a
  * silent creep toward the bound is visible.
  *
- * TWO KNOWN DIVERGENCES, pinned rather than hidden. Both are in the CONTROL conditions;
- * every mapped-condition case — both seeds, both `matchProsody` settings, every `p` —
- * agrees field for field, string for string, digest for digest.
+ * NO KNOWN DIVERGENCES REMAIN. Every case here — both seeds, both `matchProsody` settings,
+ * every `p`, and all three controls — agrees field for field, string for string, digest for
+ * digest. Three earlier disagreements were pinned in this file rather than hidden, and each
+ * was retired by fixing the stack the contract said was wrong, never by loosening a
+ * comparison:
  *
- *   1. `control-reveal-after-2`: `corpusTypesVacated` reads 665 in Python and 1337 here,
- *      because Python MEASURES the count from the two texts while `countTypes` computes it
+ *   1. `control-reveal-after-2`: `corpusTypesVacated` read 665 in Python and 1337 here,
+ *      because Python MEASURED the count from the two texts while this engine computed it
  *      through the map. §10 defines `corpusTypes*` as what the panel shows a READER — i.e.
- *      what the text does — so the measured reading is the contract's, and this engine
- *      over-reports by 2x in exactly the condition the control exists to measure.
- *   2. `control-inconsistent`: the two stacks mint DIFFERENT per-occurrence nonces, so the
- *      vacated text, its digest, its length and four prosody means differ. §5.8 pins the
- *      key as `${stem}#${idx}` and §5.5's mint reads its stress pattern off the string it
- *      is handed; Python passes the key and gets `stress("little#0") = "10"`, this engine
- *      computes `stress("little") = "100"` and passes the key only to the byte stream —
- *      `Little` becomes `Wrerken` there and `Wrerkenle` here. §7.1 defines `matchProsody`
- *      as "the nonce carries THE STEM's syllable count and stress", so this engine's
- *      reading is the contract's. Every count still agrees, `tokensVacated` included, so
- *      SC-705's measurement is unaffected.
+ *      what the text does — so the measured reading was the contract's. `vacancyStats` now
+ *      measures the texts; `domainTypes*` keeps map membership, which §10 also requires.
+ *   2. `control-inconsistent`: the two stacks minted DIFFERENT per-occurrence nonces. §5.8
+ *      pins the key as `${stem}#${idx}` and §5.5's mint read its stress pattern off the
+ *      string it was handed, so Python got `stress("little#0") = "10"` where this engine
+ *      gets `stress("little") = "100"` — `Little` minted as `Wrerken` there and `Wrerkenle`
+ *      here. §7.1 says the nonce carries THE STEM's syllable count and stress, so the key
+ *      must not reach the prosody lookup; Python's `_mint` now takes `stem` separately.
+ *   3. Condition B on the per-occurrence path (§5.8). It was enforced when building the map
+ *      and not in the `consistent = false` control, so at seed 7, `p = 1`, the stem `tak`
+ *      minted the nonce `tak` and `Taking -> Taking`: one token silently failed to vacate.
+ *      Both stacks now forbid a per-occurrence nonce from equalling the stem it replaces as
+ *      well as any domain type, and `control-inconsistent-seed7` pins the result — 1922
+ *      corpus types and 8202 tokens vacated, exactly what `consistent = true` reads.
  *
- * Both are reported, and NEITHER implementation was modified to make this fixture green.
- * The fixture's `knownDivergence` block carries, per field, both values; this test asserts
- * each side against its own, so fixing either stack turns this test red and the exemption
- * cannot outlive the defect.
+ * The `knownDivergence` mechanism itself stays: it carries both readings per field, this
+ * test asserts each side against its own, and `attach_divergence` in the exporter refuses to
+ * write a fixture at all once Python starts agreeing with a recorded TypeScript value. That
+ * guard is what retired all three entries above, and it is what an outstanding cross-stack
+ * defect would use again.
  */
 
 import { afterAll, describe, expect, it } from "vitest";
@@ -575,15 +581,17 @@ describe("the control conditions are present and behave as controls (§7.1, SC-7
     expect(reveal?.stats.tokensVacated as number).toBeLessThan(pure?.stats.tokensVacated as number);
   });
 
-  it("every known divergence is documented, and confined to a control", () => {
-    // The exemption mechanism is itself constrained: a divergence may only appear on a
-    // control case, and it must carry the explanation and the status. A mapped-condition
-    // case acquiring one would mean the invariance theorem's own arm had stopped agreeing.
+  it("no divergence remains, and any that appeared would still be constrained", () => {
+    // The two stacks now agree on every case, so this list is EMPTY — asserted, because a
+    // fixture that quietly reacquired an exemption would look exactly like a green run.
     const flagged = golden.cases.filter((c) => c.knownDivergence !== undefined);
-    expect(flagged.map((c) => c.label).sort()).toEqual([
-      "control-inconsistent",
-      "control-reveal-after-2",
-    ]);
+    expect(flagged.map((c) => c.label)).toEqual([]);
+
+    // The rest of this test is the constraint the mechanism carries, kept live for the day
+    // it is needed again: a divergence may appear only on a CONTROL case, it must carry the
+    // explanation and the status, and it may never cover a count the control exists to
+    // produce. A mapped-condition case acquiring one would mean the invariance theorem's
+    // own arm had stopped agreeing.
     for (const gc of flagged) {
       const d = gc.knownDivergence as GoldenDivergence;
       expect(gc.params.consistent && gc.params.revealAfter === 0).toBe(false);
@@ -592,8 +600,8 @@ describe("the control conditions are present and behave as controls (§7.1, SC-7
       expect(d.fields.length).toBeGreaterThan(0);
       for (const f of d.fields) expect(f.python).not.toBe(f.typescript);
     }
-    // The counts a control exists to produce agree in BOTH stacks — SC-705 is unaffected
-    // by either defect, and that has to be asserted rather than assumed.
+    // The counts a control exists to produce must agree in BOTH stacks — a divergence there
+    // would mean SC-705's measurement itself had moved, which no exemption may cover.
     for (const gc of flagged) {
       const names = new Set((gc.knownDivergence as GoldenDivergence).fields.map((f) => f.field));
       expect(names.has("stats.tokensVacated")).toBe(false);
@@ -608,6 +616,27 @@ describe("the control conditions are present and behave as controls (§7.1, SC-7
     // Same rate — that is what makes it a control and not just a different transform.
     expect(control?.stats.tokensVacated).toBe(pure?.stats.tokensVacated);
     // Different text, because each occurrence gets its own type.
+    expect(control?.vacatedSha256).not.toBe(pure?.vacatedSha256);
+  });
+
+  it("consistent = false vacates EVERYTHING at p = 1, seed 7 — the `tak` regression", () => {
+    // §5.8, condition B on the per-occurrence path. `tak` (the stem of `taking`) once minted
+    // the nonce `tak` at seed 7, so `Taking -> Taking` and one token silently survived the
+    // transform: 1921 corpus types and 8201 tokens against the consistent path's 1922/8202.
+    // A control whose vacancy rate is not the stated rate is not a control, so the identity
+    // §10 states at `p = 1` — every eligible type vacates — has to hold here too.
+    const control = golden.cases.find((c) => c.label === "control-inconsistent-seed7");
+    const pure = golden.cases.find((c) => c.label === "seed7-p1.0");
+    expect(control).toBeDefined();
+    expect(control?.params.consistent).toBe(false);
+    expect(control?.params.p).toBe(1);
+    expect(control?.stats.corpusTypesVacated).toBe(1922);
+    expect(control?.stats.tokensVacated).toBe(8202);
+    expect(control?.stats.corpusTypesVacated).toBe(control?.stats.corpusTypesEligible);
+    // The consistent path at the same seed and `p` reads the same counts; only the text
+    // differs, which is exactly what this control is for.
+    expect(control?.stats.corpusTypesVacated).toBe(pure?.stats.corpusTypesVacated);
+    expect(control?.stats.tokensVacated).toBe(pure?.stats.tokensVacated);
     expect(control?.vacatedSha256).not.toBe(pure?.vacatedSha256);
   });
 });

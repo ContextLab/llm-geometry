@@ -1,7 +1,7 @@
 {
  "format": "vacancy-golden-v1",
  "generated": "2026-08-04",
- "git_sha": "bbee124ab89cd399632ac41b9b6164e4bb688665",
+ "git_sha": "c115ec656c8a7bc150952f6de5d43f86693661be",
  "command": "python scripts/export_vacancy_golden.py",
  "source": "llm_geometry.lex.vacancy run directly on the committed corpus \u2014 real code, real text, no mocks",
  "contract": "specs/007-vacancy-transform-field/architecture.md",
@@ -3797,6 +3797,44 @@
    }
   },
   {
+   "label": "control-inconsistent-seed7",
+   "seed": 7,
+   "matchProsody": true,
+   "remintRounds": 1,
+   "bijective": true,
+   "imageSize": 2233,
+   "domainSize": 2233,
+   "mappingSize": 1680,
+   "mappingSha256": "65efb80b712a63d434bc8c9ecc1266dc93197eca5c3938ebd5f820c8da82fbbd",
+   "mapping": null,
+   "sampleNonces": {
+    "little": "shooventy",
+    "pretty": "mienle",
+    "run": "maik",
+    "eat": "drult",
+    "jump": "scerrk",
+    "away": "unpryng",
+    "squirrel": "tielk",
+    "funny": "vezzleum",
+    "today": "rekurd",
+    "gum": "thrern",
+    "hang": "smeeg",
+    "crown": "trif",
+    "candlestick": "strooftishish",
+    "crooked": null,
+    "diddle": "gnoozzleel",
+    "moon": "glet",
+    "pussy": "frarsish",
+    "goose": "kloalk",
+    "the": null,
+    "and": null,
+    "you": null,
+    "not": null,
+    "ox": null,
+    "good-bye": null
+   }
+  },
+  {
    "label": "control-reveal-after-2",
    "seed": 0,
    "matchProsody": true,
@@ -5575,9 +5613,9 @@
     "revealAfter": 0,
     "keep": []
    },
-   "head400": "      THE GLAIRN\n    SCIRRDER PLERNT\n\n  _Wroormowyed by_\nBlanche Thursper Styn\n\n1916\n\n\n\nA HURF OF THE YORCKES\n\nWrerken Bo-Peep\nFlorlkish Boy Poun\nRain\nThe Sqyft\nWinter\nNietens and Klisks\nA Gnuntingenle Jai\nSculk Mursh and Her Cat\nThree Thoochous on the Ice\nNefs Gask\nThe Soamp Therltle Under a Gloang\nTweedle-Dum and Tweedle-Dee\nOh Steb!\nSwouck Felkid Rarp\nSqarbley Yersking Snof\nPat-a-Cake\nStoabent ",
-   "vacatedSha256": "e8565c25a3958c14a2d29c14fc401e1618e98bf86a81aa52d288105e963c9326",
-   "vacatedChars": 94216,
+   "head400": "      THE GLAIRN\n    SCIRRDER PLERNT\n\n  _Wroormowyed by_\nBlanche Thursper Styn\n\n1916\n\n\n\nA HURF OF THE YORCKES\n\nWrerkenle Bo-Peep\nFlorlkishle Boy Poun\nRain\nThe Sqyft\nWinter\nNietens and Klisks\nA Gnuntingenle Jai\nSculk Mursh and Her Cat\nThree Thoochousish on the Ice\nNefs Gask\nThe Soamp Therltle Under a Gloang\nTweedle-Dum and Tweedle-Dee\nOh Steb!\nSwouck Felkid Rarp\nLainowid Yersking Snof\nPat-a-Cake\nSt",
+   "vacatedSha256": "610a0d8375890ec68a788457b957d248e5e8a279644fc5b339aa7849451a68cf",
+   "vacatedChars": 94748,
    "stats": {
     "domainTypesTotal": 2233,
     "domainTypesEligible": 1944,
@@ -5590,63 +5628,65 @@
     "tokensTotal": 16000,
     "tokensVacated": 6094,
     "meanSyllablesBefore": 1.29,
-    "meanSyllablesAfter": 1.273375,
+    "meanSyllablesAfter": 1.28975,
     "meanAnapestBefore": 0.3209324983421379,
-    "meanAnapestAfter": 0.3233955374015627,
+    "meanAnapestAfter": 0.3215726757806852,
     "stressFromTableBefore": 0.0514375,
     "stressFromTableAfter": 0.017375,
     "stressFromMintedBefore": 0.0,
-    "stressFromMintedAfter": 0.3034375,
+    "stressFromMintedAfter": 0.303375,
     "stressFromRuleBefore": 0.9485625,
-    "stressFromRuleAfter": 0.6791875,
+    "stressFromRuleAfter": 0.67925,
     "bijective": true,
     "imageSize": 2233,
     "remintRounds": 0
    },
    "stemForms": null,
    "idStream": null,
-   "mapVocabWordsRejects": true,
-   "knownDivergence": {
-    "cause": "the per-occurrence mint derives its stress pattern from different strings. \u00a75.8 pins the KEY as f'{stem}#{idx}' and \u00a75.5's mint reads its pattern off the string it is handed, so Python calls _mint('little#0') and gets stress('little#0') = '10' (2 syllables, via the spelling rule, because 'little#0' is not in the hand table); TypeScript computes stress('little') = '100' (3 syllables, from the table) and passes the key only to the byte stream. \u00a77.1 defines matchProsody as 'the nonce carries THE STEM's syllable count and stress', and \u00a710 defines stressFromMinted as the pattern we registered for a form \u2014 both of which describe the stem's prosody, not a synthetic key's, so TypeScript's reading is the contract's. The contract pins the key and is silent on the pattern; that silence is the gap. Only the minted FORMS differ: every count, including tokensVacated and both vacated-type counts, agrees exactly, so the control still measures what SC-705 says it does.",
-    "status": "reported, unfixed \u2014 neither implementation was modified to build this fixture. Both readings are pinned exactly, so fixing either stack turns vacancyGolden.test.ts red at this block and the exemption cannot outlive the defect.",
-    "fields": [
-     {
-      "field": "vacatedSha256",
-      "python": "e8565c25a3958c14a2d29c14fc401e1618e98bf86a81aa52d288105e963c9326",
-      "typescript": "610a0d8375890ec68a788457b957d248e5e8a279644fc5b339aa7849451a68cf"
-     },
-     {
-      "field": "vacatedChars",
-      "python": 94216,
-      "typescript": 94748
-     },
-     {
-      "field": "stats.meanSyllablesAfter",
-      "python": 1.273375,
-      "typescript": 1.28975
-     },
-     {
-      "field": "stats.meanAnapestAfter",
-      "python": 0.3233955374015627,
-      "typescript": 0.3215726757806852
-     },
-     {
-      "field": "stats.stressFromMintedAfter",
-      "python": 0.3034375,
-      "typescript": 0.303375
-     },
-     {
-      "field": "stats.stressFromRuleAfter",
-      "python": 0.6791875,
-      "typescript": 0.67925
-     },
-     {
-      "field": "head400",
-      "python": "      THE GLAIRN\n    SCIRRDER PLERNT\n\n  _Wroormowyed by_\nBlanche Thursper Styn\n\n1916\n\n\n\nA HURF OF THE YORCKES\n\nWrerken Bo-Peep\nFlorlkish Boy Poun\nRain\nThe Sqyft\nWinter\nNietens and Klisks\nA Gnuntingenle Jai\nSculk Mursh and Her Cat\nThree Thoochous on the Ice\nNefs Gask\nThe Soamp Therltle Under a Gloang\nTweedle-Dum and Tweedle-Dee\nOh Steb!\nSwouck Felkid Rarp\nSqarbley Yersking Snof\nPat-a-Cake\nStoabent ",
-      "typescript": "      THE GLAIRN\n    SCIRRDER PLERNT\n\n  _Wroormowyed by_\nBlanche Thursper Styn\n\n1916\n\n\n\nA HURF OF THE YORCKES\n\nWrerkenle Bo-Peep\nFlorlkishle Boy Poun\nRain\nThe Sqyft\nWinter\nNietens and Klisks\nA Gnuntingenle Jai\nSculk Mursh and Her Cat\nThree Thoochousish on the Ice\nNefs Gask\nThe Soamp Therltle Under a Gloang\nTweedle-Dum and Tweedle-Dee\nOh Steb!\nSwouck Felkid Rarp\nLainowid Yersking Snof\nPat-a-Cake\nSt"
-     }
-    ]
-   }
+   "mapVocabWordsRejects": true
+  },
+  {
+   "label": "control-inconsistent-seed7",
+   "map": "control-inconsistent-seed7",
+   "params": {
+    "p": 1.0,
+    "seed": 7,
+    "consistent": false,
+    "matchProsody": true,
+    "revealAfter": 0,
+    "keep": []
+   },
+   "head400": "      THE BLORM\n    SWERFFISH MORT\n\n  _Plourerered by_\nTreesp Mearter Krad\n\n1916\n\n\n\nA YOORN OF THE GERLTES\n\nWreazzleerum Bo-Peep\nShilidy Throuf Squrm\nPook\nThe Jorrk\nFyler\nYichums and Virks\nA Scaitenticen Flirck\nPlerp Gnuz and Her Zersk\nThree Sqyrmouser on the Rars\nGeashs Horrd\nThe Naull Thistid Under a Nourn\nTweedle-Dum and Tweedle-Dee\nOh Skoa!\nBoaff Worbish Wrog\nStortelle Heasting Waud\nPat-a-Cake",
+   "vacatedSha256": "25df4453ac73c95e3a61db45fca3329b4b03bf08b3b9a74b161cebe618772292",
+   "vacatedChars": 97263,
+   "stats": {
+    "domainTypesTotal": 2233,
+    "domainTypesEligible": 1944,
+    "domainTypesVacated": 1944,
+    "corpusTypesTotal": 2211,
+    "corpusTypesEligible": 1922,
+    "corpusTypesVacated": 1922,
+    "stemsTotal": 1680,
+    "stemsVacated": 1680,
+    "tokensTotal": 16000,
+    "tokensVacated": 8202,
+    "meanSyllablesBefore": 1.29,
+    "meanSyllablesAfter": 1.2903125,
+    "meanAnapestBefore": 0.3209324983421379,
+    "meanAnapestAfter": 0.32138700134802295,
+    "stressFromTableBefore": 0.0514375,
+    "stressFromTableAfter": 0.012,
+    "stressFromMintedBefore": 0.0,
+    "stressFromMintedAfter": 0.4041875,
+    "stressFromRuleBefore": 0.9485625,
+    "stressFromRuleAfter": 0.5838125,
+    "bijective": true,
+    "imageSize": 2233,
+    "remintRounds": 1
+   },
+   "stemForms": null,
+   "idStream": null,
+   "mapVocabWordsRejects": true
   },
   {
    "label": "control-reveal-after-2",
@@ -5689,18 +5729,7 @@
    },
    "stemForms": null,
    "idStream": null,
-   "mapVocabWordsRejects": true,
-   "knownDivergence": {
-    "cause": "corpusTypesVacated: Python MEASURES it from the two texts (vacancy.py::vacancy_stats), TypeScript computes it through the map (vacancy.ts::countTypes). They agree everywhere except revealAfter > 0, where a type all of whose occurrences fall inside the reveal window stays English in the text while the map still assigns it a nonce. \u00a710 defines corpusTypes* as what the panel shows a READER \u2014 i.e. what the text does \u2014 so the measured reading is the contract's and countTypes over-reports by 2x in exactly the condition this control exists to measure. countTypes's own comment argues condition-independence only for consistent = false, where it is right; it is silent on revealAfter, where it is wrong.",
-    "status": "reported, unfixed \u2014 neither implementation was modified to build this fixture. Both readings are pinned exactly, so fixing either stack turns vacancyGolden.test.ts red at this block and the exemption cannot outlive the defect.",
-    "fields": [
-     {
-      "field": "stats.corpusTypesVacated",
-      "python": 665,
-      "typescript": 1337
-     }
-    ]
-   }
+   "mapVocabWordsRejects": true
   }
  ],
  "nesting": {

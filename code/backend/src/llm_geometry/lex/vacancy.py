@@ -444,17 +444,26 @@ class _ByteStream:
 
 
 def _mint(
-    stem: str,
+    key: str,
     seed: int,
     match_prosody: bool,
     forbidden: frozenset[str] | set[str],
     start_salt: int = 0,
+    stem: str | None = None,
 ) -> tuple[str, str, int]:
-    """Mint one nonce for `stem`, returning ``(nonce, intended stress pattern, salt)``.
+    """Mint one nonce for `key`, returning ``(nonce, intended stress pattern, salt)``.
 
-    Contract §5.5. Depends only on ``(seed, stem, match_prosody, forbidden, start_salt)`` —
+    Contract §5.5. Depends only on ``(seed, key, match_prosody, forbidden, start_salt)`` —
     and `forbidden` depends only on the canonically-ordered prefix of stems before this one —
     so a stem's nonce is the same at every `p`. That is the stability property (§5.6).
+
+    **`key` feeds the byte stream and the uniqueness check ONLY; the stress pattern comes
+    from `stem`.** They differ under ``consistent=False``, where the key is
+    ``f"{stem}#{idx}"`` (§5.8). Letting the key reach the prosody lookup gives
+    ``stress("little#0") == "10"`` instead of ``stress("little") == "100"``, so `Little`
+    mints as `Wrerken` rather than `Wrerkenle` — §7.1 says the nonce carries *the stem's*
+    syllable count and stress, and a mint key is not a word. `stem` defaults to `key`, which
+    is the consistent case where they are the same string.
 
     `start_salt` is the base salt `S`; the byte stream is keyed on ``S + a`` for the attempt
     counter ``a = 0, 1, 2, …``, and the quality relaxations are thresholds on ``a``. The
@@ -466,11 +475,11 @@ def _mint(
     ``_syl(stressed=False)`` is never called. **Do not "fix" this** — a fourth branch would
     shift every list index the byte stream selects and change every multi-syllable nonce.
     """
-    pattern = stress(stem) if match_prosody else "1"
+    pattern = stress(key if stem is None else stem) if match_prosody else "1"
     n_syl = len(pattern)
     for attempt in range(MINT_MAX_SALT):  # `a` of §5.5; the stream is keyed on `S + a`
         salt = start_salt + attempt
-        rnd = _ByteStream(seed, stem, salt)
+        rnd = _ByteStream(seed, key, salt)
         parts: list[str] = []
         for i, mark in enumerate(pattern):
             if mark == "1":
@@ -485,8 +494,8 @@ def _mint(
         if long_enough and right_length and w not in forbidden:
             return w, pattern, salt
     raise ComputeError(
-        f"could not mint a nonce for {stem!r} in {MINT_MAX_SALT} attempts",
-        {"stem": stem, "seed": seed, "pattern": pattern, "start_salt": start_salt},
+        f"could not mint a nonce for {key!r} in {MINT_MAX_SALT} attempts",
+        {"key": key, "stem": stem, "seed": seed, "pattern": pattern, "start_salt": start_salt},
     )
 
 
@@ -681,12 +690,26 @@ class VacancyMap:
             # holding the vacancy rate fixed is its entire purpose.
             # §5.8 pins the key: `f"{stem}#{idx}"` with `idx` the 0-based occurrence index
             # of the STEM in document order. `#` is not a legal `WORD_RE` character, so the
-            # key can never collide with a real stem.
+            # key can never collide with a real stem — and the key must NOT reach the
+            # prosody lookup, or the pattern becomes `stress("little#0")` rather than
+            # `stress("little")` and the nonce loses the stem's syllable count.
+            #
+            # **Condition B applies here too** (§5.8): the nonce may equal neither a domain
+            # type nor THE STEM IT REPLACES, and `{key}` is not redundant with `self.domain`
+            # — a stem need not be a type. Measured: at seed 7, `p = 1`, `tak` minted `tak`,
+            # so `Taking -> Taking` and one token silently failed to vacate
+            # (`corpus_types_vacated` 1921 against the consistent path's 1922). §7.1 denies
+            # this control a *stability* property, which is about a nonce being reused
+            # across occurrences; it does not license a word surviving the transform, and a
+            # control whose vacancy rate is not the stated rate is not a control. Adding the
+            # stem to `forbidden` puts it through §5.5's ordinary re-mint loop, so the
+            # replacement is held to the same quality bar as any other nonce.
             nonce, pattern, _salt = _mint(
                 f"{key}#{seen - 1}",
                 params.seed,
                 params.match_prosody,
-                self.domain | state.used,
+                self.domain | state.used | {key},
+                stem=key,
             )
             state.used.add(nonce)
             self.minted_stress.setdefault(nonce, pattern)
