@@ -28,7 +28,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { WORD_RE, dolchBudget, splitLines, tokenize } from "../../src/lib/lexEngine";
+import { DOLCH_ORDER, WORD_RE, dolchBudget, splitLines, tokenize } from "../../src/lib/lexEngine";
 import {
   CODAS,
   DEFAULT_VACANCY_PARAMS,
@@ -48,6 +48,7 @@ import {
   stress,
   syllables,
   transformWord,
+  vacancyDomain,
   vacancyParams,
   vacancyStats,
   vacancyU,
@@ -64,8 +65,10 @@ const corpusAsset = await readStaticJson<LexCorpusAsset>("lex/corpus.json");
 const CORPUS = corpusAsset.text;
 const CORPUS_TYPES = new Set(tokenize(CORPUS));
 const BUDGET = dolchBudget("full");
-/** §5.2: the map's domain is the corpus's types UNION the budget's words. */
-const DOMAIN = [...new Set([...CORPUS_TYPES, ...BUDGET])];
+/** §5.2: corpus types ∪ the FULL Dolch list, via the helper — never built by hand here,
+ *  since building it by hand at one call site and not another is the failure the helper
+ *  exists to prevent. */
+const DOMAIN = vacancyDomain(CORPUS_TYPES);
 
 const P_GRID = [0, 0.25, 0.5, 0.75, 1] as const;
 const SEEDS = [0, 7] as const;
@@ -76,7 +79,7 @@ function params(partial: Partial<VacancyParams>): VacancyParams {
 
 /** One map per seed — it is `p`-independent by construction, which is the point. */
 const MAPS = new Map<number, VacancyMap>(
-  SEEDS.map((seed) => [seed, buildVacancyMap(DOMAIN, params({ seed }), CORPUS_TYPES)]),
+  SEEDS.map((seed) => [seed, buildVacancyMap(DOMAIN, params({ seed }))]),
 );
 
 function mapFor(seed: number): VacancyMap {
@@ -229,7 +232,7 @@ describe("eligibility (architecture.md §2.2)", () => {
     const extended = effectiveKeepSet(["Dog", "cat"]);
     expect(isEligible("dog", extended)).toBe(false);
     expect(isEligible("cat", extended)).toBe(false);
-    const vmap = buildVacancyMap(["dog", "cat", "hill"], params({ keep: ["dog"] }), []);
+    const vmap = buildVacancyMap(["dog", "cat", "hill"], params({ keep: ["dog"] }));
     expect(vmap.map.has("dog")).toBe(false);
     expect(vmap.map.has("hill")).toBe(true);
   });
@@ -311,7 +314,7 @@ describe("SC-702 stability: a stem's nonce does not depend on p or on input orde
       shuffled[j] = tmp;
     }
     expect(shuffled).not.toEqual(DOMAIN);
-    const rebuilt = buildVacancyMap(shuffled, params({ seed: 0 }), CORPUS_TYPES);
+    const rebuilt = buildVacancyMap(shuffled, params({ seed: 0 }));
     const original = mapFor(0);
     expect(rebuilt.map.size).toBe(original.map.size);
     for (const [stem, nonce] of original.map) expect(rebuilt.map.get(stem)).toBe(nonce);
@@ -324,6 +327,71 @@ describe("SC-702 stability: a stem's nonce does not depend on p or on input orde
 });
 
 // --- §7.3 injectivity (SC-704) --------------------------------------------------------
+
+describe("§5.2 the map is a pure function of (domain, seed, matchProsody)", () => {
+  it("builds the domain by the union rule, and refuses a text", () => {
+    expect(DOMAIN.length).toBe(CORPUS_TYPES.size + 22);
+    for (const w of BUDGET) expect(DOMAIN).toContain(w.toLowerCase());
+    for (const t of CORPUS_TYPES) expect(DOMAIN).toContain(t);
+    // A string is itself an iterable of characters, so this would silently yield a domain
+    // of single letters — every one failing §2.2's length test, giving an empty map and a
+    // transform that does nothing, with no error anywhere.
+    expect(() => vacancyDomain(CORPUS)).toThrow(/expected an iterable of TYPES/);
+    expect(() => vacancyDomain("hello")).toThrow(/tokenize\(text\)/);
+    // Idempotent, and insensitive to case and duplicates in the input.
+    expect(vacancyDomain(DOMAIN)).toEqual(DOMAIN);
+    expect(vacancyDomain([...CORPUS_TYPES].map((t) => t.toUpperCase()))).toEqual(DOMAIN);
+  });
+
+  it("is byte-identical through two different call paths", () => {
+    // The whole point of removing `avoid`: the map can no longer depend on what a caller
+    // remembered to pass, so two call sites that build the domain differently — but to the
+    // same set — must produce the same map, key for key.
+    for (const seed of SEEDS) {
+      const viaHelper = buildVacancyMap(vacancyDomain(CORPUS_TYPES), params({ seed }));
+      // A different path to the same set: reversed, duplicated, upper-cased, budget first.
+      const scrambled = [
+        ...BUDGET.map((w) => w.toUpperCase()),
+        ...[...CORPUS_TYPES].reverse(),
+        ...BUDGET,
+        ...[...CORPUS_TYPES].map((t) => t.toUpperCase()),
+      ];
+      const viaScrambled = buildVacancyMap(vacancyDomain(scrambled), params({ seed }));
+      expect(viaScrambled.map.size).toBe(viaHelper.map.size);
+      for (const [stem, nonce] of viaHelper.map) expect(viaScrambled.map.get(stem)).toBe(nonce);
+      expect(viaScrambled.remintRounds).toBe(viaHelper.remintRounds);
+      expect(viaScrambled.imageSize).toBe(viaHelper.imageSize);
+      expect([...viaScrambled.mintedStress].sort()).toEqual([...viaHelper.mintedStress].sort());
+    }
+  });
+
+  it("is identical across all five Dolch domains", () => {
+    // §5.2 measured this and says to assert it rather than rely on it: the domain rule is
+    // "always the FULL list" precisely so switching budgets cannot re-mint the corpus in
+    // front of the reader. A future change to the canonical order could break it silently.
+    const reference = mapFor(7);
+    for (const name of DOLCH_ORDER) {
+      const domain = vacancyDomain([...CORPUS_TYPES, ...dolchBudget(name)]);
+      const vmap = buildVacancyMap(domain, params({ seed: 7 }));
+      expect(vmap.map.get("gum")).toBe(reference.map.get("gum"));
+      expect(vmap.map.get("hang")).toBe(reference.map.get("hang"));
+    }
+  });
+
+  it("depends on seed and on matchProsody, and on nothing else", () => {
+    const a = buildVacancyMap(DOMAIN, params({ seed: 0 }));
+    expect(a.map.get("gum")).not.toBe(mapFor(7).map.get("gum"));
+    const flat = buildVacancyMap(DOMAIN, params({ seed: 0, matchProsody: false }));
+    let differ = 0;
+    for (const [stem, nonce] of flat.map) if (a.map.get(stem) !== nonce) differ++;
+    expect(differ).toBeGreaterThan(0);
+    // p and the other knobs are NOT inputs to the map — it is built once, for all p.
+    for (const p of P_GRID) {
+      const atP = buildVacancyMap(DOMAIN, params({ seed: 0, p, revealAfter: 3, consistent: false }));
+      for (const [stem, nonce] of a.map) expect(atP.map.get(stem)).toBe(nonce);
+    }
+  });
+});
 
 describe("SC-704 injectivity on the real corpus", () => {
   it("maps the type set one-to-one, verified rather than assumed", () => {
@@ -536,7 +604,7 @@ describe("the control conditions really are different conditions", () => {
   const seed = 0;
 
   it("consistent = false destroys type identity while holding the vacancy rate", () => {
-    const vmapA = buildVacancyMap(DOMAIN, params({ seed }), CORPUS_TYPES);
+    const vmapA = buildVacancyMap(DOMAIN, params({ seed }));
     const inconsistent = vacateText(CORPUS, vmapA, params({ seed, p: 1, consistent: false }));
     const consistent = vacated(seed, 1);
     expect(inconsistent).not.toBe(consistent);
@@ -570,7 +638,7 @@ describe("the control conditions really are different conditions", () => {
   });
 
   it("matchProsody = false drops the syllable/stress match", () => {
-    const flat = buildVacancyMap(DOMAIN, params({ seed, matchProsody: false }), CORPUS_TYPES);
+    const flat = buildVacancyMap(DOMAIN, params({ seed, matchProsody: false }));
     const prosodic = mapFor(seed);
     expect(flat.map.size).toBe(prosodic.map.size);
     let differ = 0;

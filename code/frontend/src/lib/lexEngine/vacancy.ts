@@ -63,6 +63,7 @@
  */
 
 import { sha256Hex, utf8Bytes } from "../geoEngine/hash";
+import { dolchBudget } from "./dolch";
 import { WORD_RE, splitLines } from "./vocab";
 
 // --- §2.1 the closed class -----------------------------------------------------------
@@ -619,7 +620,7 @@ export interface VacancyMap {
   bijective: boolean;
   /** `|image of the domain under the full map|`, reported in the statistics (§10). */
   imageSize: number;
-  /** Every minted nonce plus `avoid`. Carried so the `consistent = false` control can
+  /** Every minted nonce plus the whole domain. Carried so the `consistent = false` control can
    *  keep minting fresh forms that collide with neither. */
   forbidden: ReadonlySet<string>;
   /** The lowercased domain (corpus types ∪ budget words). Condition B ranges over it and
@@ -629,6 +630,37 @@ export interface VacancyMap {
 
 /** How many re-mint rounds §5.2 allows before raising. */
 const MAX_REMINT_ROUNDS = 8;
+
+/**
+ * The §5.2 domain: `corpus types ∪ the FULL Dolch list`. Every call site uses this rather
+ * than building the union itself — the asymmetry of Python having such a helper and
+ * TypeScript not is exactly how two call sites end up constructing the domain two
+ * different ways.
+ *
+ * The full list ALWAYS, never the active budget: the domain must not depend on which
+ * budget the reader has selected, or switching budgets would re-mint the corpus in front
+ * of them and the stability the panel is demonstrating would look false. A frequency
+ * budget needs no special case, since its words are corpus types by construction.
+ *
+ * Takes an iterable of TYPES, not a text. The guard is not pedantry in either language: a
+ * `string` is itself an iterable of characters, so `vacancyDomain(corpusText)` would
+ * silently yield a domain of single letters — every one of which fails the length test of
+ * §2.2, giving an empty map and a transform that does nothing, with no error anywhere.
+ */
+export function vacancyDomain(types: Iterable<string>): string[] {
+  if (typeof types === "string") {
+    throw new Error(
+      "vacancyDomain: expected an iterable of TYPES, got a string. A string iterates " +
+        "character by character and would yield a domain of single letters. Pass tokenize(text).",
+    );
+  }
+  const out = new Set<string>();
+  for (const t of types) out.add(t.toLowerCase());
+  for (const w of dolchBudget("full")) out.add(w.toLowerCase());
+  // Sorted so the helper is a pure function with a canonical order. The order does not
+  // reach the map — `buildVacancyMap` sorts the stems itself — which is asserted.
+  return [...out].sort();
+}
 
 /** A domain type decomposed for the surface-form check: both parts lowercase. */
 interface StemSuffixPair {
@@ -683,18 +715,32 @@ function injectivityOffenders(
 /**
  * Build the nonce assignment ONCE over the whole type set, in canonical order (§5.2).
  *
- *     stems := sorted({ stemOf(t) for t in types if eligible(stemOf(t)) })
- *     used  := {}
+ *     domain := { lower(t) for t in types }
+ *     stems  := sorted({ stemOf(t) for t in domain if eligible(stemOf(t)) })
+ *     used   := {}
  *     for stem in stems:                  # canonical order — never p, never document order
- *         nonce := mint(stem, seed, matchProsody, forbidden = used ∪ avoid)
+ *         nonce := mint(stem, seed, matchProsody, forbidden = used ∪ domain)
  *         used.add(nonce); map[stem] = nonce
  *
- * `types` must be the UNION of the corpus's type set and the budget's word list: §7.2
- * pushes budget words through the same transform, so a budget word absent from the corpus
- * still needs an image. `avoid` is the lowercased corpus type set, so a bare nonce can
- * never be a real word of the corpus — the source accepts an `avoid` parameter and then
- * never passes one, which lets a minted form silently merge with an English type
- * (departure 5).
+ * `types` must be the UNION of the corpus's type set and the full Dolch list — build it
+ * with `vacancyDomain`, never by hand. §7.2 pushes budget words through the same
+ * transform, so a budget word absent from the corpus still needs an image.
+ *
+ * THERE IS NO CALLER-SUPPLIED `avoid` PARAMETER. The domain is always avoided, implicitly.
+ * Both stacks first gave `avoid` a default of empty and left the caller to pass the type
+ * set; both agreed with each other, so no parity test could catch it — but the map was
+ * then a function of what the caller remembered to pass. Measured: the same corpus and
+ * seed give different nonces, and a different `remintRounds`, depending only on whether
+ * the caller passed the set. Both maps are valid, which is precisely the problem — one
+ * caller passing it and another not (the panel and the golden fixture, say) is a silent
+ * divergence with nothing failing. Condition B below already forbids a surface form equal
+ * to any domain type, so avoiding the domain at mint time is not extra policy, only the
+ * cheaper route to the same fixed point. Afterwards the map is a pure function of
+ * `(domain, seed, matchProsody)` — asserted in the tests, through two call paths.
+ *
+ * The source accepts an `avoid` parameter and then never passes one, which lets a minted
+ * form silently merge with an English type (departure 5). We do not repeat that by making
+ * it optional.
  *
  * INJECTIVITY IS VERIFIED, NOT ASSUMED, AND AT EVERY `p` (§5.2 / §7.3). Two weaker checks
  * were tried first and both were wrong, each for a reason worth keeping written down:
@@ -715,17 +761,10 @@ function injectivityOffenders(
  * `1000 * round + previousSalt + 1` (round from 1, §5.8); only the loser moves, so a
  * re-mint never cascades. Eight rounds and then it raises.
  */
-export function buildVacancyMap(
-  types: Iterable<string>,
-  params: VacancyParams,
-  avoid: Iterable<string> = [],
-): VacancyMap {
+export function buildVacancyMap(types: Iterable<string>, params: VacancyParams): VacancyMap {
   const keep = effectiveKeepSet(params.keep);
   const domain = new Set<string>();
   for (const t of types) domain.add(t.toLowerCase());
-
-  const avoidSet = new Set<string>();
-  for (const a of avoid) avoidSet.add(a.toLowerCase());
 
   // `pairs` is one (stem, suffix) per domain type with an eligible stem — the objects
   // conditions A and B range over. `stems` is their canonical, ASCII-ascending order.
@@ -739,7 +778,8 @@ export function buildVacancyMap(
   }
   const ordered = [...stems].sort();
 
-  const forbidden = new Set(avoidSet);
+  // The domain is forbidden from the start — implicitly, never by caller agreement.
+  const forbidden = new Set(domain);
   const map = new Map<string, string>();
   const mintedStress = new Map<string, string>();
   const patterns = new Map<string, string>();
@@ -1044,8 +1084,9 @@ function countTypes(
 
 /**
  * §10. Both sides are scored with the SAME minted map, so the split is symmetric; on the
- * `Before` side `stressFromMinted` comes out 0 because `avoid` keeps every bare nonce off
- * the corpus's type list, and conditions A/B keep every assembled surface form off it too.
+ * `Before` side `stressFromMinted` comes out 0 because the implicitly-forbidden domain
+ * keeps every bare nonce off the corpus's type list, and conditions A/B keep every
+ * assembled surface form off it too.
  */
 export function vacancyStats(
   original: string,
