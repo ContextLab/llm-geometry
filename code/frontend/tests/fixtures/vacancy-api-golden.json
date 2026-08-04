@@ -1,7 +1,7 @@
 {
  "format": "vacancy-api-golden-v1",
  "generated": "2026-08-04",
- "git_sha": "db34a6f907341435f1dc19068ea1427b51f1d5c2",
+ "git_sha": "33c5ce64fdeec17ca68a42cced6f37ecef3afdfe",
  "command": "python scripts/export_vacancy_api_golden.py",
  "source": "POST /api/lex/vacancy on the real FastAPI app with the real committed corpus, through fastapi.testclient \u2014 real route, real transform, no mocks",
  "contract": "specs/002-interactive-model-explorer/contracts/api.md",
@@ -1290,6 +1290,143 @@
     "vacated_sha256": "a7caa9d6b5b602ce4a084f6f79112fdb884835f27f83972fc565b080b1f527cd",
     "original_chars": 86408,
     "original_sha256": "03769632905e2b4c78f9a57b3ce16eec1cc33014eb7edefdbc3aae07e64f3f7c"
+   }
+  }
+ ],
+ "rejects": [
+  {
+   "label": "swap-under-the-inconsistent-control",
+   "request": {
+    "p": 1.0,
+    "seed": 0,
+    "mint": "swap",
+    "consistent": false
+   },
+   "status": 400,
+   "error": {
+    "type": "InvalidParamError",
+    "message": "mint='swap' requires consistent=True: the inconsistent control needs a fresh type per occurrence and the corpus has 1676 open-class stems against 8125 vacated tokens, so there is no supply of real words to draw (contract \u00a78.3)",
+    "detail": {
+     "mint": "swap",
+     "consistent": false
+    }
+   }
+  },
+  {
+   "label": "swap-at-intermediate-p",
+   "request": {
+    "p": 0.5,
+    "seed": 0,
+    "mint": "swap"
+   },
+   "status": 400,
+   "error": {
+    "type": "InvalidParamError",
+    "message": "mint='swap' has no mapped vocabulary at p=0.5: its replacements are domain types, so a vacated type can collide with an un-vacated one and the map is injective only at full vacancy (contract \u00a75.2a). Use p=0 or p=1, or rebuild the budget from the vacated corpus",
+    "detail": {
+     "mint": "swap",
+     "p": 0.5
+    }
+   }
+  },
+  {
+   "label": "unknown-mint",
+   "request": {
+    "p": 1.0,
+    "mint": "bogus"
+   },
+   "status": 400,
+   "error": {
+    "type": "InvalidParamError",
+    "message": "mint must be one of ['nonce', 'swap'], got 'bogus'",
+    "detail": {
+     "mint": "bogus"
+    }
+   }
+  },
+  {
+   "label": "prototype-key-mint",
+   "request": {
+    "p": 1.0,
+    "mint": "constructor"
+   },
+   "status": 400,
+   "error": {
+    "type": "InvalidParamError",
+    "message": "mint must be one of ['nonce', 'swap'], got 'constructor'",
+    "detail": {
+     "mint": "constructor"
+    }
+   }
+  },
+  {
+   "label": "prototype-key-mint-toString",
+   "request": {
+    "p": 1.0,
+    "mint": "toString"
+   },
+   "status": 400,
+   "error": {
+    "type": "InvalidParamError",
+    "message": "mint must be one of ['nonce', 'swap'], got 'toString'",
+    "detail": {
+     "mint": "toString"
+    }
+   }
+  },
+  {
+   "label": "non-string-mint",
+   "request": {
+    "p": 1.0,
+    "mint": 3
+   },
+   "status": 400,
+   "error": {
+    "type": "InvalidParamError",
+    "message": "mint must be one of ['nonce', 'swap'], got 3",
+    "detail": {
+     "mint": 3
+    }
+   }
+  },
+  {
+   "label": "p-above-one",
+   "request": {
+    "p": 1.5
+   },
+   "status": 400,
+   "error": {
+    "type": "InvalidParamError",
+    "message": "p must lie in [0, 1], got 1.5",
+    "detail": {
+     "p": 1.5
+    }
+   }
+  },
+  {
+   "label": "negative-reveal-after",
+   "request": {
+    "reveal_after": -1
+   },
+   "status": 400,
+   "error": {
+    "type": "InvalidParamError",
+    "message": "reveal_after must be >= 0, got -1",
+    "detail": {
+     "reveal_after": -1
+    }
+   }
+  },
+  {
+   "label": "keep-as-a-bare-string",
+   "request": {
+    "keep": "little"
+   },
+   "status": 400,
+   "error": {
+    "type": "InvalidParamError",
+    "message": "keep must be a list of words, not a string (got 'little'); a string would be read letter by letter",
+    "detail": {}
    }
   }
  ]

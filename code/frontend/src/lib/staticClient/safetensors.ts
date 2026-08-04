@@ -76,6 +76,18 @@ function f16ToF32(h: number): number {
 
 /** Decode `count` little-endian scalars of `dtype` from `bytes` into f32. */
 export function decodeScalars(dtype: SafeDtype, bytes: Uint8Array, count: number): Float32Array {
+  // A dtype that is not one of the three is refused HERE rather than falling into the F16
+  // branch below. `dtype` is typed, but it comes from a remote header's JSON at the only
+  // call site, and the `else` used to mean "F16" — so an unsupported dtype that slipped
+  // past `readWindow`'s gate was decoded as half precision and returned real-looking
+  // numbers. `count * bpe` is `NaN` for an unknown dtype, so the length check above cannot
+  // catch it either: `n < NaN` is false.
+  if (!Object.hasOwn(BYTES_PER, dtype)) {
+    throw new ApiError(
+      "ComputeError",
+      `safetensors decode: unsupported dtype ${JSON.stringify(dtype)}; only F32/F16/BF16 are supported.`,
+    );
+  }
   const bpe = BYTES_PER[dtype];
   if (bytes.byteLength < count * bpe) {
     throw new ApiError(
@@ -146,15 +158,19 @@ export class SafetensorsFile {
     c1: number,
   ): Promise<{ values: Float32Array; rows: number; cols: number; dtype: SafeDtype }> {
     const header = await this.header();
-    const entry = header.tensors[name];
-    if (!entry) {
+    // `Object.hasOwn`, not a truthiness test on the lookup: `header.tensors` is an ordinary
+    // object literal, so `tensors["constructor"]` is `Object` itself and a request for a
+    // tensor named after any `Object.prototype` member sailed past this guard into
+    // `entry.dtype === undefined`, reporting a dtype problem for a tensor that is not there.
+    if (!Object.hasOwn(header.tensors, name)) {
       throw new ApiError(
         "NotFoundError",
         `Tensor '${name}' is not in the safetensors index of ${this.url}.`,
       );
     }
+    const entry = header.tensors[name];
     const dtype = entry.dtype as SafeDtype;
-    if (!(dtype in BYTES_PER)) {
+    if (!Object.hasOwn(BYTES_PER, dtype)) {
       throw new ApiError(
         "ComputeError",
         `Tensor '${name}' has dtype ${entry.dtype}; only F32/F16/BF16 are supported.`,

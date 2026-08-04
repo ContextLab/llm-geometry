@@ -194,4 +194,23 @@ if (typeof window !== "undefined") {
   };
   window.addEventListener("popstate", syncFromUrl);
   window.addEventListener("hashchange", syncFromUrl);
+
+  // Leaving the DOCUMENT — reload, close, a typed URL, or the Back that steps off a cold
+  // deep link back to where the reader came from — destroys a run exactly as a tab switch
+  // does, and none of it reaches `popstate`: that event fires only for a traversal that
+  // stays in this document. So a reader who opened `#lexicon` from a link, started a run
+  // and pressed Back lost it in silence while the in-app prompt was working perfectly for
+  // the case one click to its left.
+  //
+  // This is the one navigation the in-app prompt cannot handle: the browser will not wait
+  // for a component to render. `preventDefault()` (plus the legacy `returnValue`, which
+  // Safari and older Chrome still require) asks the browser to show ITS confirmation —
+  // unstylable and unable to name the run, which is why it is used here and nowhere else.
+  // It returns immediately while the registry is empty — which is almost always — so an
+  // ordinary reload of an idle app is never interrupted.
+  window.addEventListener("beforeunload", (e: BeforeUnloadEvent) => {
+    if (get(pending).length === 0) return;
+    e.preventDefault();
+    e.returnValue = "";
+  });
 }

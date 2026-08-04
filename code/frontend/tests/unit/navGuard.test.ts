@@ -234,25 +234,71 @@ describe("the shell shows the held navigation and both ways out", () => {
   });
 });
 
+describe("leaving the document is held too", () => {
+  /**
+   * `popstate` fires only for a traversal that stays in THIS document, so the in-app
+   * prompt — which is the right answer for a tab click and for an in-document Back —
+   * covered neither a reload nor a close nor the Back that steps off a cold deep link.
+   * Measured on the running app before this listener existed: cold-load `#lexicon`, train,
+   * press Back → `url = about:blank`, run gone, `native dialogs fired during reload: []`.
+   *
+   * The browser will not wait for a component to render, so this one navigation has to use
+   * the native dialog. Here that is `beforeunload` being cancelled, which is exactly the
+   * signal a browser acts on.
+   */
+  function fireBeforeUnload(): Event {
+    const e = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(e);
+    return e;
+  }
+
+  it("asks the browser to confirm a reload or close while work is registered", async () => {
+    const shell = await loadShell("#lexicon");
+    expect(fireBeforeUnload().defaultPrevented, "an idle app must never interrupt a reload").toBe(
+      false,
+    );
+
+    register(shell, "lex-train", "a training run in the Lexicon Lab");
+    expect(fireBeforeUnload().defaultPrevented, "the run was discarded silently").toBe(true);
+
+    shell.releaseWork("lex-train");
+    expect(fireBeforeUnload().defaultPrevented).toBe(false);
+  });
+});
+
 describe("the panels that own destructible work register it", () => {
   // These panels cannot be driven to `busy` in jsdom — a run needs a real `Worker`, and
   // jsdom has none (`typeof Worker === "undefined"`). What is asserted here is the
   // WIRING: that each panel registers on the same flag it disables its button with, and
   // releases in `onDestroy`. The store-level behaviour above is exercised for real.
+  //
+  // `[file, work id, the panel's own busy flag]`. The registry only protects work that
+  // OPTS IN, so the list is the whole guarantee: with three entries the Lexicon Lab's
+  // vacancy demonstration — TWO real training runs, in a file that itself offers two
+  // "Architecture Explorer" buttons — was still destroyed in silence by a tab click.
   const PANELS = [
-    ["viz/lex/TrainPanel.svelte", "lex-train"],
-    ["viz/geo/TrainPanel.svelte", "geo-train"],
-    ["viz/geo/FinetunePanel.svelte", "geo-finetune"],
+    ["viz/lex/TrainPanel.svelte", "lex-train", "busy"],
+    ["viz/lex/VacancyPanel.svelte", "lex-vacancy-demo", "demoBusy"],
+    ["viz/geo/TrainPanel.svelte", "geo-train", "busy"],
+    ["viz/geo/FinetunePanel.svelte", "geo-finetune", "busy"],
   ] as const;
 
-  for (const [file, id] of PANELS) {
-    it(`${file} registers while busy and releases on destroy`, () => {
+  it("covers every panel that holds abortable work of its own", () => {
+    // A panel that aborts something in `onDestroy` is a panel with work to lose. If this
+    // list grows, the one above has to grow with it or the new panel is the next silent loss.
+    const owners = PANELS.map(([file]) => file);
+    expect(owners).toContain("viz/lex/VacancyPanel.svelte");
+    expect(new Set(PANELS.map(([, id]) => id)).size).toBe(PANELS.length);
+  });
+
+  for (const [file, id, flag] of PANELS) {
+    it(`${file} registers while ${flag} and releases on destroy`, () => {
       const src = readFileSync(path.join(SRC, file), "utf8");
       expect(src, `${file} does not import the registry`).toContain(
         'from "../../lib/stores"',
       );
-      expect(src, `${file} does not register on \`busy\``).toMatch(
-        new RegExp(`if \\(busy\\) registerWork\\(WORK_ID,[\\s\\S]*?else releaseWork\\(WORK_ID\\)`),
+      expect(src, `${file} does not register on \`${flag}\``).toMatch(
+        new RegExp(`if \\(${flag}\\) registerWork\\(WORK_ID,[\\s\\S]*?else releaseWork\\(WORK_ID\\)`),
       );
       expect(src, `${file} does not name itself`).toContain(`"${id}"`);
       // Released on destroy, or a confirmed navigation would latch the registry and hold

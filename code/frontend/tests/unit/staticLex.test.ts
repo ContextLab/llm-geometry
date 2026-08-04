@@ -330,6 +330,19 @@ describe("training, generation and spectra all run in the browser", () => {
     await expect(
       c.lexImportModel({ ...bundle, vocab: { ...bundle.vocab, words: bundle.vocab.words.slice(1) } }),
     ).rejects.toMatchObject({ type: "InvalidParamError" });
+    // …and so is one carrying a tensor nobody asked for, INCLUDING one named after an
+    // `Object.prototype` member: the extra-key check was `n in shapes`, and `in` walks the
+    // prototype chain, so `constructor` was not reported as extra and the file loaded as
+    // though it held exactly the tensors its config implies.
+    for (const name of ["constructor", "toString", "__proto__", "surplus"]) {
+      await expect(
+        c.lexImportModel({
+          ...bundle,
+          weights: { ...bundle.weights, [name]: bundle.weights["blocks.0.qkv_w"] },
+        }),
+        name,
+      ).rejects.toMatchObject({ type: "InvalidParamError" });
+    }
   }, 120_000);
 
   it("fine-tunes from a base model and refuses to re-shape it", async () => {

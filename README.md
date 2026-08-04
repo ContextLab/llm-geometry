@@ -14,7 +14,7 @@ canned data:
    replies with per-token probabilities. Models come from a curated list (see
    [issue #4](https://github.com/ContextLab/llm-geometry/issues/4) for expanding it).
 2. **Geometry** — a from-scratch *GeoTransformer* (`d_model=3`, 4 layers, 1 head,
-   1003-word vocab) really trained on Alice in Wonderland, its 3-D token embeddings
+   1000-word vocab in 1003 rows) really trained on Alice in Wonderland, its 3-D token embeddings
    living directly on a rendered sphere. Explore the *next-next-token* field or the
    attention-force field `Σ softmax(⟨Kz_j,Qz_i⟩)·Vz_j`
    ([arXiv:2607.13295](https://arxiv.org/abs/2607.13295)) per layer, edit

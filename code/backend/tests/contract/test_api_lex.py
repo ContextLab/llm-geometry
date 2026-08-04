@@ -960,6 +960,20 @@ def test_vacancy_matches_the_static_client_fixture() -> None:
             "ONLY after confirming the change was intended — the browser asserts against "
             "the same file."
         )
+    # The refusals, which the fixture used to have none of. A refusal is an answer with
+    # numbers in it: the static client told readers for a whole release that the corpus has
+    # "1680 open-class stems against 8202 vacated tokens" while this route said 1676 / 8125,
+    # and seven 200-only cases could not see it. `staticVacancy.test.ts` compares the error
+    # TYPE exactly and the numeric literals in the message as a multiset against these.
+    assert len(fixture["rejects"]) >= 8
+    for case in fixture["rejects"]:
+        resp = client.post("/api/lex/vacancy", json=case["request"])
+        assert resp.status_code == case["status"], (case["label"], resp.text)
+        assert resp.json()["error"] == case["error"], (
+            f"{case['label']}: the route no longer refuses this request the way the parity "
+            "fixture records. Regenerate it with `python scripts/export_vacancy_api_golden.py` "
+            "ONLY after confirming the change was intended."
+        )
 
 
 # -- POST /api/lex/train with vacancy (feature 007) -------------------------------------

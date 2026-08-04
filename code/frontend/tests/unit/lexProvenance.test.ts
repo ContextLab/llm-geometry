@@ -28,6 +28,7 @@ import { flushSync, mount, unmount } from "svelte";
 // interface — the bytes that travel through them are the component's own.
 import { Blob as NodeBlob, File as NodeFile } from "node:buffer";
 
+import { provenanceFromMetrics } from "../../src/viz/lex/provenance";
 import LexiconLab from "../../src/viz/lex/LexiconLab.svelte";
 import ModelFile from "../../src/viz/lex/ModelFile.svelte";
 import {
@@ -287,6 +288,76 @@ describe("loading a model file", () => {
       expect(tab.testid("lex-spectrum-untrained")).toBeNull();
       expect(tab.testid("lex-active-model")?.textContent ?? "").toContain("loaded from");
       expect(tab.text()).toContain("from the model you trained");
+    } finally {
+      tab.dispose();
+    }
+  });
+
+  /**
+   * The same defect through a different door: `metrics.provenance` was validated with
+   * `declared in PROVENANCES`, and `in` walks the prototype chain. So a file declaring
+   * `"provenance": "constructor"` validated as a DECLARED provenance, missed every panel's
+   * `Record<Provenance, …>` lookup, and rendered a random initialization with no untrained
+   * warning anywhere — under a load line ending in the word "verified". Observed live:
+   *
+   *     lex-file-claim: "The file describes these weights as function Object() { [native
+   *                      code] }. That is the file's own label…"
+   *     lex-spectrum-untrained / -unrecorded / -edited / lex-save-* / lex-forward-*: ALL null
+   *
+   * The whole point of `unrecorded` is that an unknown label gets a caveat, so an inherited
+   * key must reach it exactly as `"banana"` does.
+   */
+  const INHERITED_KEYS = [
+    "constructor",
+    "toString",
+    "valueOf",
+    "hasOwnProperty",
+    "isPrototypeOf",
+    "propertyIsEnumerable",
+    "toLocaleString",
+    "__proto__",
+  ] as const;
+
+  it("treats every inherited object key as an unrecorded provenance, not a declared one", () => {
+    for (const key of INHERITED_KEYS) {
+      // The reason the check has to be `Object.hasOwn`: `in` says yes to all of these.
+      expect(key in ({ untrained: true } as object), `${key} is on Object.prototype`).toBe(true);
+      expect(provenanceFromMetrics({ provenance: key }), key).toEqual({
+        provenance: "unrecorded",
+        declared: false,
+      });
+    }
+    // …and the six real ones still validate, or the fix would be a refusal of everything.
+    for (const real of [
+      "untrained",
+      "trained",
+      "unrecorded",
+      "edited-untrained",
+      "edited-trained",
+      "edited-unrecorded",
+    ]) {
+      expect(provenanceFromMetrics({ provenance: real }).declared, real).toBe(true);
+    }
+    expect(provenanceFromMetrics({ provenance: "banana" })).toEqual({
+      provenance: "unrecorded",
+      declared: false,
+    });
+  });
+
+  it("keeps every caveat for a file whose provenance is an inherited object key", async () => {
+    const tab = await openTab();
+    try {
+      // A real browser-written bundle over a real random initialization, with the one
+      // string that used to clear the whole page.
+      await tab.load(bundleWith({ provenance: "constructor" }));
+      expect(tab.testid("lex-file-error")).toBeNull();
+      expect(tab.testid("lex-spectrum-unrecorded")).not.toBeNull();
+      expect(tab.testid("lex-forward-unrecorded")).not.toBeNull();
+      expect(tab.testid("lex-save-unrecorded")).not.toBeNull();
+      expect(tab.text()).toContain("does not record whether");
+      expect(tab.text()).not.toContain("from the model you trained");
+      // The load line said "verified" while the claim line printed a native function.
+      expect(tab.testid("lex-file-claim")?.textContent ?? "").not.toContain("native code");
     } finally {
       tab.dispose();
     }

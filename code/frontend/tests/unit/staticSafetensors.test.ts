@@ -122,6 +122,29 @@ describe("coalesceRanges / decode (pure, no network)", () => {
     expect(out[3]).toBe(Infinity);
   });
 
+  /**
+   * A dtype arrives as a STRING out of a remote file's JSON header, and the supported set
+   * was tested with `dtype in BYTES_PER`. `in` walks the prototype chain, so `"constructor"`
+   * and its seven siblings passed the gate; `BYTES_PER["constructor"]` is then `Object`
+   * itself, `count * bpe` is `NaN`, the length check `bytes.byteLength < NaN` is false, and
+   * the decoder's `else` branch — which meant F16 — returned a Float32Array of real-looking
+   * numbers for a tensor whose dtype nothing had actually recognised. Unsupported REAL
+   * dtypes (`I64`, `F64`, `U8`) were always refused correctly; only the inherited keys slipped.
+   */
+  it("refuses a dtype that is an inherited object key instead of decoding it as F16", () => {
+    const bytes = new Uint8Array(16);
+    for (const key of ["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__"]) {
+      expect(key in BYTES_PER, `${key} is on Object.prototype`).toBe(true);
+      expect(Object.hasOwn(BYTES_PER, key), `${key} is not a supported dtype`).toBe(false);
+      expect(() => decodeScalars(key as SafeDtype, bytes, 4), key).toThrow(/unsupported dtype/);
+    }
+    // A real unsupported dtype is refused the same way, and the three supported ones work.
+    expect(() => decodeScalars("I64" as SafeDtype, bytes, 2)).toThrow(/unsupported dtype/);
+    for (const dtype of ["F32", "F16", "BF16"] as const) {
+      expect(decodeScalars(dtype, bytes, 2)).toHaveLength(2);
+    }
+  });
+
   it("matrixizes shapes the way the backend does", () => {
     expect(asMatrixShape([50257, 768])).toEqual([50257, 768]);
     expect(asMatrixShape([768])).toEqual([768, 1]);

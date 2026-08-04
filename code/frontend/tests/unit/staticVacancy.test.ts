@@ -42,7 +42,18 @@ import {
   type LexVacancyBody,
   type LexVacancyResult,
 } from "../../src/lib/staticClient/lex";
-import { fsStaticFetch } from "./staticTestUtils";
+import { tokenize } from "../../src/lib/lexEngine";
+import {
+  buildVacancyMap,
+  vacancyParams,
+  typeCounts,
+  vacancyDomain,
+} from "../../src/lib/lexEngine/vacancy";
+import {
+  SWAP_INCONSISTENT_REFUSAL,
+  SWAP_SUPPLY,
+} from "../../src/lib/lexEngine/vacancyRefusals";
+import { fsStaticFetch, readStaticJson } from "./staticTestUtils";
 
 function client(fetchImpl: FetchLike = fsStaticFetch()): StaticClient {
   return createStaticClient({ baseUrl: "/", fetchImpl });
@@ -56,6 +67,14 @@ interface ApiGoldenCase {
   response: LexVacancyResult;
 }
 
+/** A request the route REFUSES, with the envelope it refuses it in, transcribed. */
+interface ApiGoldenReject {
+  label: string;
+  request: LexVacancyBody;
+  status: number;
+  error: { type: string; message: string; detail?: Record<string, unknown> };
+}
+
 interface ApiGolden {
   format: string;
   git_sha: string;
@@ -66,6 +85,7 @@ interface ApiGolden {
   defaults: { preview_chars: number; preview_max: number };
   corpus: { sha256: string; chars: number };
   cases: ApiGoldenCase[];
+  rejects: ApiGoldenReject[];
 }
 
 const GOLDEN: ApiGolden = JSON.parse(
@@ -127,6 +147,81 @@ describe("the static build answers /api/lex/vacancy exactly as the backend does"
       expect(got).toEqual(want);
     });
   }
+});
+
+/**
+ * The numeric literals in a message, sorted — the part of a refusal that is a CLAIM ABOUT
+ * THE CORPUS rather than a turn of phrase.
+ *
+ * The two stacks are not required to word a refusal identically: the backend writes
+ * `consistent=True` and this one `consistent = true`, because each names its own language's
+ * literal, and forcing one to speak the other's would be a worse document than two. What
+ * they may never do is quote different NUMBERS — which is exactly what happened for a full
+ * release (`1680` / `8202` here against `1676` / `8125` there), on the wire boundary the
+ * deployed site runs, with a seven-case all-200 fixture watching.
+ */
+function numbersIn(message: string): string[] {
+  return (message.match(/\d+(?:\.\d+)?/g) ?? []).sort();
+}
+
+describe("the static build refuses what the backend refuses, with the same numbers", () => {
+  it("has reject cases at all — an all-200 fixture cannot see a stale refusal", () => {
+    expect(GOLDEN.rejects.length).toBeGreaterThanOrEqual(8);
+    for (const r of GOLDEN.rejects) expect(r.status).toBe(400);
+  });
+
+  for (const reject of GOLDEN.rejects) {
+    it(`refuses ${reject.label} as the backend does`, async () => {
+      let thrown: unknown = null;
+      try {
+        await client().lexVacancy(reject.request);
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown, `the static client ACCEPTED ${reject.label}`).not.toBeNull();
+      const err = thrown as { type?: string; message?: string };
+      expect(err.type, `${reject.label}: error type`).toBe(reject.error.type);
+      expect(numbersIn(String(err.message)), `${reject.label}: the numbers it quotes`).toEqual(
+        numbersIn(reject.error.message),
+      );
+    });
+  }
+});
+
+describe("the swap control's refusal quotes the corpus it actually ships", () => {
+  /**
+   * `SWAP_SUPPLY` is the single declaration of the two counts, and this is the measurement
+   * that keeps it honest: both come out of the real engine over the real committed corpus,
+   * through the same request a reader makes. Before this existed the counts were typed into
+   * four files by hand and one of them rotted.
+   */
+  it("re-measures both counts through the engine and finds them equal to the constants", async () => {
+    const res = await client().lexVacancy({ p: 1, seed: 0 });
+    expect(res.vacancy_stats.stemsTotal).toBe(SWAP_SUPPLY.stems);
+    expect(res.vacancy_stats.tokensVacated).toBe(SWAP_SUPPLY.vacatedTokens);
+  });
+
+  it("puts those measured counts into the sentence the reader is shown", async () => {
+    expect(SWAP_INCONSISTENT_REFUSAL).toContain(String(SWAP_SUPPLY.stems));
+    expect(SWAP_INCONSISTENT_REFUSAL).toContain(String(SWAP_SUPPLY.vacatedTokens));
+    await expect(
+      client().lexVacancy({ p: 1, seed: 0, mint: "swap", consistent: false }),
+    ).rejects.toMatchObject({ type: "InvalidParamError", message: SWAP_INCONSISTENT_REFUSAL });
+  });
+
+  /**
+   * The wire boundary and the engine loaded into the SAME bundle disagreed by 4 stems and
+   * 77 tokens, and no test could see it because each had its own copy of the sentence.
+   * This one fails if either stops using the shared declaration.
+   */
+  it("is the sentence the engine itself throws, so neither can drift alone", async () => {
+    const corpus = await readStaticJson<{ text: string }>("lex/corpus.json");
+    const tokens = tokenize(corpus.text);
+    const params = vacancyParams({ p: 1, seed: 0, mint: "swap", consistent: false });
+    expect(() =>
+      buildVacancyMap(vacancyDomain(tokens), params, typeCounts(tokens)),
+    ).toThrow(SWAP_INCONSISTENT_REFUSAL);
+  });
 });
 
 describe("what the response says about itself", () => {
@@ -269,6 +364,19 @@ describe("bad vacancy parameters are refused in the shared envelope", () => {
     // parameter was never read, so `"bogus"` and `"swap"` alike became the default.
     ["an unknown mint", { mint: "bogus" }],
     ["a non-string mint", { mint: 3 as unknown as string }],
+    // Every `Object.prototype` key, because the wire check was `mint in MINT_STRATEGIES`
+    // and `in` walks the prototype chain: all six passed validation, were cast to
+    // `MintStrategy` and threw an UNTYPED error out of `buildVacancyMap` — one stack
+    // answering a typed 400 and the other an unlabelled crash, for the same request.
+    ...(
+      ["constructor", "toString", "valueOf", "hasOwnProperty", "isPrototypeOf", "__proto__"] as const
+    ).map(
+      (key) =>
+        [`the inherited object key ${key} as a mint`, { mint: key as unknown as string }] as [
+          string,
+          LexVacancyBody,
+        ],
+    ),
     // §8.3: swap needs one replacement per TYPE; the inconsistent control needs one per
     // OCCURRENCE. The engine refuses the pair and the client must carry that refusal.
     ["swap under the inconsistent control", { mint: "swap", consistent: false }],

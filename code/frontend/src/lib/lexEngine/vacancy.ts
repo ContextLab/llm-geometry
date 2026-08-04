@@ -64,6 +64,10 @@
 
 import { sha256Hex, utf8Bytes } from "../geoEngine/hash";
 import { dolchBudget } from "./dolch";
+// The two refusals below are shared with the static client's wire boundary rather than
+// retyped there: four hand-copies of the corpus counts is how one of them came to say
+// `1680` / `8202` while this file said `1676` / `8125`. See `vacancyRefusals.ts`.
+import { SWAP_INCONSISTENT_REFUSAL, noMappedVocabularyRefusal } from "./vacancyRefusals";
 import { WORD_RE, splitLines } from "./vocab";
 
 // --- §2.1 the closed class -----------------------------------------------------------
@@ -1099,11 +1103,7 @@ export function buildVacancyMap(
     throw new Error(`vacancy: unknown mint strategy ${JSON.stringify(params.mint)}`);
   }
   if (swapping && !params.consistent) {
-    throw new Error(
-      "vacancy: mint = 'swap' requires consistent = true — the inconsistent control needs a " +
-        "fresh type per occurrence and the corpus has 1676 open-class stems against 8125 " +
-        "vacated tokens, so there is no supply of real words (architecture.md §8.3)",
-    );
+    throw new Error(`vacancy: ${SWAP_INCONSISTENT_REFUSAL}`);
   }
   if (swapping && counts === undefined) {
     throw new Error(
@@ -1389,12 +1389,7 @@ export function mapVocabWords(
     // on an un-vacated one and two budget words would share a row. That is not a defect to be
     // re-drawn away — the theorem there shows no `p`-stable swap avoids it — so the mapped
     // vocabulary is refused, exactly as it is for the two controls above.
-    throw new Error(
-      `vacancy: mint = 'swap' has no mapped vocabulary at p = ${params.p}: its replacements ` +
-        `are domain types, so a vacated type can collide with an un-vacated one and the map ` +
-        `is injective only at full vacancy (architecture.md §5.2a). Use p = 0 or p = 1, or ` +
-        `rebuild the budget from the vacated corpus`,
-    );
+    throw new Error(`vacancy: ${noMappedVocabularyRefusal(params.mint, params.p)}`);
   }
   const keep = effectiveKeepSet(params.keep);
   return words.map((w) => transformWordWith(w, vmap, params, keep));

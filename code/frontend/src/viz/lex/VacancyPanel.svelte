@@ -75,7 +75,7 @@
   } from "../../lib/lexEngine/vacancy";
   import Explain from "../../lib/Explain.svelte";
   import Progress from "../../lib/Progress.svelte";
-  import { view } from "../../lib/stores";
+  import { registerWork, releaseWork, view } from "../../lib/stores";
 
   /**
    * The largest seed this control accepts — and the largest either stack can carry without
@@ -506,7 +506,31 @@
   } | null>(null);
   let demoAbort: AbortController | null = null;
 
-  onDestroy(() => demoAbort?.abort());
+  /**
+   * The demonstration is TWO real training runs, and leaving this tab aborts both.
+   *
+   * `App.svelte` mounts one tab at a time, so a tab click runs the `onDestroy` below and
+   * the runs end — which is the same loss the shell learned to ask about for the training
+   * panels (red-team D, F2; `lib/stores.ts`). Registering only there left the guard
+   * covering three panels and not this one, so the tab's headline demonstration was still
+   * destroyed in silence — and this very file offers two "Architecture Explorer" buttons,
+   * so the app invites the click that does it.
+   *
+   * Registered from an effect on `demoBusy`, the single flag `runDemo`, `stopDemo` and the
+   * error branch already agree on, for the same reason `TrainPanel` registers on `busy`.
+   */
+  const WORK_ID = "lex-vacancy-demo";
+  $effect(() => {
+    if (demoBusy) registerWork(WORK_ID, "the two training runs in the Lexicon Lab's transform demo");
+    else releaseWork(WORK_ID);
+  });
+
+  onDestroy(() => {
+    demoAbort?.abort();
+    // A confirmed navigation lands here: leave the registry empty, or every later
+    // navigation would be held against work that no longer exists.
+    releaseWork(WORK_ID);
+  });
 
   async function trainOnce(
     text: string,

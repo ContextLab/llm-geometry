@@ -138,7 +138,18 @@ export function activeWeightsNoun(p: Provenance): string {
   }
 }
 
-/** Every value `metrics.provenance` may carry, for validating a file's claim. */
+/**
+ * Every value `metrics.provenance` may carry, for validating a file's claim.
+ *
+ * Membership is tested with `Object.hasOwn`, never with `in`. `in` walks the prototype
+ * chain, so `"constructor"`, `"toString"`, `"valueOf"`, `"hasOwnProperty"` and
+ * `"__proto__"` are all `true` for any object literal — and a file declaring
+ * `"provenance": "constructor"` therefore validated as a DECLARED provenance, missed every
+ * panel's `Record<Provenance, …>` lookup, and rendered a random initialization with no
+ * untrained warning anywhere under a load line ending in the word "verified". That is
+ * finding F1 restored through a different door, which is why the `unrecorded` fallback
+ * below has to be what an unknown string reaches.
+ */
 const PROVENANCES: Record<Provenance, true> = {
   untrained: true,
   trained: true,
@@ -174,7 +185,7 @@ export interface FileProvenance {
  */
 export function provenanceFromMetrics(metrics: Record<string, unknown>): FileProvenance {
   const declared = metrics.provenance;
-  if (typeof declared === "string" && declared in PROVENANCES) {
+  if (typeof declared === "string" && Object.hasOwn(PROVENANCES, declared)) {
     return { provenance: declared as Provenance, declared: true };
   }
   if (typeof metrics.trained === "boolean") {

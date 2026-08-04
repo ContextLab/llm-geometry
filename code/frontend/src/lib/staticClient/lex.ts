@@ -88,6 +88,10 @@ import {
   type WeightSet,
 } from "../lexEngine";
 import {
+  SWAP_INCONSISTENT_REFUSAL,
+  noMappedVocabularyRefusal,
+} from "../lexEngine/vacancyRefusals";
+import {
   buildVacancyMap,
   mapVocabWords,
   typeCounts,
@@ -497,7 +501,12 @@ function vacancyParamsFrom(body: LexVacancyParamsBody): VacancyParams {
   const revealAfter = asInt(body.reveal_after, "reveal_after", 0);
   if (revealAfter < 0) throw invalidParamError(`reveal_after must be >= 0, got ${revealAfter}`);
   const mint = body.mint === undefined ? "nonce" : body.mint;
-  if (!(typeof mint === "string" && mint in MINT_STRATEGIES)) {
+  // `Object.hasOwn`, not `in`: `in` walks the prototype chain, so `"constructor"`,
+  // `"toString"`, `"valueOf"`, `"hasOwnProperty"` and `"__proto__"` all passed this check
+  // on their way to being cast to `MintStrategy`. The backend answers those six with the
+  // same typed 400 as `"bogus"`; this stack answered them with an untyped `Error` thrown
+  // out of `buildVacancyMap`, which is the divergence this check exists to prevent.
+  if (!(typeof mint === "string" && Object.hasOwn(MINT_STRATEGIES, mint))) {
     throw invalidParamError(
       `mint must be one of ${Object.keys(MINT_STRATEGIES).join(", ")}, got ` +
         `${JSON.stringify(body.mint)}`,
@@ -508,12 +517,13 @@ function vacancyParamsFrom(body: LexVacancyParamsBody): VacancyParams {
   // answer this request with the same typed error rather than one 400 and one 200. (The
   // engine checks it again at map-build time; this is the wire boundary's copy, in the
   // same place and for the same reason as the `p` and `reveal_after` range checks above.)
+  //
+  // The sentence itself comes from the engine (`SWAP_INCONSISTENT_REFUSAL`) rather than
+  // being retyped here: this copy said `1680` / `8202` for a full release after the
+  // transform rewrite moved the counts to `1676` / `8125`, so the wire boundary the
+  // deployed site runs disagreed with the engine in the same bundle.
   if (mint === "swap" && !consistent) {
-    throw invalidParamError(
-      "mint = 'swap' requires consistent = true — the inconsistent control needs a fresh " +
-        "type per occurrence and the corpus has 1680 open-class stems against 8202 vacated " +
-        "tokens, so there is no supply of real words (architecture.md §8.3)",
-    );
+    throw invalidParamError(SWAP_INCONSISTENT_REFUSAL);
   }
   return vacancyParamsWithDefaults({
     p,
@@ -1145,6 +1155,15 @@ export class LexSection {
       return { vocab: this.resolveBudgetSync(body, vacated), rule: "rebuilt" };
     }
     const english = this.resolveBudgetSync(body, original);
+    // §5.2a, at the wire boundary and with the contract's TYPE on it. The engine refuses
+    // this too, but with a plain `Error` — so the same request was a typed 400 from the
+    // backend and an unlabelled crash here, which the parity fixture's
+    // `swap-at-intermediate-p` reject case caught. The condition is the engine's own
+    // (`injectiveAtEveryP` is false exactly for a swap map), and the sentence is the
+    // engine's own; only the envelope is added.
+    if (!vmap.injectiveAtEveryP && params.p > 0 && params.p < 1) {
+      throw invalidParamError(noMappedVocabularyRefusal(params.mint, params.p));
+    }
     const mapped = mapVocabWords([...english.words], vmap, params);
     return {
       vocab: new LexVocab(mapped, english.source, english.budgetName),
@@ -1529,8 +1548,12 @@ export class LexSection {
     const supplied = payload.weights as LexModelBundle["weights"];
     const expected = Object.keys(shapes).sort();
     const got = Object.keys(supplied).sort();
-    const missing = expected.filter((n) => !(n in supplied));
-    const extra = got.filter((n) => !(n in shapes));
+    // `Object.hasOwn` on both sides: with `in`, a bundle carrying a weight called
+    // `constructor` (or `toString`, or any other `Object.prototype` key) was not reported
+    // as extra, so the file loaded as if it had exactly the tensors its config implies
+    // while carrying one nobody had looked at.
+    const missing = expected.filter((n) => !Object.hasOwn(supplied, n));
+    const extra = got.filter((n) => !Object.hasOwn(shapes, n));
     if (missing.length > 0 || extra.length > 0) {
       throw invalidParamError(
         `weight set mismatch (missing: ${missing.length ? missing.join(", ") : "none"}; ` +

@@ -204,7 +204,7 @@ letter by letter and quietly protect six single letters.
 `mint` selects §8.3's replacement strategy: `"nonce"` invents a phonotactically legal
 form, `"swap"` draws a REAL open-class word from the domain's own types by frequency
 rank. Any other value is a `400 InvalidParamError` naming the two choices, and so is
-`"swap"` with `"consistent": false` (§8.3: 1 680 open-class stems against 8 202 vacated
+`"swap"` with `"consistent": false` (§8.3: 1 676 open-class stems against 8 125 vacated
 tokens — there is no supply of real words to mint a fresh one per occurrence).
 
 → `200 { "p", "seed", "consistent", "match_prosody", "reveal_after", "keep": [<str>, …],
