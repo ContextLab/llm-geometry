@@ -209,13 +209,28 @@ The map at any `p` is then the restriction of that single map to `{stem : u(stem
 Nesting and stability become structural facts rather than properties to be hoped for.
 
 ```
-buildVacancyMap(types, seed, matchProsody, avoid) -> Map<stem, nonce>
-    stems := sorted({ stemOf(t) for t in types if eligible(stemOf(t)) })   # ASCII sort, ascending
-    used  := {}
+buildVacancyMap(types, params) -> Map<stem, nonce>
+    domain := { lower(t) for t in types }
+    stems  := sorted({ stemOf(t) for t in domain if eligible(stemOf(t)) })  # ASCII sort, ascending
+    used   := {}
     for stem in stems:                       # canonical order — never p, never document order
-        nonce := mint(stem, seed, matchProsody, forbidden = used ∪ avoid)
+        nonce := mint(stem, seed, matchProsody, forbidden = used ∪ domain)
         used.add(nonce); map[stem] = nonce
 ```
+
+**There is no caller-supplied `avoid` parameter.** The domain is always avoided, implicitly.
+
+The first implementations both gave `avoid` a default of empty and left it to the caller to pass
+the type set. Both stacks agreed with each other, so no parity test caught it — but the map is
+then a function of *what the caller remembered to pass*. Measured: at seed 0 the same corpus and
+seed produce `remintRounds = 0` with the domain passed and `1` without, and **different nonces**
+either way. Both maps are valid; that is the problem. One caller passing it and another not —
+the panel and the golden fixture, say — is a silent divergence with no failing test.
+
+Since condition B below already requires that no surface form equal any domain type, avoiding
+the domain at mint time is not an extra policy, only the cheaper way to reach the same fixed
+point. Making it implicit costs nothing and makes the map a pure function of
+`(domain, seed, matchProsody)`.
 
 **The domain is `corpus types ∪ the full Dolch list`** — the *full* list, always, never the
 active budget. §7.2 explains why budget words must be in the domain at all; the reason it is the
@@ -230,7 +245,16 @@ extra words provoke no new collisions. That is a property worth **asserting in a
 than relying on — a future change to `avoid` or to the canonical order could break it silently.
 
 The source accepts an `avoid` parameter and then never passes one, which lets a minted form
-silently merge with an English type.
+silently merge with an English type. We do not repeat that by making it optional — see above.
+
+**Both stacks expose a `vacancyDomain(types)` / `vacancy_domain(types)` helper** that applies the
+union rule, and every call site uses it. Python had one and TypeScript did not, which is the kind
+of asymmetry that ends with two call sites building the domain two different ways.
+
+Both take an **iterable of types, not a text**. Python must reject a bare `str` explicitly:
+`Iterable[str]` happily accepts one and iterates it character by character, so
+`vacancy_domain(corpus_text)` silently yields a domain of single letters. Raise a `TypeError`
+naming `tokenize()`, rather than returning a subtly wrong answer.
 
 **The check is over surface forms, not bare nonces, and it must hold at every `p`.** This is
 the second defect the first implementation exposed. A bare-nonce check is not enough:
