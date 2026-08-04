@@ -100,7 +100,17 @@
     Model
     <span class="badge {badge}" data-testid="arch-model-status">{badgeText}</span>
   </span>
-  <select value={$archModelId} onchange={onSelectChange} data-testid="arch-model-select">
+  <!-- The visible "Model" text is a sibling <span> that also holds the status badge, so
+       it cannot be a <label for>: the badge would end up in the accessible name. An
+       explicit aria-label names the control without it. Without this the select was the
+       only unnamed interactive control on any tab — a screen reader announced "combo
+       box, Qwen2.5 0.5B Instruct" with no indication of what was being chosen. -->
+  <select
+    value={$archModelId}
+    onchange={onSelectChange}
+    data-testid="arch-model-select"
+    aria-label="Model"
+  >
     {#each models as m (m.model_id)}
       <option value={m.model_id}>{m.display_name ?? m.model_id}</option>
     {/each}

@@ -76,10 +76,16 @@
   </header>
 
   <main class="main">
-    <nav class="tabs" data-testid="view-tabs">
+    <!-- `aria-current="page"` rather than a tablist: these buttons are the app's only
+         navigation, each view has its own URL, and Back/Forward move between them. The
+         active tab used to be signalled by a background gradient alone, so a
+         screen-reader user heard four ordinary buttons and could not tell which view was
+         showing (red-team D F6; issue #7). -->
+    <nav class="tabs" data-testid="view-tabs" aria-label="views">
       {#each tabs as t (t.id)}
         <button
           class:active={$view === t.id}
+          aria-current={$view === t.id ? "page" : undefined}
           onclick={() => view.set(t.id)}
           data-testid={`tab-${t.id}`}
         >{t.label}</button>

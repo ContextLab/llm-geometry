@@ -58,7 +58,7 @@ DEFAULT_N_HEADS = 2
 #: 32, not 64. Two independent reasons, both measured on the committed corpus at the
 #: other defaults (400 steps, 318 vocab rows, `d_model` 64, 2 layers):
 #:
-#:   * QUALITY. 19,050 tokens is a small corpus and a 64-token window spans several
+#:   * QUALITY. 19,071 tokens is a small corpus and a 64-token window spans several
 #:     unrelated rhymes. ctx 64 reaches a lower TRAIN loss (2.247 vs 2.406 at batch 32)
 #:     and a WORSE held-out loss (2.294 vs 2.197) — it is memorizing, not generalizing.
 #:   * SPEED. Per-step cost is roughly `batch x ctx x params` for the projections and
