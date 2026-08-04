@@ -87,6 +87,35 @@ and the UI says so rather than pretending the remainder is pure location.
 The correctness check for the control is elegant: `swap` must satisfy the invariance theorem
 exactly as `nonce` does, because the tiny model is equally blind to both.
 
+## Two defects found in SHIPPED code while building this
+
+Neither is a feature-007 bug; both were found because 007 forced us to drive the real app.
+
+**1. Silent vocabulary substitution in the Geometry Lab** (fixed, `d6e9d5d`). Static build only,
+across a reload, for a model with its own vocabulary (scratch-trained or file-loaded). Train →
+Save (your word list) → reload → Save → same weights under *Alice in Wonderland*'s word list.
+No error, and unrejectable: `vocab_sha256` is computed over the list that was written, so the
+file verifies on both sides. Exactly the corruption the three digests exist to prevent,
+committed by the writer. The persisted `ExportedWeightSet` carried weights but not the
+vocabulary, so `tokenizerFor()` fell back to the canonical tokenizer — right for edited and
+fine-tuned sets, catastrophic for scratch and imported ones.
+
+**2. q4f16 produces garbage on WebGPU** (in progress). The dtype the app tries FIRST. The
+session builds successfully and then returns degenerate output: every row of the `[1,T,V]`
+logits bit-identical, gpt2 greedy-generating `,,,,,,,`, SmolLM2's logits all exactly 0 so every
+NLL is `ln(49152) = 10.80267`. The fallback in `transformersRuntime.ts` only fires on a thrown
+exception and nothing throws, so **the deployed Architecture Explorer is already showing wrong
+probabilities on any `shader-f16` machine** — reproduced in real Chrome 150, not just Playwright.
+q8, fp32 and q4 are correct; fp16 fails identically, so the fp16 *activation* path is the cause.
+
+Why it survived: **plain headless Chromium exposes no WebGPU adapter** (`requestAdapter()` →
+null), so the entire e2e suite has only ever exercised wasm/q8. That coverage gap is part of the
+fix.
+
+Lesson worth keeping: both defects are invisible to unit tests and to any test that checks for
+thrown errors. They produce *plausible* wrong answers. The only thing that caught them was
+running the real thing and comparing against a known-good reference.
+
 ## Status
 
 - [x] Spec + contract written and committed (`36b9f3d`)
