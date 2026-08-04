@@ -30,6 +30,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 import hashlib
+import math
 import threading
 from functools import lru_cache
 from typing import Any
@@ -299,10 +300,35 @@ def _load_model(
 
 
 def _as_int(value: Any, name: str) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
+    """A JSON integer, or a typed refusal — never a coercion.
+
+    ``int(value)`` accepted, and silently rewrote, everything JSON can express: ``1.5``
+    became ``1``, ``"7"`` became ``7``, ``true`` became ``1``, and ``Infinity`` escaped as
+    an untyped 500 (``OverflowError: cannot convert float infinity to integer``). The
+    TypeScript engine refuses all four, so the two stacks disagreed on the whole
+    non-integer domain — and in the direction where Python computes with a *different
+    seed than it was asked for*, echoes it back, and nothing says it happened. Raise,
+    never truncate; that is the same rule ``lex.vacancy.MAX_SEED`` follows one level down.
+
+    ``7.0`` IS accepted as 7: JSON cannot express the int/float distinction, and the TS
+    engine reads it as the integer 7, so refusing it here would be a divergence of its
+    own. A float with a fractional part, or a non-finite one, is refused.
+    """
+    if isinstance(value, bool):
         raise InvalidParamError(f"{name} must be an integer, got {value!r}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise InvalidParamError(f"{name} must be a finite integer, got {value!r}")
+        if not value.is_integer():
+            raise InvalidParamError(
+                f"{name} must be an integer, got {value!r} — it is not rounded or "
+                "truncated, because a number that is not the number you asked for is "
+                "worse than a refusal"
+            )
+        return int(value)
+    raise InvalidParamError(f"{name} must be an integer, got {value!r}")
 
 
 def _as_float(value: Any, name: str) -> float:
@@ -866,6 +892,18 @@ async def train(request: Request, response: Response) -> dict[str, Any]:
     if weight_decay < 0:
         raise InvalidParamError(f"weight_decay must be >= 0, got {weight_decay}")
     seed = _as_int(payload.get("seed", DEFAULT_SEED), "seed")
+    # The training seed gets the same bound the vacancy seed has, for the same reason:
+    # it is echoed back in the job's result and in `spec`, and beyond 2**53 JavaScript
+    # reads back a DIFFERENT integer than the one this run used. `POST /api/lex/train`
+    # bounded the vacancy seed it forwards and left its own unbounded.
+    from ..lex.vacancy import MAX_SEED
+
+    if abs(seed) > MAX_SEED:
+        raise InvalidParamError(
+            f"seed must lie in [-{MAX_SEED}, {MAX_SEED}]: outside that range JavaScript "
+            f"cannot represent the integer exactly, so the seed reported back would not "
+            f"be the seed this run used. Got {seed}"
+        )
     sample_every = _as_int(payload.get("sample_every", DEFAULT_SAMPLE_EVERY), "sample_every")
     if sample_every < 1:
         raise InvalidParamError(f"sample_every must be at least 1, got {sample_every}")

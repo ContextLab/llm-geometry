@@ -128,14 +128,18 @@ def request_finetune(
             "fine-tuning text is too short after tokenization (need at least 2 tokens)"
         )
     unk_rate = enc.n_unk / len(enc.ids)
-    if unk_rate > FINETUNE_MAX_UNK_RATE:
+    if unk_rate >= FINETUNE_MAX_UNK_RATE:
         raise InvalidParamError(
-            f"{enc.n_unk} of {len(enc.ids)} tokens ({unk_rate:.0%}) in this text are "
-            "outside the active model's vocabulary, so fine-tuning on it would mostly "
-            "teach the model to emit <unk> and the loss would say nothing about your "
-            "words. Use 'Train a new model' to build a vocabulary from this text instead."
+            f"{enc.n_unk} of {len(enc.ids)} tokens ({unk_rate:.1%}, the limit is "
+            f"{FINETUNE_MAX_UNK_RATE:.0%}) in this text are outside the active model's "
+            "vocabulary, so fine-tuning on it would mostly teach the model to emit <unk> "
+            "and the loss would say nothing about your words. Use 'Train a new model' to "
+            "build a vocabulary from this text instead."
         )
-    base_token = weights_token(resolve_weight_set(base, store=store))
+    # The base's identity (vocabulary included), matching `finetune()` — a re-hash of the
+    # weights alone would let two same-weights/different-words models share a cache entry.
+    base_ws = resolve_weight_set(base, store=store)  # NotFoundError here, not inside the job
+    base_token = weights_token(base_ws) if base == "learned" else base
     key, _ = finetune_cache_key(base_token, text, steps, lr, seed)
     entry = store.get(key)
     if entry is not None:

@@ -1383,6 +1383,49 @@ def test_a_singleton_suffix_class_is_merged_into_the_bare_class():
     assert merged >= 4
 
 
+def test_the_singleton_merge_boundary_is_exactly_one_member():
+    """§8.3's merge fires at a class of ONE and at nothing larger.
+
+    This is the one place the inflection match is allowed to bend, and it was pinned by
+    nothing: widening the boundary from `< 2` to `< 8` passed every backend test. The
+    shipped corpus's smallest classes hold exactly 8 members, so the corpus-level
+    fixtures cannot see it, and the passage-level assertion above is one-sided (`merged
+    >= 4` RISES under over-merging). Over-merging is not cosmetic: every word in a
+    swallowed class comes back uninflected, so the swap arm stops controlling for
+    inflection while still claiming to.
+    """
+    keep = VacancyParams().keep_set
+    tokens = tokenize(load_corpus_text())
+    counts = type_counts(tokens)
+    by_suffix: dict[str, list[str]] = {}
+    for t in vacancy_domain(tokens):
+        lower = t.lower()
+        if is_vacatable(lower, keep):
+            by_suffix.setdefault(stem_and_suffix(lower)[1], []).append(lower)
+    bare = sorted(by_suffix[""])[:50]
+    ing = sorted(by_suffix["ing"])
+    assert len(ing) >= 8, "corpus no longer has an `ing` class big enough for this test"
+
+    # One member: merged, because it cannot be permuted without a fixed point.
+    one = swap_pools(bare + ing[:1], counts, keep)
+    assert set(one) == {""}
+    assert ing[0] in one[""]
+
+    # Two through seven: NOT merged. A class of two can be permuted (as a transposition),
+    # so there is no reason to give up the inflection match, and the boundary must sit
+    # exactly here.
+    for k in range(2, 8):
+        pools = swap_pools(bare + ing[:k], counts, keep)
+        assert set(pools) == {"", "ing"}, f"a class of {k} was merged into the bare class"
+        assert sorted(pools["ing"]) == sorted(ing[:k])
+
+    # And the two-member class really deranges inside itself: a clean transposition, both
+    # images still carrying `-ing`.
+    vmap = build_vacancy_map(bare + ing[:2], VacancyParams(p=1.0, seed=0, mint="swap"), counts)
+    assert {vmap.mapping[ing[0]], vmap.mapping[ing[1]]} == {ing[0], ing[1]}
+    assert vmap.mapping[ing[0]] == ing[1] and vmap.mapping[ing[1]] == ing[0]
+
+
 # --- §4: the seed's domain ---------------------------------------------------------------
 
 

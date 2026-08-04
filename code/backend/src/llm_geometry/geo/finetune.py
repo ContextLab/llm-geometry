@@ -53,7 +53,15 @@ _ARTIFACT_TYPE = "geo_finetune"
 #: (The red team measured `n_tokens 40 n_unk 38` presented as "loss 6.58 → 5.58 on your
 #: text".) Anything below this is allowed but its unk rate is reported to the caller —
 #: fine-tuning the shipped Alice model on modern prose legitimately unks a good share
-#: of it, and refusing that would be worse than saying so.
+#: of it, and refusing that would be worse than saying so. Measured, so the bound is not
+#: just a round number: a paragraph of modern financial prose tokenizes to
+#: ``n_tokens 73 n_unk 46``, an unk rate of 0.63 under the shipped vocabulary — the
+#: legitimate case sits ~0.27 below the bound.
+#:
+#: The comparison is ``>=``: a stream that is EXACTLY 90 % ``<unk>`` is refused. It used
+#: to be ``>``, so 900 of 1000 unknown tokens was accepted and reported as a clean
+#: "loss 3.06 → 2.57", while 901 was refused with a message that rounds to the same
+#: "(90%)" — one token apart, and indistinguishable on screen.
 FINETUNE_MAX_UNK_RATE = 0.9
 #: Above this the client is expected to say so on screen next to the loss.
 FINETUNE_UNK_WARN_RATE = 0.25
@@ -168,7 +176,11 @@ def finetune(
         # cache (e.g. base="learned"): resolve from there, write results here.
         base_ws = resolve_weight_set(base)
         base_store = None
-    base_token = weights_token(base_ws)
+    # The base's IDENTITY, which covers the vocabulary its ids mean — not a re-hash of
+    # its weights alone. Two scratch models with identical weights and different word
+    # lists are different models, and keying the fine-tune cache on the weights alone
+    # would serve one of them the other's result.
+    base_token = weights_token(base_ws) if base == "learned" else base
 
     key, spec = finetune_cache_key(base_token, text, steps, lr, seed)
     entry = store.get(key)
@@ -186,12 +198,13 @@ def finetune(
             "fine-tuning text is too short after tokenization (need at least 2 tokens)"
         )
     unk_rate = enc.n_unk / len(ids)
-    if unk_rate > FINETUNE_MAX_UNK_RATE:
+    if unk_rate >= FINETUNE_MAX_UNK_RATE:
         raise InvalidParamError(
-            f"{enc.n_unk} of {len(ids)} tokens ({unk_rate:.0%}) in this text are outside "
-            "the active model's vocabulary, so fine-tuning on it would mostly teach the "
-            "model to emit <unk> and the loss would say nothing about your words. Use "
-            "'Train a new model' to build a vocabulary from this text instead."
+            f"{enc.n_unk} of {len(ids)} tokens ({unk_rate:.1%}, the limit is "
+            f"{FINETUNE_MAX_UNK_RATE:.0%}) in this text are outside the active model's "
+            "vocabulary, so fine-tuning on it would mostly teach the model to emit <unk> "
+            "and the loss would say nothing about your words. Use 'Train a new model' to "
+            "build a vocabulary from this text instead."
         )
     windows = make_windows(np.asarray(ids + [EOS_ID], dtype=np.int64), stride=25)
 

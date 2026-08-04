@@ -19,8 +19,13 @@ import path from "node:path";
 
 import { describe, expect, it, beforeAll } from "vitest";
 
-import { GeoEngine, type WeightSet } from "../../src/lib/geoEngine";
-import { FINETUNE_MAX_UNK_RATE, VOCAB_SIZE, VOCAB_WORDS } from "../../src/lib/geoEngine/model";
+import { GeoEngine, weightsToken, type WeightSet } from "../../src/lib/geoEngine";
+import {
+  FINETUNE_MAX_UNK_RATE,
+  VOCAB_SIZE,
+  VOCAB_WORDS,
+  WEIGHT_SHAPES,
+} from "../../src/lib/geoEngine/model";
 import {
   buildVocabWords,
   runScratchTrain,
@@ -141,6 +146,112 @@ describe("derived weight sets keep the vocabulary they inherited [F1]", () => {
     expect(fresh.importWeightSet(ft.weights_token!, withoutVocab)).toBe(false);
     expect(fresh.importWeightSet(ft.weights_token!, exported)).toBe(true);
     expect(fresh.tokenizerFor(ft.weights_token!).words).toEqual(scratchWords);
+  });
+});
+
+describe("a model's identity covers its word list [F1, third path]", () => {
+  let engine: GeoEngine;
+
+  beforeAll(() => {
+    engine = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+  });
+
+  it("gives two models with identical weights and different words different tokens", () => {
+    // The token used to cover the weights alone, so these two collided — and the two
+    // stacks resolved the collision in OPPOSITE directions: this map overwrote (last
+    // write wins) where the Python store kept the first entry's word list. A saved
+    // file's word list therefore depended on which build wrote it and in what order.
+    const otherWords = scratchWords.map((w) => `zz${w}`);
+    const a = engine.registerScratchModel(scratchRun.weights, scratchWords);
+    const b = engine.registerScratchModel(scratchRun.weights, otherWords);
+    expect(b).not.toBe(a);
+
+    expect(engine.tokenizerFor(a).words).toEqual(scratchWords);
+    expect(engine.tokenizerFor(b).words).toEqual(otherWords);
+    expect(JSON.parse(engine.exportBundle(a).vocab).words).toEqual(scratchWords);
+    expect(JSON.parse(engine.exportBundle(b).vocab).words).toEqual(otherWords);
+  });
+
+  it("hashes the vocabulary exactly as the Python backend does", () => {
+    // The same two constants are pinned in
+    // `tests/integration/test_geo_derived_vocab.py::test_the_token_covers_the_vocabulary_byte_for_byte`.
+    // A deterministic synthetic weight set, so both stacks hash identical bytes without
+    // shipping another fixture: this is what makes "the same model saved by either build
+    // is the same file" checkable.
+    const ws: WeightSet = {};
+    for (const [name, shape] of WEIGHT_SHAPES) {
+      const n = shape.reduce((a, d) => a * d, 1);
+      const arr = new Float32Array(n);
+      for (let i = 0; i < n; i++) arr[i] = Math.fround(i * Math.fround(0.001));
+      ws[name] = arr;
+    }
+    const words = [...Array(VOCAB_WORDS)].map((_, i) => `w${i}`);
+    expect(weightsToken(ws)).toBe("38cb99338fb6c40f022641b579a7e827");
+    expect(weightsToken(ws, canonicalVocabJson(words))).toBe("50246246e336794517fcc299b505659a");
+  });
+
+  it("refuses to SAVE a set that owns a word list it no longer has", () => {
+    // Unreachable through the public API by design — which is exactly why it was
+    // untested, and why deleting the guard changed nothing. Reached here the way a real
+    // session reaches it: the set is registered, then its vocabulary goes missing (an
+    // eviction, a stale restore). Substituting the shipped word list would write a file
+    // pairing these weights with Alice's words under a matching `vocab_sha256` — a file
+    // no reader could ever reject.
+    const token = engine.registerScratchModel(scratchRun.weights, scratchWords.map((w) => `q${w}`));
+    const vocabs = (engine as unknown as { vocabs: Map<string, unknown> }).vocabs;
+    expect(vocabs.delete(token)).toBe(true);
+    // The refusal must come from the ownership guard by name — the re-hash check below
+    // it would also throw here, and a test that accepted either would not notice this
+    // guard being deleted (it did not, which is how it survived a mutation run).
+    expect(() => engine.exportBundle(token)).toThrowError(
+        /its ids mean its own words rather than the shipped model's/,
+    );
+  });
+});
+
+describe("persisted payloads that predate `ownsVocab` are refused, not decided [F2]", () => {
+  let engine: GeoEngine;
+  let scratchToken: string;
+
+  beforeAll(() => {
+    engine = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    scratchToken = engine.registerScratchModel(scratchRun.weights, scratchWords);
+  });
+
+  it("refuses a payload carrying neither an ownership flag nor a word list", () => {
+    // Byte-for-byte what the pre-fix build persisted for a model derived from a scratch
+    // model: weights, sources, setSource — and a token that is the WEIGHTS-ONLY hash,
+    // because that is what minted it. So the content-hash check passes and cannot save
+    // us here; nothing in the payload distinguishes this from a fine-tune of the shipped
+    // model. Deciding it as "does not own a vocabulary" is the original corruption:
+    // `tokenizerFor` falls back to Alice's words and `exportBundle` writes them into the
+    // file under a matching `vocab_sha256`. Undecidable, therefore REFUSED — a storage-key
+    // rename is not a defence, it only hides the payloads this build happens to have
+    // written, not one copied between profiles or restored from a backup.
+    const preFixToken = weightsToken(scratchRun.weights);
+    const weights: Record<string, string> = {};
+    for (const [name, arr] of Object.entries(scratchRun.weights)) {
+      weights[name] = Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength).toString("base64");
+    }
+    const preFix = { weights, sources: {}, setSource: "finetuned" };
+
+    const fresh = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    expect(fresh.importWeightSet(preFixToken, preFix)).toBe(false);
+    expect(() => fresh.exportBundle(preFixToken)).toThrowError(/unknown/);
+    // ...and the same payload with the flag present is decidable, so it restores.
+    expect(fresh.importWeightSet(preFixToken, { ...preFix, ownsVocab: false })).toBe(true);
+  });
+
+  it("refuses a payload whose claim and payload disagree, in either direction", () => {
+    const exported = engine.exportWeightSet(scratchToken);
+    const fresh = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    expect(fresh.importWeightSet(scratchToken, { ...exported, vocabWords: undefined })).toBe(false);
+    expect(fresh.importWeightSet(scratchToken, { ...exported, ownsVocab: false })).toBe(false);
+    // ...and a payload that pairs these weights with SOMEBODY ELSE's word list no longer
+    // hashes to the token it is filed under, so the claim is checked rather than believed.
+    const swapped = { ...exported, vocabWords: scratchWords.map((w) => `zz${w}`) };
+    expect(fresh.importWeightSet(scratchToken, swapped)).toBe(false);
+    expect(fresh.importWeightSet(scratchToken, exported)).toBe(true);
   });
 });
 

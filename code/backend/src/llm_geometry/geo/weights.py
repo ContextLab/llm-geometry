@@ -210,15 +210,61 @@ def build_weight_set(
 # -- content-hash tokens + persistence -------------------------------------------------
 
 
-def weights_token(ws: dict[str, np.ndarray]) -> str:
-    """Content hash over the full weight set (name-sorted float32 bytes)."""
+#: Domain separator between the weight bytes and the vocabulary bytes in a token.
+#: A literal that cannot occur in a tensor name, so no weight set can be confused with
+#: a weight set plus a word list.
+_VOCAB_HASH_TAG = b"\x00geo-vocab-v1\x00"
+
+
+def weights_token(ws: dict[str, np.ndarray], vocab_json: str | None = None) -> str:
+    """Content hash over the full model: name-sorted float32 bytes, then its vocabulary.
+
+    ``vocab_json`` is the *canonical* tokenizer serialization (``GeoTokenizer.to_json``)
+    for a model whose token ids mean words of its OWN, and ``None`` for one that reads
+    under the shipped vocabulary. Passing ``None`` reproduces the original
+    weights-only hash byte for byte, so the canonical checkpoint's id never moves.
+
+    **The word list is part of the model's identity, not metadata beside it.** Two weight
+    sets with identical numbers and different vocabularies are two different models: the
+    same id means `qalokemu` in one and `the` in the other. While the hash covered only
+    the weights, they collided — and because the store deduplicates on that hash and wrote
+    the metadata first-write-wins, whichever vocabulary arrived first was the one BOTH
+    models were saved under, with every digest recomputed over it and therefore verifying.
+    Loading a pre-fix model file and then training from scratch was enough to reach it: the
+    scratch run's own 1,000 words were discarded and its saved file read `[',', '"',
+    'the', '.']`. Hashing the vocabulary makes the collision impossible rather than
+    policing it afterwards, and it makes the two stacks agree, which a caching policy
+    could not (Python kept the first vocabulary, the TS engine the last).
+    """
     h = hashlib.sha256()
     for name in sorted(ws):
         arr = np.ascontiguousarray(np.asarray(ws[name], dtype=np.float32))
         h.update(name.encode("utf-8"))
         h.update(repr(arr.shape).encode("utf-8"))
         h.update(arr.tobytes())
+    if vocab_json is not None:
+        h.update(_VOCAB_HASH_TAG)
+        h.update(vocab_json.encode("utf-8"))
     return h.hexdigest()[:32]
+
+
+def own_vocab_json(vocab_json: str | None) -> str | None:
+    """The vocabulary bytes that take part in a content hash, or None.
+
+    ``vocab_json`` must already be the CANONICAL serialization (``GeoTokenizer.to_json``):
+    a model's identity cannot depend on the key order a writer happened to emit, and the
+    browser engine hashes ``canonicalVocabJson(words)``.
+
+    A word list identical to the shipped one is NOT an own vocabulary: such a model reads
+    under the canonical tokenizer whatever it was trained on, there is nothing to
+    substitute, and treating it as owned would give the canonical checkpoint two different
+    tokens depending on whether it arrived through the checkpoint or through a file.
+    """
+    if vocab_json is None:
+        return None
+    from .tokenizer import get_tokenizer  # local import to avoid a cycle
+
+    return None if vocab_json == get_tokenizer().to_json() else vocab_json
 
 
 def _artifact_key(token: str) -> str:
@@ -245,25 +291,55 @@ def save_weight_set(
     owns a word list but carries none is a corrupted entry — and ``export_bundle``
     refuses it rather than silently substituting the shipped vocabulary, which is the
     exact substitution the three digests exist to prevent.
+
+    The token covers the vocabulary (see :func:`weights_token`), so the store's dedup can
+    no longer hand one model's weights another model's words: different word lists mean
+    different keys. The reconciliation below is the belt to that braces — it fires only
+    on a self-contradictory write (``owns_vocab=True`` with no payload, which hashes like
+    an unowned set) and raises instead of silently keeping whichever entry got there
+    first, which is how the substitution used to happen.
     """
     store = store or CacheStore()
-    token = weights_token(ws)
+    owns = bool(vocab_json is not None if owns_vocab is None else owns_vocab)
+    hashed_vocab = own_vocab_json(vocab_json) if owns else None
+    if owns and vocab_json is not None and hashed_vocab is None:
+        # The word list IS the shipped one, so this model does not own a vocabulary in any
+        # sense that matters: it reads under the canonical tokenizer either way, and
+        # claiming otherwise would give the canonical checkpoint two tokens depending on
+        # whether it arrived as the checkpoint or as a file.
+        owns = False
+    # Only a genuinely-own word list is stored; `owns_vocab=True` with nothing to store
+    # is the corrupted shape `export_bundle` refuses, and it is preserved as written.
+    vocab_json = hashed_vocab
+    token = weights_token(ws, hashed_vocab)
     key = _artifact_key(token)
-    if store.get(key) is None:  # dedup: identical content already stored
-        spec = {
-            "schema_version": SCHEMA_VERSION,
-            "artifact_type": _ARTIFACT_PREFIX,
-            "weights_token": token,
-        }
-        meta: dict[str, Any] = {
-            "weights_token": token,
-            "source": source,
-            "names": sorted(ws),
-            "owns_vocab": bool(vocab_json is not None if owns_vocab is None else owns_vocab),
-        }
-        if vocab_json is not None:
-            meta["vocab"] = vocab_json
-        store.put(key, spec, meta, {name: np.asarray(a, np.float32) for name, a in ws.items()})
+    existing = store.get(key)
+    if existing is not None:
+        stored = existing["meta"]
+        stored_vocab = stored.get("vocab") if isinstance(stored.get("vocab"), str) else None
+        stored_owns = bool(stored.get("owns_vocab", stored_vocab is not None))
+        if (stored_vocab, stored_owns) != (vocab_json, owns):
+            raise InvalidParamError(
+                f"weights_token {token!r} is already stored with a different vocabulary "
+                f"claim (stored owns_vocab={stored_owns}, writing owns_vocab={owns}) — "
+                "refusing to overwrite or to reuse it, because a content hash that carried "
+                "someone else's word list would mislabel every token in this model."
+            )
+        return token
+    spec = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": _ARTIFACT_PREFIX,
+        "weights_token": token,
+    }
+    meta: dict[str, Any] = {
+        "weights_token": token,
+        "source": source,
+        "names": sorted(ws),
+        "owns_vocab": owns,
+    }
+    if vocab_json is not None:
+        meta["vocab"] = vocab_json
+    store.put(key, spec, meta, {name: np.asarray(a, np.float32) for name, a in ws.items()})
     return token
 
 

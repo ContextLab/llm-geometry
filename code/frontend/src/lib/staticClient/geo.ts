@@ -55,11 +55,14 @@ import type { LocalJobRegistry, ProgressFn } from "./jobs";
 // shipped word list under a matching `vocab_sha256` — an unrejectable wrong file. The
 // backend has always stored the two together (`save_weight_set(..., vocab_json=…)`).
 //
-// The key is VERSIONED. Payloads written before `ownsVocab` existed recorded vocabulary
-// ownership only through `setSource`, and a `finetuned`/`edited` payload derived from a
-// scratch model was written WITHOUT the word list it needs — restoring one would revive
-// exactly the corruption this fix removes, and nothing in the payload can distinguish it
-// from a legitimate fine-tune of the shipped model. Bumping the key drops them instead.
+// Payloads written before `ownsVocab` existed recorded vocabulary ownership only through
+// `setSource`, and a `finetuned`/`edited` payload derived from a scratch model was written
+// WITHOUT the word list it needs — restoring one would revive exactly the corruption this
+// fix removes, and nothing in the payload can distinguish it from a legitimate fine-tune
+// of the shipped model. `GeoEngine.importWeightSet` REFUSES such a payload outright and
+// `restorePersistedSets` drops it; the version suffix on the key is belt-and-braces, not
+// the defence. (It was the defence once, and a key rename is not one: it hides only the
+// payloads this build wrote, not one copied between profiles or restored from a backup.)
 const MINTED_SETS_KEY = "llm-geometry:static-weight-sets:v2";
 const MINTED_SETS_CAP = 8; // LRU; each entry is ~50 KB of JSON, ~60 KB with a vocabulary
 
@@ -263,11 +266,14 @@ export class GeoSection {
       );
     }
     const unkRate = enc.n_unk / tokenIds.length;
-    if (unkRate > FINETUNE_MAX_UNK_RATE) {
+    // `>=`, mirroring the backend and the engine: EXACTLY 90 % <unk> is refused, not
+    // accepted and reported as a clean loss drop one token below the refusal.
+    if (unkRate >= FINETUNE_MAX_UNK_RATE) {
       throw invalidParamError(
-        `${enc.n_unk} of ${tokenIds.length} tokens (${Math.round(unkRate * 100)}%) in this ` +
-          "text are outside the active model's vocabulary, so fine-tuning on it would mostly " +
-          "teach the model to emit <unk> and the loss would say nothing about your words. Use " +
+        `${enc.n_unk} of ${tokenIds.length} tokens (${(unkRate * 100).toFixed(1)}%, the ` +
+          `limit is ${Math.round(FINETUNE_MAX_UNK_RATE * 100)}%) in this text are outside ` +
+          "the active model's vocabulary, so fine-tuning on it would mostly teach the " +
+          "model to emit <unk> and the loss would say nothing about your words. Use " +
           "'Train a new model' to build a vocabulary from this text instead.",
       );
     }

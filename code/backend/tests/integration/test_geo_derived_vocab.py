@@ -17,19 +17,50 @@ import json
 import math
 import random
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
 from llm_geometry.api.app import app
 from llm_geometry.cache.store import CacheStore
 from llm_geometry.errors import InvalidParamError
-from llm_geometry.geo.bundle import export_bundle, import_bundle
+from llm_geometry.geo.bundle import (
+    BUNDLE_FORMAT,
+    BUNDLE_VERSION,
+    _b64,
+    _EXPECTED_CONFIG,
+    export_bundle,
+    import_bundle,
+    vocab_digest,
+)
 from llm_geometry.geo.config import VOCAB_SIZE, VOCAB_WORDS
 from llm_geometry.geo.finetune import finetune
 from llm_geometry.geo.jobs import mint_weight_set
 from llm_geometry.geo.scratch import SCRATCH_LEARNED_MARGIN, train_scratch
-from llm_geometry.geo.tokenizer import get_tokenizer, tokenizer_for
-from llm_geometry.geo.weights import load_weight_set, save_weight_set
+from llm_geometry.geo.tokenizer import GeoTokenizer, get_tokenizer, tokenizer_for
+from llm_geometry.geo.weights import (
+    load_weight_set,
+    own_vocab_json,
+    save_weight_set,
+    weights_token,
+)
+
+
+def _bundle_for(ws: dict, vocab_json: str) -> dict:
+    """A real, self-consistent model file for (weights, word list) — what a writer emits."""
+    return {
+        "format": BUNDLE_FORMAT,
+        "version": BUNDLE_VERSION,
+        "weights_token": weights_token(ws, own_vocab_json(vocab_json)),
+        "config": dict(_EXPECTED_CONFIG),
+        "vocab": vocab_json,
+        "vocab_sha256": vocab_digest(vocab_json),
+        "weights": {
+            name: {"shape": list(np.asarray(arr).shape), "data": _b64(arr)}
+            for name, arr in sorted(ws.items())
+        },
+    }
+
 
 client = TestClient(app)
 
@@ -83,6 +114,22 @@ def invented_corpus() -> str:
     words = _invented_words(1200)
     rng = random.Random(1865)
     return " ".join(rng.choice(words) for _ in range(13_200))
+
+
+@pytest.fixture(scope="module")
+def canonical_ready() -> None:
+    """The canonical checkpoint, in the shared cache this run points at.
+
+    `tests/conftest.py` gives every run a throwaway `LLM_GEOMETRY_CACHE_DIR`, so a case
+    that resolves `base="learned"` (or calls `load_canonical_weight_set`) only passed
+    when some earlier module in the same session happened to have trained it. Three cases
+    below did exactly that and failed when this file was run alone — the first thing a
+    bisect or a `-k` run hits. Train it explicitly instead: the same real training the app
+    does on first open, cached for the rest of the session.
+    """
+    from llm_geometry.geo.train import train_canonical
+
+    train_canonical()
 
 
 @pytest.fixture(scope="module")
@@ -148,6 +195,118 @@ def test_chained_derivation_still_carries_the_vocabulary(scratch_model: dict) ->
     assert tokenizer_for(step3["weights_token"], store=store).words == base_words
 
 
+def test_two_models_with_identical_weights_keep_their_own_word_lists(
+    scratch_model: dict, tmp_path
+) -> None:
+    """RED TEAM F1, third path: the cache's content-hash DEDUP, not the derivation chain.
+
+    ``save_weight_set`` wrote its metadata only when the key was new, so for a hash
+    already present the incoming vocabulary was discarded — first-write-wins. Two models
+    whose weights coincide (a pre-fix file loaded, then the same model trained from
+    scratch) therefore shared one word list, with every digest recomputed over it and
+    verifying. The fix is to the IDENTITY, not the caching policy: the token covers the
+    vocabulary, so two word lists are two models.
+    """
+    store = CacheStore(tmp_path / "collide")
+    ws = load_weight_set(scratch_model["result"]["weights_token"], store=scratch_model["store"])
+    words_a = _invented_words(VOCAB_WORDS)
+    words_b = [f"zz{w}" for w in words_a]
+    vocab_a = GeoTokenizer(words_a).to_json()
+    vocab_b = GeoTokenizer(words_b).to_json()
+
+    token_a = save_weight_set(ws, source="scratch", store=store, vocab_json=vocab_a)
+    token_b = save_weight_set(ws, source="scratch", store=store, vocab_json=vocab_b)
+    assert token_a != token_b, "identical weights + different words must not share a token"
+
+    assert tokenizer_for(token_a, store=store).words == words_a
+    assert tokenizer_for(token_b, store=store).words == words_b
+    # And the FILE each one saves carries its own list, which is what the user sees.
+    assert json.loads(export_bundle(token_a, store=store)["vocab"])["words"] == words_a
+    assert json.loads(export_bundle(token_b, store=store)["vocab"])["words"] == words_b
+
+
+def test_loading_a_file_then_training_the_same_model_does_not_swap_the_word_list(
+    scratch_model: dict, tmp_path
+) -> None:
+    """The realistic trigger the red team reproduced end to end: load a pre-fix model
+    file, then train the same weights from scratch on your own text. The scratch run's
+    own 1,000 words were discarded and its saved file read the loaded file's list."""
+    store = CacheStore(tmp_path / "load-then-train")
+    ws = load_weight_set(scratch_model["result"]["weights_token"], store=scratch_model["store"])
+    other_words = [f"qq{w}" for w in _invented_words(VOCAB_WORDS)]
+
+    # 1) A real model file carrying somebody else's word list, loaded first.
+    loaded = import_bundle(_bundle_for(ws, GeoTokenizer(other_words).to_json()), store=store)
+    assert tokenizer_for(loaded["weights_token"], store=store).words == other_words
+
+    # 2) Now "train from scratch" and land on the same weights, with your own words.
+    mine = _invented_words(VOCAB_WORDS)
+    mine_token = save_weight_set(
+        ws, source="scratch", store=store, vocab_json=GeoTokenizer(mine).to_json()
+    )
+    assert mine_token != loaded["weights_token"]
+    assert tokenizer_for(mine_token, store=store).words == mine
+    assert json.loads(export_bundle(mine_token, store=store)["vocab"])["words"] == mine
+
+
+def test_a_file_whose_word_list_was_swapped_after_the_fact_is_refused(
+    scratch_model: dict, tmp_path
+) -> None:
+    """A tampered file — genuine weights, a substituted word list, and `vocab_sha256`
+    recomputed over the substitute — used to load with a 200 and mislabel every token.
+    The two digests could not catch it; the identity hash can, because the declared
+    `weights_token` names a model with the ORIGINAL words."""
+    store: CacheStore = scratch_model["store"]
+    bundle = export_bundle(scratch_model["result"]["weights_token"], store=store)
+    fake_words = [f"xx{w}" for w in _invented_words(VOCAB_WORDS)]
+    fake_vocab = GeoTokenizer(fake_words).to_json()
+    tampered = {**bundle, "vocab": fake_vocab, "vocab_sha256": vocab_digest(fake_vocab)}
+
+    with pytest.raises(InvalidParamError) as exc:
+        import_bundle(tampered, store=CacheStore(tmp_path / "tampered"))
+    assert "corrupt" in exc.value.message
+    assert "vocabulary" in exc.value.message
+
+
+def test_save_weight_set_refuses_a_conflicting_vocabulary_claim(
+    scratch_model: dict, tmp_path
+) -> None:
+    """The dedup no longer keeps whichever entry arrived first and discards the other's
+    word list: a second write that disagrees about ownership is refused, loudly."""
+    store = CacheStore(tmp_path / "conflict")
+    ws = load_weight_set(scratch_model["result"]["weights_token"], store=scratch_model["store"])
+    token = save_weight_set(ws, source="scratch", store=store, owns_vocab=True)
+    # The same bytes written as a canonical-vocabulary model: same hash, different claim.
+    with pytest.raises(InvalidParamError) as exc:
+        save_weight_set(ws, source="learned", store=store, owns_vocab=False)
+    assert token in exc.value.message
+    assert "vocabulary" in exc.value.message
+
+
+def test_the_token_covers_the_vocabulary_byte_for_byte() -> None:
+    """A cross-language golden for the identity hash.
+
+    The same two constants are pinned in `tests/unit/geoDerivedVocab.test.ts` against the
+    TypeScript `weightsToken`. They are what makes "a model saved by the browser and the
+    same model saved by the Python backend are the same file" checkable rather than
+    hoped for — the two stacks used to resolve a token collision in OPPOSITE directions
+    (Python kept the first word list, the browser the last).
+    """
+    from llm_geometry.geo.weights import WEIGHT_SHAPES, weights_token
+
+    ws = {
+        name: (np.arange(int(np.prod(shape)), dtype=np.float32) * np.float32(0.001))
+        .reshape(shape)
+        .astype(np.float32)
+        for name, shape in WEIGHT_SHAPES.items()
+    }
+    words = [f"w{i}" for i in range(VOCAB_WORDS)]
+    # Unchanged from before the vocabulary joined the hash: a model that reads under the
+    # shipped word list keeps the token it always had, so `checkpoint_id` never moved.
+    assert weights_token(ws) == "38cb99338fb6c40f022641b579a7e827"
+    assert weights_token(ws, GeoTokenizer(words).to_json()) == "50246246e336794517fcc299b505659a"
+
+
 def test_export_refuses_when_an_owned_vocabulary_is_missing(scratch_model: dict, tmp_path) -> None:
     """Where inheritance is impossible, the writer must REFUSE, never substitute.
 
@@ -191,7 +350,7 @@ def test_finetune_tokenizes_with_the_base_models_vocabulary(scratch_model: dict)
     assert ft["n_unk"] == pytest.approx(ft["unk_rate"] * ft["n_tokens"], abs=1)
 
 
-def test_finetune_refuses_an_all_unk_stream(scratch_model: dict) -> None:
+def test_finetune_refuses_an_all_unk_stream(scratch_model: dict, canonical_ready: None) -> None:
     """An almost-entirely-<unk> fine-tuning stream must fail loudly, never as a
     clean loss drop (RED TEAM F2: "loss 6.58 → 5.58 on your text")."""
     from llm_geometry.geo.finetune import FINETUNE_MAX_UNK_RATE
@@ -201,6 +360,51 @@ def test_finetune_refuses_an_all_unk_stream(scratch_model: dict) -> None:
         finetune(base="learned", text=text, steps=2)
     assert "unk" in exc.value.message.lower()
     assert f"{FINETUNE_MAX_UNK_RATE:.0%}" in exc.value.message or "%" in exc.value.message
+
+
+def _stream_with_unk_rate(n_unk: int, n_known: int) -> str:
+    """A text of exactly ``n_unk + n_known`` canonical tokens, ``n_unk`` of them unknown."""
+    known = [w for w in get_tokenizer().words if w.isalpha()][:n_known]
+    assert len(known) == n_known
+    unknown = _invented_words(n_unk)
+    pieces: list[str] = []
+    for i in range(max(n_unk, n_known)):
+        if i < n_unk:
+            pieces.append(unknown[i])
+        if i < n_known:
+            pieces.append(known[i])
+    return " ".join(pieces)
+
+
+def test_the_unk_bound_refuses_a_stream_that_is_exactly_at_it(canonical_ready: None) -> None:
+    """The comparison was `>`, so a stream that is EXACTLY 90 % <unk> was accepted and
+    reported as a clean loss drop, while 901 of 1000 was refused with a message that
+    rounds to the same "(90%)". One token apart, indistinguishable on screen."""
+    from llm_geometry.geo.finetune import FINETUNE_MAX_UNK_RATE
+
+    text = _stream_with_unk_rate(900, 100)
+    enc = get_tokenizer().encode(text, truncate=False)
+    assert (enc.n_unk, len(enc.ids)) == (900, 1000)
+    assert enc.n_unk / len(enc.ids) == FINETUNE_MAX_UNK_RATE  # exactly at the bound
+
+    with pytest.raises(InvalidParamError) as exc:
+        finetune(base="learned", text=text, steps=1)
+    assert "outside the active model's vocabulary" in exc.value.message
+    assert f"the limit is {FINETUNE_MAX_UNK_RATE:.0%}" in exc.value.message
+
+
+def test_the_unk_bound_still_accepts_a_stream_just_below_it(
+    canonical_ready: None, tmp_path
+) -> None:
+    """The control: the bound is one-sided, not a blanket refusal. 89.9 % still trains —
+    fine-tuning the shipped model on modern prose legitimately unks a large share."""
+    text = _stream_with_unk_rate(899, 101)
+    enc = get_tokenizer().encode(text, truncate=False)
+    assert enc.n_unk / len(enc.ids) == 0.899
+
+    result = finetune(base="learned", text=text, steps=1, store=CacheStore(tmp_path / "below"))
+    assert result["n_unk"] == 899
+    assert result["unk_rate"] == pytest.approx(0.899)
 
 
 # -- F3: a run that ended at the uniform baseline must say so ----------------------------
@@ -226,7 +430,9 @@ def test_real_corpus_training_is_reported_as_learned(tmp_path) -> None:
     assert result["final_loss"] < result["uniform_baseline"] - SCRATCH_LEARNED_MARGIN
 
 
-def test_the_two_existing_gates_do_not_catch_a_baseline_run(scratch_model: dict) -> None:
+def test_the_two_existing_gates_do_not_catch_a_baseline_run(
+    scratch_model: dict, canonical_ready: None
+) -> None:
     """Pins the red team's measurement that the collapse gates score the degenerate
     model BETTER than the canonical one, so nobody later mistakes them for coverage."""
     from llm_geometry.geo.train import compute_gate_metrics, load_canonical_weight_set
@@ -265,7 +471,7 @@ def test_incomplete_bundle_is_refused_on_import(scratch_model: dict, tmp_path) -
     assert "layers.0.W_Q" in exc.value.message
 
 
-def test_weights_route_never_leaks_a_bare_key_error() -> None:
+def test_weights_route_never_leaks_a_bare_key_error(canonical_ready: None) -> None:
     """An incomplete set already in the cache (written by an older build) must produce
     a typed error, not `500 {"message": "'layers.0.W_V'"}`."""
     from llm_geometry.geo.train import load_canonical_weight_set

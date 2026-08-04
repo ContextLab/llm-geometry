@@ -82,13 +82,6 @@ export interface ExportedWeightSet {
   ownsVocab?: boolean;
 }
 
-/**
- * Weight-set kinds that ALWAYS own a vocabulary of their own, whatever they came from.
- * Everything else (`edited`, `finetuned`) owns one exactly when its base did, which is
- * why ownership is tracked per token in `ownsVocab` rather than inferred from a kind.
- * Retained for reading `ExportedWeightSet` payloads that predate the `ownsVocab` field.
- */
-const SET_SOURCES_WITH_OWN_VOCAB: ReadonlySet<string> = new Set(["scratch", "imported"]);
 
 function b64FromF32(arr: Float32Array): string {
   const bytes = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
@@ -170,6 +163,8 @@ export class GeoEngine {
   readonly canonicalToken: string;
   readonly meta: CheckpointMeta;
 
+  /** The shipped word list in its canonical serialization — the hash's "no own vocabulary". */
+  private readonly canonicalVocab: string;
   private readonly fixtures: PresetFixtures | null;
   private readonly weightSets = new Map<string, WeightSet>();
   /** token -> matrixKey -> "edited" | "preset:<name>" (absent key => "learned"). */
@@ -202,6 +197,7 @@ export class GeoEngine {
     this.canonical = checkpoint.weights;
     this.meta = checkpoint.meta;
     this.fixtures = fixtures;
+    this.canonicalVocab = canonicalVocabJson(tokenizer.words);
     this.canonicalToken = weightsToken(this.canonical);
     if (checkpoint.meta.checkpoint_id !== null && checkpoint.meta.checkpoint_id !== this.canonicalToken) {
       throw computeError(
@@ -250,6 +246,39 @@ export class GeoEngine {
         job_id: null,
       },
     };
+  }
+
+  // --- model identity ---------------------------------------------------------------
+  // A model's identity is its weights AND the word list its ids mean. See
+  // `weightsToken` and the backend's `weights.weights_token`.
+
+  /**
+   * The vocabulary bytes that take part in a token's hash, or null when the model reads
+   * under the shipped word list. A list identical to the canonical one is NOT an own
+   * vocabulary: there is nothing that could be substituted for it, and treating it as
+   * owned would give the canonical checkpoint two different tokens depending on whether
+   * it arrived as the checkpoint or through a file. Mirrors `weights.own_vocab_json`.
+   */
+  private ownVocabJson(words: readonly string[] | null | undefined): string | null {
+    if (!words) return null;
+    const json = canonicalVocabJson([...words]);
+    return json === this.canonicalVocab ? null : json;
+  }
+
+  /** The content-hash token of (`ws`, the word list `words`) — the model's identity. */
+  private tokenFor(ws: WeightSet, words: readonly string[] | null | undefined): string {
+    return weightsToken(ws, this.ownVocabJson(words));
+  }
+
+  /**
+   * The word list a set DERIVED from `base` inherits, or null. A base that claims to own
+   * a vocabulary but has none returns null and the claim is carried separately — such a
+   * set is unwritable, and `exportBundle` refuses it rather than substituting.
+   */
+  private ownedWordsFor(base: string): readonly string[] | null {
+    if (base === "learned" || base === this.canonicalToken) return null;
+    if (!this.ownsVocab.has(base)) return null;
+    return this.vocabs.get(base)?.words ?? null;
   }
 
   /** The vocabulary that gives `token`'s ids meaning (mirrors geo/tokenizer.tokenizer_for). */
@@ -378,26 +407,39 @@ export class GeoEngine {
     } catch {
       return false;
     }
-    if (weightsToken(ws) !== token) return false; // hash mismatch — refuse
     const words = payload.vocabWords;
-    // `ownsVocab` is authoritative when present. Payloads written before it existed
-    // are read the only way they can be: by their kind, which is why the storage key
-    // is versioned — a pre-fix `finetuned` payload derived from a scratch model would
-    // otherwise restore claiming the canonical vocabulary is correct for it.
-    const ownsVocab = payload.ownsVocab ?? SET_SOURCES_WITH_OWN_VOCAB.has(payload.setSource);
     if (words !== undefined && (!Array.isArray(words) || words.some((w) => typeof w !== "string"))) {
       return false;
     }
-    // A set whose ids mean its own words is not restorable without them. Restoring the
-    // weights alone would leave `tokenizerFor` falling back to the canonical vocabulary
-    // and every later read — the sphere's labels, a trace, and above all a SAVED model
-    // file — would silently describe the wrong words. Refuse, and let the caller drop it.
-    if (ownsVocab && words === undefined) return false;
+    const declaredOwns = payload.ownsVocab;
+    if (declaredOwns !== undefined && typeof declaredOwns !== "boolean") return false;
+    // A payload that carries NEITHER an `ownsVocab` flag NOR a word list is the shape
+    // this engine wrote before ownership was recorded, and it is genuinely undecidable:
+    // a `finetuned` payload derived from a scratch model and one derived from the shipped
+    // checkpoint are byte-identical, and reading it as "does not own one" restores the
+    // scratch model under Alice in Wonderland's words — the exact corruption `ownsVocab`
+    // exists to stop. It is REFUSED here rather than made unreachable by a storage-key
+    // rename: a key rename hides the payloads this build happens to know about, and does
+    // nothing about one copied between profiles, restored from a backup, or handed to
+    // this method by any other caller.
+    if (declaredOwns === undefined && words === undefined) return false;
+    const ownsVocab = declaredOwns ?? true;
+    // Claims and payload must agree: "owns nothing" with a word list attached, or "owns
+    // a word list" with none, is a payload we cannot describe either way.
+    if (ownsVocab !== (words !== undefined)) return false;
+    // And the claim is CHECKED, not believed: the token covers the word list, so a
+    // payload cannot pair one model's weights with another's words and still hash right.
+    if (this.tokenFor(ws, words ?? null) !== token) return false;
     this.weightSets.set(token, ws);
     this.sourceMaps.set(token, { ...payload.sources });
     this.setSources.set(token, payload.setSource);
-    if (ownsVocab) this.ownsVocab.add(token);
-    if (words !== undefined) this.vocabs.set(token, new GeoTokenizer(words));
+    // `ownVocabJson` is null when the list IS the shipped one — such a set reads under
+    // the canonical tokenizer and owns nothing of its own, exactly as the backend
+    // records it (`save_weight_set` normalizes the same case).
+    if (words !== undefined && this.ownVocabJson(words) !== null) {
+      this.vocabs.set(token, new GeoTokenizer(words));
+      this.ownsVocab.add(token);
+    }
     return true;
   }
 
@@ -412,7 +454,9 @@ export class GeoEngine {
     const baseWs = this.resolveWeightSet(base);
     const ctx = this.presetContext();
     const { ws, summaries } = buildWeightSet(baseWs, body.edits as WeightEditInput[], ctx);
-    const token = weightsToken(ws);
+    // Identity includes the base's word list, which the edit inherits: an edited scratch
+    // model is not the same model as an edited canonical one that happens to share bytes.
+    const token = this.tokenFor(ws, this.ownedWordsFor(base));
     this.weightSets.set(token, ws);
     this.setSources.set(token, "edited");
     // Editing a matrix changes the numbers, not what the ids MEAN — so the base's
@@ -453,7 +497,10 @@ export class GeoEngine {
     const seed = Math.trunc(body.seed ?? 0);
     const base = body.base ?? "learned";
     const baseWs = this.resolveWeightSet(base);
-    const baseToken = weightsToken(baseWs);
+    // The base's IDENTITY (vocabulary included), not a re-hash of its weights: two
+    // scratch models with the same numbers and different words must not share a
+    // fine-tune cache entry.
+    const baseToken = base === "learned" ? this.canonicalToken : base;
 
     // Content-derived cache key (identical requests are instant cache hits, like
     // the backend's 200 responses).
@@ -472,11 +519,15 @@ export class GeoEngine {
       throw invalidParam("fine-tuning text is too short after tokenization (need at least 2 tokens)");
     }
     const unkRate = enc.n_unk / tokenIds.length;
-    if (unkRate > FINETUNE_MAX_UNK_RATE) {
+    // `>=`, mirroring the backend: a stream that is EXACTLY 90 % <unk> is refused. It
+    // used to be `>`, so 900 of 1000 unknown tokens was accepted and reported as a clean
+    // loss drop while 901 was refused with a message rounding to the same "(90%)".
+    if (unkRate >= FINETUNE_MAX_UNK_RATE) {
       throw invalidParam(
-        `${enc.n_unk} of ${tokenIds.length} tokens (${Math.round(unkRate * 100)}%) in this ` +
-          "text are outside the active model's vocabulary, so fine-tuning on it would mostly " +
-          "teach the model to emit <unk> and the loss would say nothing about your words. Use " +
+        `${enc.n_unk} of ${tokenIds.length} tokens (${(unkRate * 100).toFixed(1)}%, the ` +
+          `limit is ${Math.round(FINETUNE_MAX_UNK_RATE * 100)}%) in this text are outside ` +
+          "the active model's vocabulary, so fine-tuning on it would mostly teach the " +
+          "model to emit <unk> and the loss would say nothing about your words. Use " +
           "'Train a new model' to build a vocabulary from this text instead.",
       );
     }
@@ -513,7 +564,7 @@ export class GeoEngine {
    * from the weights alone.
    */
   registerFinetunedWeights(weights: WeightSet, base: string): string {
-    const token = weightsToken(weights);
+    const token = this.tokenFor(weights, this.ownedWordsFor(base));
     this.weightSets.set(token, weights);
     this.setSources.set(token, "finetuned");
     this.inheritVocab(base, token);
@@ -528,11 +579,17 @@ export class GeoEngine {
    * one — so the vocabulary is stored with it and every read path uses it.
    */
   registerScratchModel(weights: WeightSet, vocabWords: string[]): string {
-    const token = weightsToken(weights);
+    // The word list is part of the token, so two scratch runs that landed on identical
+    // weights with different words get different tokens. They used to collide, and this
+    // map overwrote — last write wins — where the Python store kept the first, so the two
+    // stacks disagreed about WHICH of the two models had been corrupted.
+    const token = this.tokenFor(weights, vocabWords);
     this.weightSets.set(token, weights);
     this.setSources.set(token, "scratch");
-    this.vocabs.set(token, new GeoTokenizer(vocabWords));
-    this.ownsVocab.add(token);
+    if (this.ownVocabJson(vocabWords) !== null) {
+      this.vocabs.set(token, new GeoTokenizer(vocabWords));
+      this.ownsVocab.add(token);
+    }
     return token;
   }
 
@@ -568,15 +625,27 @@ export class GeoEngine {
           "vocabulary is present.",
       );
     }
-    const vocabJson = canonicalVocabJson(this.tokenizerFor(resolved).words);
+    const words = this.tokenizerFor(resolved).words;
+    const vocabJson = canonicalVocabJson(words);
     const weights: GeoModelBundle["weights"] = {};
     for (const name of Object.keys(ws).sort()) {
       weights[name] = { shape: [...(WEIGHT_SHAPES.get(name) ?? [ws[name].length])], data: b64FromF32(ws[name]) };
     }
+    // The file's identity covers its word list, so this re-hash must reproduce the token
+    // the engine minted. If it does not, the session and the file disagree about which
+    // model this is — say so rather than writing a file that names the wrong one.
+    const fileToken = this.tokenFor(ws, words);
+    if (resolved !== this.canonicalToken && fileToken !== resolved) {
+      throw computeError(
+        `weights_token '${resolved}' does not match a re-hash of its own weights and ` +
+          `vocabulary (${fileToken}) — the stored model is inconsistent, so saving it ` +
+          "would produce a file that names the wrong model. Retrain or reload it.",
+      );
+    }
     return {
       format: BUNDLE_FORMAT,
       version: BUNDLE_VERSION,
-      weights_token: weightsToken(ws),
+      weights_token: fileToken,
       config: {
         d_model: D_MODEL,
         n_layers: N_LAYERS,
@@ -656,23 +725,6 @@ export class GeoEngine {
     }
     validateWeightSet(ws); // shapes + completeness, loudly
 
-    // Integrity is MANDATORY, not opt-in: treating a missing token as "nothing to
-    // check" let a file with tampered weights load just by deleting the field.
-    if (typeof b.weights_token !== "string" || !b.weights_token) {
-      throw invalidParam(
-        "model file has no `weights_token`, so its contents cannot be verified — " +
-          "refusing to load it. Re-export the model to get a valid file.",
-      );
-    }
-    const actual = weightsToken(ws);
-    if (b.weights_token !== actual) {
-      throw invalidParam(
-        `this model file is corrupt: its weights hash to ${actual} but it declares ` +
-          `${b.weights_token}. Loading it would pair the wrong vocabulary with these ` +
-          "weights, so it is refused.",
-      );
-    }
-
     if (typeof b.vocab !== "string") throw invalidParam("model file is missing its `vocab` block");
     // The weights hash says nothing about the word list, so the vocabulary carries its
     // own digest — otherwise genuine weights plus an invented vocabulary load cleanly
@@ -693,12 +745,39 @@ export class GeoEngine {
     }
     const tokenizer = GeoTokenizer.fromVocabJson(b.vocab);
 
+    // Integrity is MANDATORY, not opt-in: treating a missing token as "nothing to
+    // check" let a file with tampered weights load just by deleting the field.
+    //
+    // The hash covers the WORD LIST as well as the weights, so this also catches the
+    // attack the vocabulary digest cannot: swapping the word list AND recomputing
+    // `vocab_sha256` over the substitute leaves a file that is internally consistent but
+    // no longer hashes to the model it names. It runs after the vocabulary is validated
+    // because the vocabulary is one of its inputs.
+    if (typeof b.weights_token !== "string" || !b.weights_token) {
+      throw invalidParam(
+        "model file has no `weights_token`, so its contents cannot be verified — " +
+          "refusing to load it. Re-export the model to get a valid file.",
+      );
+    }
+    const own = this.ownVocabJson(tokenizer.words);
+    const actual = this.tokenFor(ws, tokenizer.words);
+    if (b.weights_token !== actual) {
+      throw invalidParam(
+        `this model file is corrupt: its weights and vocabulary hash to ${actual} but it ` +
+          `declares ${b.weights_token}. Loading it would pair the wrong vocabulary with ` +
+          "these weights, so it is refused.",
+      );
+    }
+
     this.weightSets.set(actual, ws);
     this.setSources.set(actual, "imported");
-    this.vocabs.set(actual, tokenizer);
-    // An imported model always owns its word list: the file carried one, and that is
-    // what the ids in these weights mean.
-    this.ownsVocab.add(actual);
+    // An imported model owns the word list the file carried — unless that list IS the
+    // shipped one, in which case there is nothing of its own to own and the model keeps
+    // the token it would have had anyway.
+    if (own !== null) {
+      this.vocabs.set(actual, tokenizer);
+      this.ownsVocab.add(actual);
+    }
     return { weights_token: actual, vocab_size: VOCAB_SIZE };
   }
 

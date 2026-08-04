@@ -27,6 +27,7 @@ from .tokenizer import GeoTokenizer
 from .train import resolve_weight_set
 from .weights import (
     load_weight_set_vocab,
+    own_vocab_json,
     save_weight_set,
     validate_weight_set,
     weight_set_owns_vocab,
@@ -76,7 +77,6 @@ def export_bundle(token: str, store: CacheStore | None = None) -> dict[str, Any]
     """Build the portable bundle for ``token`` ("learned" resolves the canonical one)."""
     store = store or CacheStore()
     ws = resolve_weight_set(token, store=store)
-    real_token = weights_token(ws)
     vocab_json = None if token == "learned" else load_weight_set_vocab(token, store=store)
     if vocab_json is None:
         # Falling back to the canonical vocabulary is RIGHT for anything descended from
@@ -95,6 +95,16 @@ def export_bundle(token: str, store: CacheStore | None = None) -> dict[str, Any]
         from .tokenizer import get_tokenizer
 
         vocab_json = get_tokenizer().to_json()
+    # The file's identity covers its word list (`weights_token`), so this re-hash must
+    # reproduce the token the store minted. If it does not, the store and the file
+    # disagree about which model this is — say so rather than writing the file.
+    real_token = weights_token(ws, own_vocab_json(vocab_json))
+    if token != "learned" and real_token != token:
+        raise InvalidParamError(
+            f"weights_token {token!r} does not match a re-hash of its own weights and "
+            f"vocabulary ({real_token!r}) — the stored model is inconsistent, so saving "
+            "it would produce a file that names the wrong model. Retrain or reload it."
+        )
     return {
         "format": BUNDLE_FORMAT,
         "version": BUNDLE_VERSION,
@@ -158,22 +168,6 @@ def import_bundle(bundle: Any, store: CacheStore | None = None) -> dict[str, Any
     # bare string 'layers.0.W_V'.
     validate_weight_set(ws, context="model file")
 
-    # Integrity is MANDATORY, not opt-in. Treating a missing `weights_token` as "nothing
-    # to check" let a file with tampered weights load silently just by deleting a field.
-    declared = bundle.get("weights_token")
-    if not isinstance(declared, str) or not declared:
-        raise InvalidParamError(
-            "model file has no `weights_token`, so its contents cannot be verified — "
-            "refusing to load it. Re-export the model to get a valid file."
-        )
-    actual = weights_token(ws)
-    if declared != actual:
-        raise InvalidParamError(
-            "this model file is corrupt: its weights hash to "
-            f"{actual} but it declares {declared}. Loading it would pair the wrong "
-            "vocabulary with these weights, so it is refused."
-        )
-
     vocab_json = bundle.get("vocab")
     if not isinstance(vocab_json, str):
         raise InvalidParamError("model file is missing its `vocab` block")
@@ -194,10 +188,43 @@ def import_bundle(bundle: Any, store: CacheStore | None = None) -> dict[str, Any
             "would label every token with the wrong word, so it is refused."
         )
     tokenizer = GeoTokenizer.from_json(vocab_json)  # raises on a malformed vocabulary
+    # Hash and store the CANONICAL serialization of what the file carried, not the file's
+    # own bytes: `vocab_sha256` is about the bytes on disk, but the model's identity must
+    # not depend on whether a writer emitted its keys in a different order. The browser
+    # engine hashes `canonicalVocabJson(tokenizer.words)` for exactly the same reason.
+    canonical_vocab = tokenizer.to_json()
 
-    # An imported model always owns its word list: the file carried one, and that is
-    # what the ids in these weights mean.
+    # Integrity is MANDATORY, not opt-in. Treating a missing `weights_token` as "nothing
+    # to check" let a file with tampered weights load silently just by deleting a field.
+    #
+    # The hash covers the WORD LIST as well as the weights (see `weights.weights_token`),
+    # so this check now also catches the attack the vocabulary digest cannot: swapping the
+    # word list AND recomputing `vocab_sha256` over the substitute leaves a file that is
+    # internally consistent but no longer hashes to the model it names. It runs after the
+    # vocabulary is validated because the vocabulary is one of its inputs.
+    declared = bundle.get("weights_token")
+    if not isinstance(declared, str) or not declared:
+        raise InvalidParamError(
+            "model file has no `weights_token`, so its contents cannot be verified — "
+            "refusing to load it. Re-export the model to get a valid file."
+        )
+    owned = own_vocab_json(canonical_vocab)
+    actual = weights_token(ws, owned)
+    if declared != actual:
+        raise InvalidParamError(
+            "this model file is corrupt: its weights and vocabulary hash to "
+            f"{actual} but it declares {declared}. Loading it would pair the wrong "
+            "vocabulary with these weights, so it is refused."
+        )
+
+    # An imported model owns the word list the file carried — unless that list IS the
+    # shipped one, in which case there is nothing of its own to own and the model keeps
+    # the canonical token it would have had anyway (`save_weight_set` normalizes this).
     token = save_weight_set(
-        ws, source="imported", store=store, vocab_json=vocab_json, owns_vocab=True
+        ws,
+        source="imported",
+        store=store,
+        vocab_json=canonical_vocab,
+        owns_vocab=owned is not None,
     )
     return {"weights_token": token, "vocab_size": len(tokenizer.id_to_text)}

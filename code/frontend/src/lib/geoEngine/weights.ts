@@ -313,11 +313,26 @@ function reprShape(shape: number[]): string {
 }
 
 /**
- * Content hash over the full weight set: sha256 of name-sorted
- * [utf8(name), utf8(repr(shape)), float32-LE bytes], first 32 hex chars —
- * byte-identical to the backend's weights_token().
+ * Domain separator between the weight bytes and the vocabulary bytes — the backend's
+ * `weights._VOCAB_HASH_TAG`, byte for byte.
  */
-export function weightsToken(ws: WeightSet): string {
+const VOCAB_HASH_TAG = "\u0000geo-vocab-v1\u0000";
+
+/**
+ * Content hash over the full MODEL: sha256 of name-sorted
+ * [utf8(name), utf8(repr(shape)), float32-LE bytes], then — for a model whose token ids
+ * mean words of its own — the tag above and the canonical vocabulary JSON. First 32 hex
+ * chars, byte-identical to the backend's weights_token().
+ *
+ * `vocabJson` is null for anything that reads under the shipped vocabulary, which
+ * reproduces the original weights-only hash exactly, so the canonical checkpoint's id
+ * never moves. It is NOT null for a scratch-trained or imported model: two weight sets
+ * with the same numbers and different word lists are two different models, and while the
+ * hash said otherwise the two stacks resolved the collision in opposite directions (this
+ * engine kept the last word list, the Python store kept the first), so which model got
+ * corrupted depended on which build wrote the file.
+ */
+export function weightsToken(ws: WeightSet, vocabJson?: string | null): string {
   const names = Object.keys(ws).sort(); // ASCII code-unit order == Python sorted() here
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -334,6 +349,12 @@ export function weightsToken(ws: WeightSet): string {
     for (let i = 0; i < arr.length; i++) dv.setFloat32(i * 4, arr[i], true); // little-endian
     chunks.push(nameBytes, shapeBytes, dataBytes);
     total += nameBytes.length + shapeBytes.length + dataBytes.length;
+  }
+  if (vocabJson !== undefined && vocabJson !== null) {
+    const tagBytes = utf8Bytes(VOCAB_HASH_TAG);
+    const vocabBytes = utf8Bytes(vocabJson);
+    chunks.push(tagBytes, vocabBytes);
+    total += tagBytes.length + vocabBytes.length;
   }
   const all = new Uint8Array(total);
   let off = 0;

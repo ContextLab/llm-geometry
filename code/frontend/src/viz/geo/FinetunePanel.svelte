@@ -146,7 +146,8 @@
     the loss falls. Your text is tokenized with the <b>active model's own</b> vocabulary, and the
     new checkpoint keeps that vocabulary, so fine-tuning a model you trained from scratch really
     does use its words. Words the model has never seen become <code>&lt;unk&gt;</code>; the share
-    of them is reported with the loss, and text that is almost entirely unknown is refused rather
+    of them is reported with the loss, and text that is almost entirely unknown — <b>90 % of the
+    tokens or more</b> — is refused rather
     than turned into a loss drop that says nothing about it. To build a vocabulary from your own
     text, use <b>Train a new model</b>.
   </p>

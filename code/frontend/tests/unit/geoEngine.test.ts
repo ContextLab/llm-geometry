@@ -17,10 +17,11 @@
 
 import { beforeAll, describe, expect, it } from "vitest";
 
-import { GeoEngine, GeoEngineError } from "../../src/lib/geoEngine";
+import { GeoEngine, GeoEngineError, weightsToken, type WeightSet } from "../../src/lib/geoEngine";
 import { clipPrompt } from "../../src/lib/geoEngine/fields";
 import { sha256Hex, utf8Bytes } from "../../src/lib/geoEngine/hash";
 import { GeoModel } from "../../src/lib/geoEngine/model";
+import { canonicalVocabJson } from "../../src/lib/geoEngine/tokenizer";
 import type {
   GeoVectorFieldData,
   GeoVectorFieldParams,
@@ -37,6 +38,16 @@ const sources = goldenSources();
 const fixtureSrc = sources.find((s) => s.name === "fixtures")!;
 
 // --- shared helpers ----------------------------------------------------------------
+
+/** Decode a bundle's base64 tensors back into a WeightSet (for re-hashing a file). */
+function weightSetFromBundle(bundle: { weights: Record<string, { data: string }> }): WeightSet {
+  const ws: WeightSet = {};
+  for (const [name, payload] of Object.entries(bundle.weights)) {
+    const bytes = Buffer.from(payload.data, "base64");
+    ws[name] = new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+  }
+  return ws;
+}
 
 interface GoldenArrow {
   origin_index: number;
@@ -449,17 +460,24 @@ describe("minted-set persistence hooks (static reload survival) [fixtures]", () 
     const words = (JSON.parse(shipped.vocab) as { words: string[] }).words.map((w, i) =>
       i === 0 ? `${w}zz` : w,
     );
-    const vocabJson = JSON.stringify({
-      format: "geo-tokenizer-v1",
-      specials: { "<unk>": 0, "<eos>": 1, "<pad>": 2 },
-      words,
-    });
-    const file = {
+    const vocabJson = canonicalVocabJson(words);
+    // A file naming a DIFFERENT model must declare that model's token: the content hash
+    // covers the word list, so weights + someone else's words is not the model the
+    // original token names. Swapping only the vocabulary (and its digest) is exactly the
+    // substitution attack, and it is refused — asserted below before the real file is
+    // built with the token the new word list gives it.
+    const tampered = {
       ...shipped,
       vocab: vocabJson,
       vocab_sha256: sha256Hex(utf8Bytes(vocabJson)),
     };
+    expect(() => engine.importBundle(tampered)).toThrow(/corrupt/);
+    const file = {
+      ...tampered,
+      weights_token: weightsToken(weightSetFromBundle(shipped), vocabJson),
+    };
     const { weights_token: token } = engine.importBundle(file);
+    expect(token).not.toBe(minted.weights_token); // different words ⇒ a different model
     expect(JSON.parse(engine.exportBundle(token).vocab).words).toEqual(words);
 
     // The reload hop: persist, restore into a fresh engine, save again.
