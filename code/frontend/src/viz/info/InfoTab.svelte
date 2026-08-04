@@ -25,8 +25,16 @@
     { id: "refs", label: "Source & references" },
   ];
 
+  // The table of contents has to move the READING POSITION, not just the viewport.
+  // Scrolling alone left focus on the TOC button 12,000 px above the section it had
+  // just shown, so the next Tab yanked a keyboard or screen-reader user straight back
+  // to the top and the TOC did nothing for them (WCAG 2.4.3; red-team D F7). The target
+  // headings carry `tabindex="-1"` so they can take focus without joining the tab order.
   function jump(id: string): void {
-    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    const target = document.getElementById(id);
+    if (!target) return;
+    target.focus({ preventScroll: true });
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 </script>
 
@@ -52,7 +60,7 @@
   </header>
 
   <!-- ------------------------------------------------------------------ start -->
-  <h3 id="start">Which tab do I want?</h3>
+  <h3 id="start" tabindex="-1">Which tab do I want?</h3>
   <div class="cards">
     <article class="card">
       <h4>Architecture Explorer</h4>
@@ -94,7 +102,7 @@
   </div>
 
   <!-- --------------------------------------------------------------- notation -->
-  <h3 id="notation">Notation</h3>
+  <h3 id="notation" tabindex="-1">Notation</h3>
   <p class="para">
     Column-vector convention throughout: activations are column vectors and matrices act on the
     left, so <code>W_Q z</code> means the matrix times the vector. (The source uses PyTorch's
@@ -115,7 +123,7 @@
   </div>
 
   <!-- ------------------------------------------------------------------- arch -->
-  <h3 id="arch">The Architecture Explorer</h3>
+  <h3 id="arch" tabindex="-1">The Architecture Explorer</h3>
 
   <h4 class="sub">The diagram</h4>
   <p class="para">
@@ -158,14 +166,6 @@
       line. A <code>chat template</code> chip appears when the model's template wrapped your prompt,
       and an <code>earlier tokens dropped ⋯</code> chip appears at the left end when the prompt
       exceeded 64 tokens.
-    </li>
-    <li>
-      The <b>Export</b> control above the Geometry sphere writes what you are looking at to a PNG,
-      including the WebGL canvas.
-    </li>
-    <li>
-      In the weight lab, the <code>source</code> badge says where the displayed matrix came from —
-      the trained checkpoint, or the preset/edit that replaced it.
     </li>
     <li>
       Hover targets (token probabilities, sphere labels, norm bars) are pointer-driven. On a
@@ -240,7 +240,7 @@
   <p class="para">Generation is capped at 128 new tokens.</p>
 
   <!-- -------------------------------------------------------------------- geo -->
-  <h3 id="geo">The Geometry Lab</h3>
+  <h3 id="geo" tabindex="-1">The Geometry Lab</h3>
 
   <h4 class="sub">Why three dimensions</h4>
   <p class="para">
@@ -470,6 +470,22 @@
     by a content hash of its own weights, and <code>learned</code> takes you back.
   </p>
 
+  <h4 class="sub">Smaller things on screen, named</h4>
+  <ul class="para">
+    <li>
+      The <b>Export</b> control above the sphere writes what you are looking at to a PNG,
+      including the WebGL canvas.
+    </li>
+    <li>
+      In the weight lab, the <code>source</code> badge says where the displayed matrix came from —
+      the trained checkpoint, or the preset/edit that replaced it.
+    </li>
+    <li>
+      <b>field</b> and <b>layer</b> are radio groups: click one, or focus the group and use the
+      arrow keys. <code>full</code> is greyed out while the force field is showing.
+    </li>
+  </ul>
+
   <h4 class="sub">Training, fine-tuning, and training from scratch</h4>
   <p class="para">
     The shipped checkpoint is trained on the text of <i>Alice's Adventures in Wonderland</i>
@@ -528,7 +544,7 @@
 
   <!-- ------------------------------------------------------------------- real -->
   <!-- -------------------------------------------------------------------------- lex -->
-  <h3 id="lex">The Lexicon Lab</h3>
+  <h3 id="lex" tabindex="-1">The Lexicon Lab</h3>
 
   <p class="para">
     The other two tabs vary the <i>model</i>. This one varies the <b>vocabulary</b>. You choose a
@@ -545,8 +561,14 @@
   </p>
   <ul class="para">
     <li>
-      <b>Dolch</b> — the graded sight-word lists Edward William Dolch published in <b>1936</b>, a
-      real pedagogical word list still in use. The five cumulative budgets are
+      <b>Dolch</b> — Edward William Dolch's basic sight vocabulary, a real pedagogical word list
+      still in use. Two of the five budgets come straight out of his <b>1936</b> article: the
+      <b>220</b> service words it prints, and the <b>95</b> nouns it prints separately under
+      “nouns common to the three word lists <i>but not recommended</i> for a basic sight
+      vocabulary”. The grade-level split that gives the three smaller budgets
+      (<b>40 / 92 / 133</b>) is <i>not</i> in that article — it groups the 220 by part of speech,
+      not by grade — it is the conventional grading that has travelled with the list since, and we
+      have not established where it was first published. The five cumulative budgets are
       <b>40 / 92 / 133 / 220 / 314</b> words, and they <b>nest</b>: growing the budget only ever
       adds words, so a comparison across sizes is not confounded by words leaving.
     </li>
@@ -565,7 +587,8 @@
 
   <h4 class="sub">Why 314 and not 315</h4>
   <p class="para">
-    The Dolch noun list contains <code>Santa Claus</code>, which has a space in it and can never be
+    Dolch's noun list — p. 460 of the 1936 article, where <code>Santa Claus</code> is the last
+    entry in the third column — contains an item with a space in it, which can never be
     matched by a word-level tokenizer. The source project shipped it, so its “315-word” budget was
     silently 314 words wide. We drop it and report the number the code actually contains. The same
     pass fixed a transcription slip in the first-grade list, which had <code>giving</code> where the
@@ -633,7 +656,7 @@
   </p>
 
   <!-- ---------------------------------------------------------------- vacancy -->
-  <h3 id="vacancy">The vacancy transform</h3>
+  <h3 id="vacancy" tabindex="-1">The vacancy transform</h3>
 
   <p class="para">
     The two labs above each hold one thing fixed and move another. This instrument moves a third,
@@ -899,7 +922,7 @@
     continuous integration.
   </p>
 
-  <h3 id="real">What's real, and where it runs</h3>
+  <h3 id="real" tabindex="-1">What's real, and where it runs</h3>
   <p class="para">
     This page is deployed as a static site with no Python behind it, so it is worth being precise
     about what that changes. {#if STATIC_MODE}<b>You are currently on the static build</b>, so the
@@ -1005,7 +1028,7 @@
   </p>
 
   <!-- ----------------------------------------------------------------- limits -->
-  <h3 id="limits">Known limits</h3>
+  <h3 id="limits" tabindex="-1">Known limits</h3>
   <ul class="para">
     <li>
       <b>The model menu is curated, not open.</b> The static build's live path needs a community
@@ -1066,7 +1089,7 @@
   </ul>
 
   <!-- ------------------------------------------------------------------- refs -->
-  <h3 id="refs">Source &amp; references</h3>
+  <h3 id="refs" tabindex="-1">Source &amp; references</h3>
   <ul class="para links">
     <li>
       <a href="https://github.com/ContextLab/llm-geometry" target="_blank" rel="noopener">
@@ -1106,7 +1129,11 @@
     <li>
       E. W. Dolch, <i>A Basic Sight Vocabulary</i>, The Elementary School Journal 36(6):456–460,
       1936, <a href="https://doi.org/10.1086/457353" target="_blank" rel="noopener">
-        doi:10.1086/457353</a> — the source of the Lexicon Lab's prescribed word budgets.
+        doi:10.1086/457353</a> — read, not cited second-hand. It is the source of the
+      <b>220</b> service words (pp. 458–459, grouped by part of speech) and of the
+      <b>95</b> nouns (p. 460), from which the largest budget is built. It does <i>not</i>
+      contain the pre-primer / primer / first-grade split that the three smaller budgets use;
+      see “Two kinds of budget, at the same size”.
     </li>
   </ul>
 </section>
@@ -1157,6 +1184,13 @@
     scroll-margin-top: 1rem;
     padding-bottom: 0.35rem;
     border-bottom: 1px solid var(--border);
+  }
+  /* The TOC focuses the heading it jumps to; a sighted keyboard user has to be able to
+     see where they landed. */
+  h3:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 5px;
+    border-radius: 4px;
   }
   h4.sub {
     margin: 1.1rem 0 0.1rem;

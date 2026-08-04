@@ -13,8 +13,9 @@ animated progress indicator while it runs.
 `project_description.md` is the ORIGINAL vision document (three embedding-geometry
 visualizations: vector field, Sankey, manifold). Read it for the science and the
 aesthetic intent, but note that **feature 004 deliberately narrowed the deliverable**:
-those three views were removed in favor of the two explorer tabs below. Treat
-`project_description.md` as history plus design taste, not as a spec of what ships.
+those three views were removed in favor of the explorer tabs below (two at the time;
+006 added a third). Treat `project_description.md` as history plus design taste, not as
+a spec of what ships.
 
 ### Hard technical constraints
 - Token-level probability distributions are required, so models must be **open-weights**
@@ -25,7 +26,7 @@ those three views were removed in favor of the two explorer tabs below. Treat
 
 ## Current state
 
-The app is a **three-tab explorer** — two visualizations plus a reference tab — deployed at
+The app is a **four-tab explorer** — three visualizations plus a reference tab — deployed at
 https://context-lab.com/llm-geometry/.
 
 - **Architecture Explorer** (`llm_geometry/arch/` + `api/routes_arch.py` + `viz/arch/`) —
@@ -39,17 +40,30 @@ https://context-lab.com/llm-geometry/.
   corpus, with next-next + attention-force vector fields on a Three.js sphere, editable
   weights via content-hash `weights_token`s, real fine-tuning, from-scratch training on
   arbitrary text or a real HuggingFace dataset, and file save/load.
+- **Lexicon Lab** (`llm_geometry/lex/` + `api/routes_lex.py` + `viz/lex/`) — feature 006's
+  third explorer: a word-level transformer trained from scratch **in the browser in both
+  builds** (it never calls the backend) on a committed public-domain corpus, with the
+  **vocabulary budget** as the control — a prescribed Dolch list or the corpus's own most
+  frequent words at matched `|V|`. Feature 007 added the **vacancy transform** (`lex/
+  vacancy.py`, `lib/lexEngine/vacancy.ts`, `arch/vacancy_score.py`): content stems replaced
+  by nonces or swapped for each other at a rate `p`, with the pretrained-model arm scored in
+  the Architecture tab. Its normative contract is
+  `specs/007-vacancy-transform-field/architecture.md` — read it before touching the map,
+  the pool, or the tie rule.
 - **Info tab** (`llm_geometry`-free; `viz/info/InfoTab.svelte` + `lib/Explain.svelte`) — the
-  reference surface added by feature 005: notation, the GeoTransformer's forward pass as
-  equations, both field definitions, the what-is-real/where-it-runs table, known limits, and
-  verified references. Both explorer tabs also carry always-visible orientation prose plus
-  collapsible `Explain` deep-dives. **Every number in that prose is transcribed from a source
+  reference surface added by feature 005 and extended by 006 and 007: notation, the
+  GeoTransformer's forward pass as equations, both field definitions, the Lexicon Lab's
+  budgets, the vacancy transform, the what-is-real/where-it-runs table, known limits, and
+  verified references. All three explorer tabs also carry always-visible orientation prose
+  plus collapsible `Explain` deep-dives. **Every number in that prose is transcribed from a source
   constant** — `tests/e2e/docs.spec.ts` pins the ones cheapest to let rot, so changing a constant
   without changing the sentence fails CI.
 - **Static build** (feature 003) — a TypeScript port of the GeoTransformer
   (`src/lib/geoEngine/`, golden-tested against the Python backend to ≤1e-5),
   transformers.js generation, and safetensors HTTP Range reads. `VITE_DATA_MODE=static`
-  selects `src/lib/staticClient/`.
+  selects `src/lib/staticClient/`. Features 006/007 added `src/lib/lexEngine/`, which is
+  not a static-mode fallback: the Lexicon Lab runs it in **both** builds. Where the static
+  build cannot measure something honestly it **refuses by name** rather than degrading.
 
 The frozen HTTP contract is `specs/002-interactive-model-explorer/contracts/api.md` —
 **change it only in its own commit, with a note explaining why**. CI is
@@ -84,8 +98,8 @@ This project is initialized with **Spec Kit** (`.specify/`, integration = `claud
 
 ## Repository layout
 
-- `code/backend/` — Python package `llm_geometry` (`src/llm_geometry/{models,cache,jobs,api,arch,geo}`) + `tests/{unit,integration,contract}`; `pyproject.toml`, `requirements.txt`, pinned `requirements.lock`. The geo training corpus is package data (`geo/data/`).
-- `code/frontend/` — Svelte + TS + Vite app (`src/{viz,controls,lib,styles}`) + `tests/{unit,e2e}`. `src/viz/{arch,geo}/` are the two tabs; each owns its controls.
+- `code/backend/` — Python package `llm_geometry` (`src/llm_geometry/{models,cache,jobs,api,arch,geo,lex}`) + `tests/{unit,integration,contract}`; `pyproject.toml`, `requirements.txt`, pinned `requirements.lock`. The geo and lex training corpora are package data (`geo/data/`, `lex/data/`).
+- `code/frontend/` — Svelte + TS + Vite app (`src/{viz,controls,lib,styles}`) + `tests/{unit,e2e}`. `src/viz/{arch,geo,lex,info}/` are the four tabs; each owns its controls.
 - `docs/screenshots/` — verification screenshots referenced from issue threads.
 - `notes/` — session notes and agent red-team/fix reports (`notes/agent-reports/`).
 - `scripts/dev.sh` — health-checked dev-stack launcher for both servers.
@@ -122,15 +136,28 @@ Note: the `Dockerfile` builds the real dual stack (python:3.11-slim + Node 20,
 `pip install -e code/backend[test]`, `npm run build`, uvicorn on :8000) — keep it
 and the requirements files in sync with what the code actually imports.
 
+## Which spec is which
+
+`.specify/feature.json` is the authority on what is active; this list is the map. The
+`<!-- SPECKIT -->` block below is regenerated by the tooling and points at the active
+feature's normative document — do not hand-edit it.
+
+| Feature | What it is | Status |
+|-|-|-|
+| `007-vacancy-transform-field` | The vacancy transform (nonce/swap at rate `p`) across the Lexicon and Architecture tabs. **Normative contract: `architecture.md`** | active |
+| `006-lexicon-lab-tiny` | The Lexicon Lab: budgets, word tokenizer, in-browser training | shipped |
+| `005-explain-the-visualizations` | The Info tab and the in-tab explanatory text | shipped |
+| `004-two-tab-explorer` | Removals, defect fixes, real from-scratch training — still the spec for the Architecture and Geometry tabs' behavior | shipped |
+| `002-interactive-model-explorer` | `contracts/api.md`, the **frozen HTTP contract** for every tab — additive changes only, each in its own commit with a note | frozen |
+| `001-core-machinery` | The three removed embedding-geometry views | superseded |
+
+If you change a constant, an equation, or what a control does, change the sentence that
+documents it — in the tab's prose, in the Info tab, and in this file — **in the same
+commit**. `code/frontend/tests/e2e/docs.spec.ts` pins the values and behaviours cheapest
+to let rot.
+
 <!-- SPECKIT START -->
-Active feature: **005-explain-the-visualizations** — the Info tab and the in-tab
-explanatory text, written for a mathematically sophisticated reader. If you change a
-constant, an equation, or what a control does, change the sentence that documents it in
-the same commit.
-- Spec: `specs/005-explain-the-visualizations/spec.md`
-- Previous: `specs/004-two-tab-explorer/spec.md` (removals, defect fixes, real
-  from-scratch training) — still the spec for both tabs' behavior
-- Frozen API contract (both tabs):
-  `specs/002-interactive-model-explorer/contracts/api.md`
-- Superseded: `specs/001-core-machinery/` (the three removed views)
+For additional context about technologies to be used, project structure,
+shell commands, and other important information, read the current plan
+at specs/007-vacancy-transform-field/architecture.md
 <!-- SPECKIT END -->

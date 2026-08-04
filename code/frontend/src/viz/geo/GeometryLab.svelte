@@ -24,6 +24,7 @@
     type GeoLayerSelection,
   } from "../../lib/explorerStores";
   import Progress from "../../lib/Progress.svelte";
+  import SegmentedControl from "../../lib/SegmentedControl.svelte";
   import ExportBar from "../../controls/ExportBar.svelte";
   import GeoScene from "./GeoScene.svelte";
   import TokenStrip from "./TokenStrip.svelte";
@@ -495,25 +496,42 @@
     </div>
   {:else}
     <div class="controls-row">
+      <!-- Radio groups, not tablists: these choose one of N settings and own no panels,
+           so `role="tablist"` around plain buttons left the current field and the current
+           layer readable only as a background colour (red-team D F5; issue #7).
+           SegmentedControl carries the roles, `aria-checked`, and arrow-key navigation. -->
       <div class="ctl">
         <span class="ctl-label">field</span>
-        <div class="seg" data-testid="geo-mode" role="tablist">
-          <button class:active={$geoFieldMode === "next_next"} onclick={() => setMode("next_next")} title="from each token: where would the model go next-next?">next-next</button>
-          <button class:active={$geoFieldMode === "force"} onclick={() => setMode("force")} title="the paper's attention force field W_V·z (arXiv:2607.13295)">force</button>
-        </div>
+        <SegmentedControl
+          testid="geo-mode"
+          label="field"
+          value={$geoFieldMode}
+          onSelect={(v) => setMode(v as "next_next" | "force")}
+          options={[
+            { value: "next_next", label: "next-next", title: "from each token: where would the model go next-next?" },
+            { value: "force", label: "force", title: "the paper's attention force field W_V·z (arXiv:2607.13295)" },
+          ]}
+        />
       </div>
       <div class="ctl">
         <span class="ctl-label">layer</span>
-        <div class="seg" data-testid="geo-layer" role="tablist">
-          {#each LAYERS as l (l)}
-            <button
-              class:active={effLayer === l}
-              disabled={$geoFieldMode === "force" && l === "full"}
-              title={$geoFieldMode === "force" && l === "full" ? "the force field is per-layer by definition" : undefined}
-              onclick={() => geoLayer.set(l)}
-            >{l === "full" ? "full" : l}</button>
-          {/each}
-        </div>
+        <SegmentedControl
+          testid="geo-layer"
+          label="layer"
+          value={String(effLayer)}
+          onSelect={(v) => {
+            // Back through LAYERS rather than Number(v): the store's type is the literal
+            // union "full" | 0 | 1 | 2 | 3, so a widened `number` must not reach it.
+            const picked = LAYERS.find((l) => String(l) === v);
+            if (picked !== undefined) geoLayer.set(picked);
+          }}
+          options={LAYERS.map((l) => ({
+            value: String(l),
+            label: l === "full" ? "full" : String(l),
+            disabled: $geoFieldMode === "force" && l === "full",
+            title: $geoFieldMode === "force" && l === "full" ? "the force field is per-layer by definition" : undefined,
+          }))}
+        />
       </div>
       {#if $geoFieldMode === "next_next"}
         <label class="ctl slider">
@@ -690,32 +708,7 @@
     color: var(--text);
     font-variant-numeric: tabular-nums;
   }
-  .seg {
-    display: inline-flex;
-    gap: 0.2rem;
-    padding: 0.2rem;
-    background: var(--bg-elev-2);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-  }
-  .seg button {
-    background: transparent;
-    color: var(--text-dim);
-    border: none;
-    border-radius: 999px;
-    padding: 0.26rem 0.7rem;
-    font-size: 0.76rem;
-    font-weight: 500;
-  }
-  .seg button.active {
-    background: var(--accent-grad);
-    color: #0b0e14;
-    font-weight: 600;
-  }
-  .seg button:disabled {
-    opacity: 0.35;
-    cursor: not-allowed;
-  }
+  /* `.seg` moved to lib/SegmentedControl.svelte along with the markup it styles. */
   .slider {
     min-width: 150px;
   }

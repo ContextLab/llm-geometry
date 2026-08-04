@@ -62,6 +62,89 @@ test.describe("Info tab", () => {
     await expect(page).toHaveURL(/#info$/);
   });
 
+  test("Back and Forward move between tabs, as the shell documents", async ({ page }) => {
+    // The behaviour claim, pinned the way this file pins the numeric ones. `stores.ts`
+    // says "Back/Forward and a pasted link both work"; it used `replaceState`, so Back
+    // skipped every tab the reader had visited and left the site (red-team D F1). The
+    // unit suite covers the store in isolation — this is the claim in a real browser,
+    // with real history entries.
+    await page.goto("/#architecture");
+    await page.getByTestId("tab-geometry").click();
+    await expect(page).toHaveURL(/#geometry$/);
+    await page.getByTestId("tab-info").click();
+    await expect(page).toHaveURL(/#info$/);
+
+    await page.goBack();
+    await expect(page).toHaveURL(/#geometry$/);
+    await expect(page.getByTestId("geo-view")).toBeVisible();
+
+    await page.goForward();
+    await expect(page).toHaveURL(/#info$/);
+    await expect(page.getByTestId("info-view")).toBeVisible();
+  });
+
+  test("a hash the app did not honour is corrected instead of left in the address bar", async ({
+    page,
+  }) => {
+    // Falling back to the landing tab is deliberate; keeping a URL that promises a view
+    // the recipient will not get is not (red-team D F8). Both directions of the fix:
+    //   (a) an unknown fragment is rewritten to the tab actually rendered,
+    await page.goto("/#not-a-tab");
+    await expect(page.getByTestId("arch-model-picker")).toBeVisible();
+    await expect(page).toHaveURL(/#architecture$/);
+    //   (b) and a mis-cased one resolves rather than silently falling back.
+    await page.goto("/#Info");
+    await expect(page.getByTestId("info-view")).toBeVisible();
+    await expect(page).toHaveURL(/#info$/);
+  });
+
+  test("the tab strip and the Geometry Lab's controls expose their state to assistive tech", async ({
+    page,
+  }) => {
+    // Issue #7: the active tab was a background gradient and nothing else, and the two
+    // controls the Geometry Lab is about were `role="tablist"` around plain buttons.
+    // Asserted as ARIA, in a real browser, rather than as a screenshot.
+    await page.goto("/#architecture");
+    const strip = page.getByTestId("view-tabs");
+    await expect(strip).toHaveAttribute("aria-label", /.+/);
+    await expect(strip.locator("button[aria-current=page]")).toHaveText("Architecture");
+    await page.getByTestId("tab-geometry").click();
+    await expect(strip.locator("button[aria-current=page]")).toHaveText("Geometry");
+
+    await expect
+      .poll(async () => page.getByTestId("geo-view").getAttribute("data-ready"), {
+        timeout: 220_000,
+      })
+      .toBe("1");
+
+    for (const testid of ["geo-mode", "geo-layer"]) {
+      const group = page.getByTestId(testid);
+      await expect(group).toHaveAttribute("role", "radiogroup");
+      await expect(group).toHaveAttribute("aria-label", /.+/);
+      // Exactly one checked option, and every child says whether it is the one.
+      await expect(group.locator('[role=radio][aria-checked=true]')).toHaveCount(1);
+      const n = await group.locator("button").count();
+      await expect(group.locator("[role=radio]")).toHaveCount(n);
+    }
+
+    // …and the arrow keys really move it, which is what makes the group one tab stop.
+    const mode = page.getByTestId("geo-mode");
+    const before = await mode.locator("[role=radio][aria-checked=true]").innerText();
+    await mode.locator("[role=radio][aria-checked=true]").focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(mode.locator("[role=radio][aria-checked=true]")).not.toHaveText(before);
+  });
+
+  test("the table of contents moves the reading position, not just the viewport", async ({
+    page,
+  }) => {
+    // WCAG 2.4.3: scrolling without moving focus left a keyboard user's next Tab back at
+    // the top of the page, 12,000 px from what they had just asked to read (F7).
+    await openInfo(page);
+    await page.locator(".toc button", { hasText: "Known limits" }).click();
+    await expect(page.locator("#limits")).toBeFocused();
+  });
+
   test("a first-time visitor is pointed at it from the landing tab", async ({ page }) => {
     await page.goto("/");
     const pointer = page.getByTestId("info-pointer");
