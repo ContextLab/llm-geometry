@@ -415,6 +415,12 @@ These were gaps, not choices. Both stacks do it this way or the golden fixture f
   argument. The source used a module-level `MINTED_STRESS` dict mutated by `register_minted`,
   which makes two concurrently-live maps corrupt each other — and the Lexicon Lab holds several
   at once (one per condition being compared).
+- **`VacancyMap`'s stem→nonce field is `mapping` in both stacks.** TypeScript called it `map`
+  and Python `mapping`, which is the third naming asymmetry this feature produced (after the
+  missing `vacancyDomain` helper and the `avoid` default) and cost a debugging round for
+  anything driving both. `mapping` wins because a field called `map` sitting next to Python's
+  builtin reads badly. The remaining fields — `mintedStress`, `remintRounds`, `bijective`,
+  `imageSize`, `forbidden`, `domain` — already agree and are normative.
 - **Statistic field names are camelCase in both stacks**, exactly as §10 spells them, including
   in the Python JSON. This deviates from the rest of the Python API, which is snake_case; the
   vacancy block is a nested object, so it is self-consistent and it lets the golden fixture
