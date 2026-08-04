@@ -66,8 +66,8 @@
  *      and not in the `consistent = false` control, so at seed 7, `p = 1`, the stem `tak`
  *      minted the nonce `tak` and `Taking -> Taking`: one token silently failed to vacate.
  *      Both stacks now forbid a per-occurrence nonce from equalling the stem it replaces as
- *      well as any domain type, and `control-inconsistent-seed7` pins the result — 1922
- *      corpus types and 8202 tokens vacated, exactly what `consistent = true` reads.
+ *      well as any domain type, and `control-inconsistent-seed7` pins the result — 1918
+ *      corpus types and 8125 tokens vacated, exactly what `consistent = true` reads.
  *
  * The `knownDivergence` mechanism itself stays: it carries both readings per field, this
  * test asserts each side against its own, and `attach_divergence` in the exporter refuses to
@@ -97,6 +97,7 @@ import {
   vacancyU,
   vacateText,
   type VacancyMap,
+  isVacatable,
   type VacancyParams,
   type VacancyStats,
 } from "../../src/lib/lexEngine/vacancy";
@@ -107,6 +108,10 @@ import type { LexCorpusAsset } from "../../src/lib/staticClient/lex";
 interface GoldenStem {
   stem: string;
   eligible: boolean;
+  /** §2.2's WHOLE-WORD test, which runs before the stem test. It differs from `eligible`
+   *  exactly on the closed-class words `stemAndSuffix` breaks open (`after -> aft + er`,
+   *  `this -> thi + s`), which used to be vacated in both stacks. */
+  vacatable: boolean;
   stemOf: string;
   suffixOf: string;
   inDomain: boolean;
@@ -126,9 +131,19 @@ interface GoldenMap {
   imageSize: number;
   domainSize: number;
   mappingSize: number;
+  /** Vacatable STEMS, which is `mappingSize` under `nonce` and not under `swap`, whose map
+   *  is keyed by type (§8.3). */
+  stemsSize: number;
+  /** Images that are not domain types. 0 under `swap` — that IS the control's property:
+   *  every replacement is a real word of the domain. The whole map under `nonce`, where
+   *  condition B keeps every image out of the domain. */
+  imagesOutsideDomain: number;
+  /** Keys whose image is the key itself. Always empty: a fixed point is a word that
+   *  silently failed to vacate (the `tak -> tak` defect of §5.8). */
+  fixedPoints: string[];
   mappingSha256: string;
   mapping: Record<string, string> | null;
-  sampleNonces?: Record<string, string | null>;
+  sampleNonces?: Record<string, string | null> | null;
 }
 
 interface GoldenIdStream {
@@ -169,7 +184,7 @@ interface GoldenCase {
   vacatedSha256: string;
   vacatedChars: number;
   stats: Record<string, number | boolean>;
-  stemForms: Record<string, string> | null;
+  stemForms: Record<string, string | null> | null;
   idStream: GoldenIdStream | null;
   mapVocabWordsRejects: boolean;
   knownDivergence?: GoldenDivergence;
@@ -334,15 +349,18 @@ describe("the fixture is the one this test was written against", () => {
 describe("u(stem) is THE SAME double in both languages (§4, departure 2)", () => {
   const keep = effectiveKeepSet([]);
 
-  it("pins 24 stems spanning eligible/ineligible and both budgets", () => {
-    expect(golden.stems).toHaveLength(24);
+  it("pins 28 stems spanning eligible/ineligible and both budgets", () => {
+    expect(golden.stems).toHaveLength(28);
     // The span §11 asks for is a property of the list, so it is asserted rather than
-    // assumed: a fixture of 24 ordinary words would pin nothing about the eligibility test.
+    // assumed: a fixture of 28 ordinary words would pin nothing about the eligibility test.
     expect(golden.stems.some((s) => s.eligible)).toBe(true);
     expect(golden.stems.some((s) => !s.eligible)).toBe(true);
     expect(golden.stems.some((s) => s.inDolchFull)).toBe(true);
     expect(golden.stems.some((s) => s.inCorpus && !s.inDolchFull)).toBe(true);
     expect(golden.stems.some((s) => !s.inCorpus && s.inDolchFull)).toBe(true);
+    // And the two halves of §2.2 must actually differ somewhere, or `vacatable` pins nothing:
+    // `after`, `this`, `does` and `always` are function words whose STEM is open-class.
+    expect(golden.stems.some((s) => s.eligible && !s.vacatable)).toBe(true);
   });
 
   for (const entry of golden.stems) {
@@ -355,6 +373,7 @@ describe("u(stem) is THE SAME double in both languages (§4, departure 2)", () =
       expect(stem).toBe(entry.stemOf);
       expect(suffix).toBe(entry.suffixOf);
       expect(isEligible(stem, keep)).toBe(entry.eligible);
+      expect(isVacatable(entry.stem, keep)).toBe(entry.vacatable);
       expect(DOMAIN.includes(entry.stem)).toBe(entry.inDomain);
       expect(CORPUS_TYPES.has(entry.stem)).toBe(entry.inCorpus);
       expect(BUDGET_WORDS.includes(entry.stem)).toBe(entry.inDolchFull);
@@ -382,7 +401,24 @@ describe("the stem -> nonce map (§5.2)", () => {
       expect(vmap.imageSize).toBe(gm.imageSize);
       expect(vmap.domain.size).toBe(gm.domainSize);
       expect(vmap.mapping.size).toBe(gm.mappingSize);
+      expect(vmap.stems.size).toBe(gm.stemsSize);
       expect(mappingSha256(vmap.mapping)).toBe(gm.mappingSha256);
+
+      // §8.3's defining property, as data rather than prose: every image of a SWAP map is a
+      // domain type — a real English word — and no key maps to itself. Under `nonce` the
+      // opposite holds, and condition B is what makes it hold.
+      let outside = 0;
+      const fixed: string[] = [];
+      for (const [key, image] of vmap.mapping) {
+        if (!vmap.domain.has(image)) outside++;
+        if (key === image) fixed.push(key);
+      }
+      expect(outside, `${gm.label}.imagesOutsideDomain`).toBe(gm.imagesOutsideDomain);
+      expect(fixed.sort()).toEqual(gm.fixedPoints);
+      if (gm.mint === "swap") {
+        expect(outside).toBe(0);
+        expect(fixed).toEqual([]);
+      }
 
       if (gm.mapping !== null) {
         // The full map, pair by pair — §11 asks for every one at seeds 0 and 7. Both
@@ -398,7 +434,7 @@ describe("the stem -> nonce map (§5.2)", () => {
         expect(mismatched).toEqual([]);
         for (const stem of vmap.mapping.keys()) expect(gm.mapping[stem]).toBeDefined();
       }
-      if (gm.sampleNonces !== undefined) {
+      if (gm.sampleNonces !== undefined && gm.sampleNonces !== null) {
         for (const [stem, nonce] of Object.entries(gm.sampleNonces)) {
           expect(vmap.mapping.get(stem) ?? null).toBe(nonce);
         }
@@ -457,6 +493,15 @@ describe("the vacated corpus, its statistics and its id stream", () => {
       // §11 stability: the surface form of each pinned stem at this `p`.
       if (gc.stemForms !== null) {
         for (const [stem, form] of Object.entries(gc.stemForms)) {
+          if (form === null) {
+            // §8.3: a swap map is keyed by TYPE, so a word the domain does not contain has
+            // no assignment at all. `gum` and `hang` reach a NONCE map only as the stems of
+            // `gums` and `hanged`; the swap strategy refuses them, and Python recorded that
+            // refusal as `null`. Both stacks must refuse, and for the same reason.
+            expect(params.mint, `${gc.label}.stemForms.${stem}`).toBe("swap");
+            expect(() => transformWord(stem, vmap, params)).toThrow(/outside the swap map/);
+            continue;
+          }
           expect(transformWord(stem, vmap, params), `${gc.label}.stemForms.${stem}`).toBe(form);
         }
       }
@@ -490,7 +535,8 @@ describe("nesting is a structural fact, checked against explicit sets (SC-701)",
 
   function vacatedStems(p: number): string[] {
     const out: string[] = [];
-    for (const stem of vmap.mapping.keys()) if (vacancyU(stem, gn.seed) < p) out.push(stem);
+    // `vmap.stems`, not `vmap.mapping.keys()`: under `swap` the map is keyed by TYPE (§8.3).
+    for (const stem of vmap.stems) if (vacancyU(stem, gn.seed) < p) out.push(stem);
     return out.sort();
   }
 
@@ -514,7 +560,7 @@ describe("nesting is a structural fact, checked against explicit sets (SC-701)",
     // At p = 1 every eligible stem vacates, since u ∈ [0, 1) by construction (§10).
     const top = gn.levels[gn.levels.length - 1];
     expect(top.p).toBe(1);
-    expect(top.stems).toHaveLength(vmap.mapping.size);
+    expect(top.stems).toHaveLength(vmap.stems.size);
   });
 });
 
@@ -529,7 +575,10 @@ describe("a stem's nonce is identical at every p where it is vacated (SC-702)", 
       for (const gc of cases) {
         const params = paramsOf(gc);
         const vmap = mapFor(params);
-        for (const stem of Object.keys(gc.stemForms as Record<string, string>)) {
+        for (const [stem, pinned] of Object.entries(
+          gc.stemForms as Record<string, string | null>,
+        )) {
+          if (pinned === null) continue; // refused under swap — see the fixture's `null`
           const form = transformWord(stem, vmap, params);
           if (form === stem) continue; // not vacated at this p — nothing to be stable about
           const previous = seen.get(stem);
@@ -636,7 +685,7 @@ describe("the control conditions are present and behave as controls (§7.1, SC-7
   it("consistent = false vacates EVERYTHING at p = 1, seed 7 — the `tak` regression", () => {
     // §5.8, condition B on the per-occurrence path. `tak` (the stem of `taking`) once minted
     // the nonce `tak` at seed 7, so `Taking -> Taking` and one token silently survived the
-    // transform: 1921 corpus types and 8201 tokens against the consistent path's 1922/8202.
+    // transform: one corpus type and one token short of the consistent path's 1918 / 8125.
     // A control whose vacancy rate is not the stated rate is not a control, so the identity
     // §10 states at `p = 1` — every eligible type vacates — has to hold here too.
     const control = golden.cases.find((c) => c.label === "control-inconsistent-seed7");
@@ -644,8 +693,11 @@ describe("the control conditions are present and behave as controls (§7.1, SC-7
     expect(control).toBeDefined();
     expect(control?.params.consistent).toBe(false);
     expect(control?.params.p).toBe(1);
-    expect(control?.stats.corpusTypesVacated).toBe(1922);
-    expect(control?.stats.tokensVacated).toBe(8202);
+    // 1918 / 8125, not the 1922 / 8202 this pinned before §2.2's whole-word test was added:
+    // `after`, `this`, `does` and `always` are function words the suffix splitter used to
+    // break open, and they are no longer vacated in any condition.
+    expect(control?.stats.corpusTypesVacated).toBe(1918);
+    expect(control?.stats.tokensVacated).toBe(8125);
     expect(control?.stats.corpusTypesVacated).toBe(control?.stats.corpusTypesEligible);
     // The consistent path at the same seed and `p` reads the same counts; only the text
     // differs, which is exactly what this control is for.

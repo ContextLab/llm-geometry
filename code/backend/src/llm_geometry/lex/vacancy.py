@@ -237,16 +237,17 @@ MAX_REMINT_ROUNDS = 8
 #: proposes ``pool[(r + delta) % len(pool)]`` for ``delta`` in ``[-w, -1] | [1, w]``.
 SWAP_WINDOW = 32
 
-#: The window doubles every this many attempts, up to the whole pool — the same deterministic
+#: The window doubles every this many attempts, up to the whole class — the same deterministic
 #: relaxation §5.5 uses, and necessary for the same reason: "anything already used" depletes a
-#: fixed window for the stems late in canonical order.
+#: fixed window for the types late in canonical order.
 SWAP_WIDEN_EVERY = 64
 
 #: Attempt at which the prosody filter is dropped, mirroring :data:`MINT_RELAX_SYLLABLES_SALT`.
 SWAP_RELAX_PROSODY = 1024
 
-#: Reaching this many attempts raises rather than looping — the pool is finite, so unlike
-#: minting this bound is reachable in principle and we want to know if it ever is.
+#: Attempts after which the draw gives way to the deterministic outward scan of §8.3 stage 2.
+#: Unlike minting, the supply is finite and shrinks as the class fills, so this bound is
+#: reached in ordinary runs — it is a switch to an exhaustive rule, never a give-up.
 SWAP_MAX_ATTEMPTS = 4096
 
 #: The two minting strategies of contract §7.1 / §8.3.
@@ -302,7 +303,7 @@ def stem_and_suffix(word: str) -> tuple[str, str]:
 
 
 def is_eligible(stem: str, keep: frozenset[str] = FUNCTION_WORDS) -> bool:
-    """Is this stem open-class, i.e. may it be vacated at all? (Contract §2.2.)
+    """Is this STEM open-class, i.e. may it be vacated at all? (Contract §2.2, test 2.)
 
     `keep` is the EFFECTIVE closed class — :data:`FUNCTION_WORDS` unioned with any caller
     extras. Pass :attr:`VacancyParams.keep_set`, never :attr:`VacancyParams.keep`, or the
@@ -312,8 +313,32 @@ def is_eligible(stem: str, keep: frozenset[str] = FUNCTION_WORDS) -> bool:
     stacks must agree on it exactly: `good-bye` matches no suffix, so its stem contains a
     hyphen and it is **never** vacated; `dog's` splits to `dog`, which passes, giving
     ``<nonce>'s``.
+
+    **This is only half of the eligibility test.** A word is vacated iff
+    :func:`is_vacatable` says so, which applies test 1 — the whole word — first.
     """
     return stem.lower() not in keep and _STEM_RE.fullmatch(stem) is not None and len(stem) > 2
+
+
+def is_vacatable(word: str, keep: frozenset[str] = FUNCTION_WORDS) -> bool:
+    """May this WORD be vacated? (Contract §2.2 — test 1 then test 2.)
+
+    Test 1: the whole word is not itself in the closed class. Test 2: :func:`is_eligible`
+    on its stem.
+
+    **Test 1 is not redundant, and leaving it out was a defect.** :func:`stem_and_suffix`
+    is a spelling heuristic, so it splits the closed class open: `after -> aft + er`,
+    `this -> thi + s`, `does -> doe + s`, `always`, `during`, `having`, `unless`. None of
+    those stems is a function word, so the stem test passed and seven function words were
+    vacated — `after -> kitser` at seed 0 — while §0 claims the closed-class scaffolding is
+    left character for character intact and §8's whole measurement is taken over the words
+    that survive. The protection has to be applied to the word the reader keeps, not to the
+    fragment the splitter happens to produce.
+
+    Callers must pass every WORD or TYPE through here; :func:`is_eligible` alone is the
+    stem-level predicate and answers a different question.
+    """
+    return word.lower() not in keep and is_eligible(stem_and_suffix(word)[0], keep)
 
 
 def match_case(src: str, new: str) -> str:
@@ -333,6 +358,30 @@ def match_case(src: str, new: str) -> str:
 # --- the vacancy decision ---------------------------------------------------------------
 
 
+#: Contract §4: the seed's domain, and the reason it has one. The digest is taken over
+#: ``f"{seed}:{stem}"``, and Python stringifies an arbitrary-precision int EXACTLY while
+#: JavaScript stringifies the nearest float64: at ``2**53 + 1`` the two languages hash
+#: different strings, build different maps and vacate different corpora, and neither raises.
+#: Measured: ``2**53`` agrees (it is representable), ``2**53 + 1`` diverges in every field.
+#: So the seed is bounded to the integers JavaScript represents exactly, and the bound is
+#: ENFORCED in both stacks rather than assumed — clamping would be the same defect one level
+#: up, a number used that is not the number asked for.
+MAX_SEED = 2**53 - 1
+
+
+def _check_seed(seed: int) -> None:
+    """Raise unless `seed` is an exactly-representable integer (contract §4)."""
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise InvalidParamError(f"seed must be an int, got {seed!r}", {"seed": seed})
+    if abs(seed) > MAX_SEED:
+        raise InvalidParamError(
+            f"seed must lie in [-{MAX_SEED}, {MAX_SEED}] (contract §4): outside that range "
+            "JavaScript cannot represent the integer exactly, so the two stacks would hash "
+            f"different strings and build different maps. Got {seed}",
+            {"seed": str(seed), "max": MAX_SEED},
+        )
+
+
 def vacancy_u(stem: str, seed: int) -> float:
     """The stem's position in [0, 1) — vacate iff ``u(stem) < p`` (contract §4).
 
@@ -345,7 +394,12 @@ def vacancy_u(stem: str, seed: int) -> float:
     float64, so Python and JavaScript can round to different doubles for the same digest and
     disagree about a word at the boundary. Shifting to 53 bits makes the numerator exactly
     representable, so ``u`` is *the same double* in both languages.
+
+    The same care is applied to the digest's INPUT: :data:`MAX_SEED` is checked here, and not
+    only in :class:`VacancyParams`, because this function is public and a caller reaching it
+    directly with ``2**53 + 1`` would get a self-consistent answer TypeScript does not share.
     """
+    _check_seed(seed)
     digest = hashlib.sha256(f"{seed}:{stem.lower()}".encode("utf-8")).digest()
     return (int.from_bytes(digest[:8], "big") >> 11) / 2**53
 
@@ -550,124 +604,166 @@ def type_counts(tokens: Iterable[str]) -> dict[str, int]:
     return counts
 
 
-def swap_pool(domain: Iterable[str], counts: Mapping[str, int], keep: frozenset[str]) -> list[str]:
-    """The replacement pool of contract §8.3: the domain's open-class TYPES by frequency rank.
+def swap_pools(
+    domain: Iterable[str], counts: Mapping[str, int], keep: frozenset[str]
+) -> dict[str, list[str]]:
+    """The replacement pools of contract §8.3: one frequency-ranked pool per SUFFIX CLASS.
 
-    Ordered by ``(count descending, type ascending)`` — the tie rule
+    A class is the suffix :func:`stem_and_suffix` splits off a vacatable domain type, so the
+    ten classes on the shipped corpus are ``'' s ed er ing 's es ly ies est``. Within a class
+    the order is ``(count descending, type ascending)`` — the tie rule
     :func:`~llm_geometry.lex.vocab.frequency_budget` already uses, so "frequency rank" means
     one thing in this codebase. A type absent from the corpus (the 22 Dolch-only words) has
     count 0 and ranks last, alphabetically among its equals.
 
-    **Types, not stems.** The stem set is exactly the set of keys the map assigns, so drawing
-    from it would consume the pool exactly and leave an A-collision with nowhere to move. On
-    the shipped corpus the pool is 1944 types against 1680 stems, which is the slack the
-    re-draw rounds spend.
+    **Whole types, partitioned by suffix — not stems, and nothing is re-assembled.** The
+    first implementation drew a replacement for the STEM and re-attached the SOURCE word's
+    suffix to it, which produced forms that are not English words at all: the pool holds
+    inflected types, so `jump` + `ed` drawing `went` gave `wented`, `leap` + `ing` drawing
+    `thy` gave `thying`, and `aft` + `er` drawing `kits` gave `kitser`. Measured over the six
+    shipped Architecture passages at ``p = 1, seed = 0``: 195 of 776 vacated words (25.1%)
+    had a swap form absent from ``/usr/share/dict/words``. That falsifies the one property
+    the control exists for — *every form known* — and it biases the headline decomposition,
+    since ``nll(nonce) − nll(swap)`` is *the cost of unknown form* and the swap arm was
+    carrying unknown forms of its own.
+
+    Mapping whole type to whole type inside one suffix class fixes both halves at once: the
+    image IS a domain type, so it is a real English word by construction rather than by
+    hope, and it carries the same inflection as the word it replaces, so the scaffolding a
+    reader parses (`-ed`, `-ing`, `-'s`) is as intact in the swap arm as in the nonce arm.
+    It also makes §3's spelling heuristic harmless here — `November -> Novemb + er` never
+    gets re-assembled, it just puts `November` in the `er` class.
     """
-    return sorted(
-        {t.lower() for t in domain if is_eligible(stem_and_suffix(t)[0], keep)},
-        key=lambda t: (-counts.get(t, 0), t),
-    )
+    _reject_bare_str(domain, "swap_pools", "domain")
+    grouped: dict[str, set[str]] = {}
+    for t in domain:
+        lower = t.lower()
+        if not is_vacatable(lower, keep):
+            continue
+        grouped.setdefault(stem_and_suffix(lower)[1], set()).add(lower)
+
+    # A class of one cannot be permuted without a fixed point, and on a PASSAGE-sized domain
+    # that is the common case, not a corner: of the six shipped Architecture passages, five
+    # have a suffix class with exactly one member (`ing` in three of them). Such a class is
+    # merged into the bare class, which the full Dolch list keeps at 194 members or more.
+    #
+    # This is the one place the inflection match bends, and it bends in the only direction
+    # that keeps the property the control exists for: the replacement is still a REAL domain
+    # word — it is simply an uninflected one, so `singing` may come back as `garden`. Refusing
+    # instead would refuse five of the six shipped passages; assembling a form would put a
+    # non-word back into the arm whose whole claim is that every form is known. The merge is
+    # visible in this function's return value, which is why it returns the pools rather than
+    # hiding them inside the builder.
+    bare = grouped.setdefault("", set())
+    for suffix in sorted(grouped):
+        if suffix and len(grouped[suffix]) < 2:
+            bare |= grouped.pop(suffix)
+    if not bare:
+        del grouped[""]
+
+    return {
+        suffix: sorted(members, key=lambda t: (-counts.get(t, 0), t))
+        for suffix, members in sorted(grouped.items())
+    }
 
 
-def swap_rank(
-    stem: str, family: Iterable[str], pool: Sequence[str], counts: Mapping[str, int]
-) -> int:
-    """Where `stem` sits in the frequency-ranked pool (contract §8.3).
+def _assign_swap_class(pool: Sequence[str], seed: int, match_prosody: bool) -> dict[str, str]:
+    """Permute one suffix class onto itself with no fixed point (contract §8.3).
 
-    Not ``pool.index(stem)``: 375 of the shipped corpus's 1680 eligible stems are not domain
-    types at all — `hang` and `gum` reach the map only as the stems of `hanged` and `gums` —
-    so a lookup would raise on a fifth of them. The rank is instead the position the stem's
-    own key would take in the pool's order, with the stem's frequency taken over its whole
-    INFLECTIONAL FAMILY: `hang` is as frequent as `hanged` + `hanging` make it, which is the
-    frequency a reader of the corpus actually meets.
+    Returns ``type -> replacement type`` for every member of `pool`. The result is a
+    derangement of the class, so over all classes the map is a bijection of the vacatable
+    domain types with no type left where it was — conditions A and B₁ of §5.2a hold by
+    construction, and the verification in :func:`build_vacancy_map` is a check rather than a
+    search.
 
-    Defined as the number of pool entries whose key sorts strictly before the stem's, so it
-    is a plain count and cannot be read two ways; the binary search is only how it is
-    computed. Ties fall to the stem's own alphabetical position, exactly as the pool order
-    does.
+    Deterministic in ``(seed, pool, match_prosody)`` and independent of `p`, exactly as
+    :func:`_mint` is, so §5.6's stability property survives the swap control.
+
+    Three stages, in order, and every one of them is a function of the attempt counter alone
+    rather than of how many types happen to have been assigned first:
+
+    1. **The draw.** Attempt `a` proposes ``pool[(r + delta) % m]`` for a `delta` in
+       ``[-w, -1] | [1, w]`` read from the ``swap``-tagged byte stream, with `w` starting at
+       :data:`SWAP_WINDOW` and doubling every :data:`SWAP_WIDEN_EVERY` attempts up to the
+       class size; the prosody filter is dropped at :data:`SWAP_RELAX_PROSODY`, mirroring
+       §5.5's relaxations.
+    2. **Deterministic completion**, if :data:`SWAP_MAX_ATTEMPTS` draws all landed on used
+       entries. This is reached in ordinary runs, not only in pathological ones: the last
+       type of a class has one free image out of `m`, so a windowed draw finds it with
+       probability ``1 - (1 - 1/m)**a``. Scanning outward from the type's own rank
+       (``+1, -1, +2, -2, …``) keeps the frequency match as close as the remaining supply
+       allows, and it is exhaustive, so it cannot fail while any image is free.
+    3. **The endgame exchange**, if the only free image is the type itself. That can only
+       happen to the class's last type, and it is repaired by exchanging with the
+       ASCII-first already-assigned type whose image is not this one: both entries stay
+       non-identity and the images stay distinct. A fixed point would be a word that
+       silently failed to vacate — the `tak -> tak` defect of §5.8 — so it is repaired
+       rather than tolerated.
+
+    Stages 2 and 3 drop the prosody preference. That is stated rather than hidden: they run
+    only where the class has nothing else left, and a real word of the wrong stress is a far
+    smaller departure than a form that is not a word.
     """
-    freq = sum(counts.get(t, 0) for t in family)
-    key = (-freq, stem)
-    lo, hi = 0, len(pool)
-    while lo < hi:
-        mid = (lo + hi) // 2
-        other = pool[mid]
-        if (-counts.get(other, 0), other) < key:
-            lo = mid + 1
-        else:
-            hi = mid
-    return lo
-
-
-def _draw_swap(
-    stem: str,
-    seed: int,
-    match_prosody: bool,
-    pool: Sequence[str],
-    rank: Mapping[str, int],
-    used: frozenset[str] | set[str],
-    suffixes: Sequence[str],
-    claimed: frozenset[str] | set[str],
-    barred: frozenset[str] | set[str],
-    start_salt: int = 0,
-) -> tuple[str, int, list[str]]:
-    """Draw one real-word replacement for `stem` (contract §8.3).
-
-    Returns ``(word, salt, surface forms)`` — the forms the stem now owns, one per suffix it
-    occurs with, so the caller can claim them.
-
-    Deterministic in ``(seed, stem, pool, used, claimed, start_salt)`` and independent of `p`,
-    exactly as :func:`_mint` is, so §5.6's stability property survives the swap control.
-
-    Attempt `a` widens the window every :data:`SWAP_WIDEN_EVERY` attempts and drops the
-    prosody filter at :data:`SWAP_RELAX_PROSODY`; both relaxations are functions of `a` alone,
-    never of how many stems happen to have been assigned first. The byte stream carries the
-    ``swap`` tag, so it can never alias the ``mint`` stream at the same salt.
-
-    **Conditions A and B₁ are enforced here, at draw time, not only checked afterwards.** A
-    candidate is rejected if any of the surfaces it would produce is already claimed by an
-    earlier stem, is an ineligible domain type, or equals the very type it replaces. Checking
-    only afterwards costs 29 collision rounds on the shipped corpus at seed 0 and does not
-    converge inside the 8 §5.2 allows: the pool holds inflected types, so a bare stem drawing
-    `years` and a suffixed one drawing `year` land on the same surface, and re-drawing one of
-    them at random walks into the next such pair. Enforcing at draw time makes the map
-    correct by construction and the verification loop below a check rather than a search.
-    """
-    n = len(pool)
-    if n == 0:
+    m = len(pool)
+    if m < 2:
         raise ComputeError(
-            "the swap pool is empty — no domain type has an eligible stem, so there is no "
-            "real word to draw (contract §8.3)",
-            {"stem": stem, "seed": seed},
+            f"a swap class of {m} member(s) cannot be permuted without a fixed point, so "
+            "there is no real word available to swap it with — the text has too few "
+            "open-class words to be swapped at all (contract §8.3)",
+            {"pool": list(pool), "seed": seed},
         )
-    r = rank[stem]
-    pattern = stress(stem) if match_prosody else None
-    family = {stem + suffix for suffix in suffixes}
-    for attempt in range(SWAP_MAX_ATTEMPTS):
-        salt = start_salt + attempt
-        # The doubling is capped at 20 before the min, not because 20 is meaningful but
-        # because JavaScript's `<<` takes its shift count modulo 32: an uncapped
-        # `attempt // 64` reaches 63 at the give-up bound and the two stacks would compute
-        # different widths from the same attempt. 32 << 20 already exceeds any pool.
-        width = min(SWAP_WINDOW << min(attempt // SWAP_WIDEN_EVERY, 20), n)
-        offset = _ByteStream(seed, stem, salt, tag="swap").u32() % (2 * width)
-        delta = offset - width if offset < width else offset - width + 1
-        candidate = pool[(r + delta) % n]
-        if candidate == stem or candidate in used or candidate in family:
+    rank = {t: i for i, t in enumerate(pool)}
+    used: set[str] = set()
+    images: dict[str, str] = {}
+    for t in sorted(pool):
+        r = rank[t]
+        pattern = stress(t) if match_prosody else None
+        chosen: str | None = None
+        for attempt in range(SWAP_MAX_ATTEMPTS):
+            # The doubling is capped at 20 before the min, not because 20 is meaningful but
+            # because JavaScript's `<<` takes its shift count modulo 32: an uncapped
+            # `attempt // 64` reaches 63 at the give-up bound and the two stacks would
+            # compute different widths from the same attempt. 32 << 20 exceeds any class.
+            width = min(SWAP_WINDOW << min(attempt // SWAP_WIDEN_EVERY, 20), m)
+            offset = _ByteStream(seed, t, attempt, tag="swap").u32() % (2 * width)
+            delta = offset - width if offset < width else offset - width + 1
+            candidate = pool[(r + delta) % m]
+            if candidate == t or candidate in used:
+                continue
+            if (
+                pattern is not None
+                and attempt < SWAP_RELAX_PROSODY
+                and stress(candidate) != pattern
+            ):
+                continue
+            chosen = candidate
+            break
+        if chosen is None:  # stage 2
+            for step in range(1, m + 1):
+                for delta in (step, -step):
+                    candidate = pool[(r + delta) % m]
+                    if candidate != t and candidate not in used:
+                        chosen = candidate
+                        break
+                if chosen is not None:
+                    break
+        if chosen is None:  # stage 3
+            for earlier in sorted(images):
+                if images[earlier] != t:
+                    images[t] = images[earlier]
+                    images[earlier] = t
+                    used.add(t)
+                    break
+            else:
+                raise ComputeError(
+                    f"no real word is left to swap {t!r} with, and no earlier assignment "
+                    "can be exchanged with it (contract §8.3)",
+                    {"type": t, "pool": m, "seed": seed},
+                )
             continue
-        if pattern is not None and attempt < SWAP_RELAX_PROSODY and stress(candidate) != pattern:
-            continue
-        forms = [surface_form(candidate, stem, suffix, seed) for suffix in suffixes]
-        if any(f in claimed or f in barred or f in family for f in forms):
-            continue
-        if len(set(forms)) != len(forms):
-            continue
-        return candidate, salt, forms
-    raise ComputeError(
-        f"could not draw a swap replacement for {stem!r} in {SWAP_MAX_ATTEMPTS} attempts — "
-        "the pool is finite, so report this rather than raising the bound",
-        {"stem": stem, "seed": seed, "pool": n, "used": len(used), "start_salt": start_salt},
-    )
+        used.add(chosen)
+        images[t] = chosen
+    return images
 
 
 def _seam_fix(nonce: str, suffix: str, stem: str, seed: int) -> str:
@@ -746,8 +842,7 @@ class VacancyParams:
             raise InvalidParamError(f"p must be a number, got {self.p!r}", {"p": self.p})
         if not math.isfinite(self.p) or not 0.0 <= self.p <= 1.0:
             raise InvalidParamError(f"p must lie in [0, 1], got {self.p!r}", {"p": self.p})
-        if isinstance(self.seed, bool) or not isinstance(self.seed, int):
-            raise InvalidParamError(f"seed must be an int, got {self.seed!r}", {"seed": self.seed})
+        _check_seed(self.seed)
         if isinstance(self.reveal_after, bool) or not isinstance(self.reveal_after, int):
             raise InvalidParamError(
                 f"reveal_after must be an int, got {self.reveal_after!r}",
@@ -766,7 +861,7 @@ class VacancyParams:
         if self.mint == "swap" and not self.consistent:
             raise InvalidParamError(
                 "mint='swap' requires consistent=True: the inconsistent control needs a fresh "
-                "type per occurrence and the corpus has 1680 open-class stems against 8202 "
+                "type per occurrence and the corpus has 1676 open-class stems against 8125 "
                 "vacated tokens, so there is no supply of real words to draw (contract §8.3)",
                 {"mint": self.mint, "consistent": self.consistent},
             )
@@ -821,8 +916,26 @@ class VacancyMap:
     forms it mints so that prosody scoring stays exact.
     """
 
-    #: ``lower(stem) -> nonce``.
+    #: The assignment, whose KEY DEPENDS ON :attr:`mint` and is stated here rather than
+    #: inferred:
+    #:
+    #: * ``mint="nonce"`` — ``lower(stem) -> nonce``. The surface form is assembled from the
+    #:   nonce and the source word's suffix (§5.7).
+    #: * ``mint="swap"`` — ``lower(type) -> lower(type)``, within one suffix class (§8.3).
+    #:   Nothing is assembled: the image IS the surface form, and it is a domain type, hence
+    #:   a real English word.
+    #:
+    #: A caller that does not branch on `mint` will read stems where there are types; that is
+    #: why :attr:`mint` is stored on the map instead of being passed alongside it.
     mapping: dict[str, str]
+    #: Which of the two strategies of §8.3 built :attr:`mapping` — so a consumer can tell what
+    #: its keys are, and so :meth:`_transform` can refuse params that disagree with the map.
+    mint: str
+    #: Every vacatable stem of the domain. Equal to ``set(mapping)`` under ``mint="nonce"``
+    #: and NOT under ``mint="swap"``, whose keys are types — §10's ``stems*`` counts are
+    #: stem counts under both strategies, so they are taken from here rather than from
+    #: ``len(mapping)``, which would silently change meaning with the mint.
+    stems: frozenset[str]
     #: ``nonce -> intended stress pattern``, for :func:`stress`'s first lookup.
     minted_stress: dict[str, str]
     seed: int
@@ -858,7 +971,10 @@ class VacancyMap:
         return len(self.domain)
 
     def nonce_for(self, stem: str) -> str | None:
-        """The nonce assigned to `stem`, or ``None`` if the stem is outside the domain."""
+        """The replacement assigned to `stem`, or ``None`` if it has none.
+
+        Under ``mint="swap"`` the map's keys are TYPES, so pass a type; see :attr:`mapping`.
+        """
         return self.mapping.get(stem.lower())
 
     def apply_word(self, word: str, params: VacancyParams) -> str:
@@ -871,9 +987,16 @@ class VacancyMap:
         return self._transform(word, params, _RewriteState(set(self.forbidden)))
 
     def _transform(self, word: str, params: VacancyParams, state: _RewriteState) -> str:
-        stem, suffix = stem_and_suffix(word)
-        if not is_eligible(stem, params.keep_set):
+        if params.mint != self.mint:
+            raise ComputeError(
+                f"this map was built with mint={self.mint!r} but is being applied with "
+                f"mint={params.mint!r}; the two strategies key the map differently (§8.3), "
+                "so rebuild the map rather than reusing it",
+                {"map_mint": self.mint, "params_mint": params.mint},
+            )
+        if not is_vacatable(word, params.keep_set):
             return word
+        stem, suffix = stem_and_suffix(word)
         key = stem.lower()
         if vacancy_u(key, params.seed) >= params.p:
             return word
@@ -881,6 +1004,27 @@ class VacancyMap:
         state.counts[key] = seen
         if seen <= params.reveal_after:
             return word
+
+        if params.mint == "swap":
+            # §8.3: the map is over whole TYPES and the image is itself a domain type, so
+            # there is nothing to assemble — no suffix to re-attach, no seam to repair. That
+            # is the whole point: what comes out is a real English word, in the same
+            # inflectional class as the word it replaces.
+            image = self.mapping.get(word.lower())
+            if image is None:
+                raise ComputeError(
+                    f"type {word.lower()!r} is outside the swap map's domain — the map must "
+                    "be built over the union of the corpus types and the budget's words",
+                    {"type": word.lower()},
+                )
+            out = match_case(word, image)
+            if _WHOLE_WORD_RE.fullmatch(out) is None:
+                raise ComputeError(
+                    f"vacating {word!r} produced {out!r}, which is not a single complete "
+                    "word token — the token stream would no longer align with the original",
+                    {"word": word, "output": out},
+                )
+            return out
 
         if params.consistent:
             nonce = self.mapping.get(key)
@@ -905,7 +1049,7 @@ class VacancyMap:
             # type nor THE STEM IT REPLACES, and `{key}` is not redundant with `self.domain`
             # — a stem need not be a type. Measured: at seed 7, `p = 1`, `tak` minted `tak`,
             # so `Taking -> Taking` and one token silently failed to vacate
-            # (`corpus_types_vacated` 1921 against the consistent path's 1922). §7.1 denies
+            # (`corpus_types_vacated` one short of the consistent path's 1918). §7.1 denies
             # this control a *stability* property, which is about a nonce being reused
             # across occurrences; it does not license a word surviving the transform, and a
             # control whose vacancy rate is not the stated rate is not a control. Adding the
@@ -935,11 +1079,15 @@ class VacancyMap:
         return out
 
 
-def _image_of(word: str, mapping: Mapping[str, str], keep: frozenset[str], seed: int) -> str:
-    """A lowercased type at full vacancy, used only by the injectivity check."""
-    stem, suffix = stem_and_suffix(word)
-    if not is_eligible(stem, keep):
+def _image_of(
+    word: str, mapping: Mapping[str, str], keep: frozenset[str], seed: int, mint: str
+) -> str:
+    """A lowercased type's image at full vacancy, used only by the injectivity check."""
+    if not is_vacatable(word, keep):
         return word
+    if mint == "swap":
+        return mapping.get(word.lower(), word)
+    stem, suffix = stem_and_suffix(word)
     nonce = mapping.get(stem.lower())
     if nonce is None:
         return word
@@ -1010,13 +1158,16 @@ def build_vacancy_map(
     among those involved — at salt ``1000 * round + previousSalt + 1``, so a re-mint never
     cascades (§5.8).
 
-    **Under ``mint="swap"`` the replacement is a real English word and B cannot apply**, since
-    the replacement is a domain type by construction. §5.2a works out what B was standing in
-    for and what swap can therefore satisfy: A unchanged, and **B₁** — no surface form equals
-    an INELIGIBLE domain type, and none equals its own source type. That makes the map a
-    bijection of the domain at full vacancy, which is where the pretrained arm measures, and
-    §5.2a proves no `p`-stable swap can do better. :attr:`VacancyMap.injective_at_every_p`
-    records which regime the map is in and :func:`map_vocab_words` refuses the rest.
+    **Under ``mint="swap"`` the map is over whole TYPES, not stems, and B cannot apply**,
+    since every image is a domain type by construction. §5.2a works out what B was standing
+    in for and what swap can therefore satisfy: A unchanged, and **B₁** — no image is an
+    INELIGIBLE domain type, and none equals its own source type. :func:`_assign_swap_class`
+    delivers both by construction, since it permutes each suffix class onto itself with no
+    fixed point, so the loop below only VERIFIES them and raises if the construction is ever
+    wrong; there is nothing to re-draw. That makes the map a bijection of the domain at full
+    vacancy, which is where the pretrained arm measures, and §5.2a proves no `p`-stable swap
+    can do better. :attr:`VacancyMap.injective_at_every_p` records which regime the map is in
+    and :func:`map_vocab_words` refuses the rest.
 
     `counts` is the corpus's per-type occurrence count (:func:`type_counts`), REQUIRED by
     ``mint="swap"`` and unused by ``mint="nonce"`` — the nonce map stays a pure function of
@@ -1036,23 +1187,19 @@ def build_vacancy_map(
 
     pairs: list[tuple[str, str]] = []
     stem_set: set[str] = set()
-    families: dict[str, set[str]] = {}
-    suffixes: dict[str, list[str]] = {}
-    eligible_types: set[str] = set()
-    for t in sorted(type_set):  # ASCII order, so `suffixes[stem]` is canonical
-        stem, suffix = stem_and_suffix(t)
-        if not is_eligible(stem, keep):
+    vacatable_types: set[str] = set()
+    for t in sorted(type_set):  # ASCII order, so the stem order is canonical
+        if not is_vacatable(t, keep):
             continue
+        stem, suffix = stem_and_suffix(t)
         pairs.append((stem.lower(), suffix.lower()))
         stem_set.add(stem.lower())
-        families.setdefault(stem.lower(), set()).add(t)
-        suffixes.setdefault(stem.lower(), []).append(suffix.lower())
-        eligible_types.add(t)
+        vacatable_types.add(t)
 
     # Condition B's scope: EVERY domain type under `nonce`, and only the types that can never
     # be vacated under `swap` — §5.2a's B₁, which is what full-vacancy injectivity needs and
     # all a map drawing from the domain can possibly satisfy.
-    barred = type_set - eligible_types if swapping else type_set
+    barred = type_set - vacatable_types if swapping else type_set
 
     mapping: dict[str, str] = {}
     minted_stress: dict[str, str] = {}
@@ -1061,31 +1208,26 @@ def build_vacancy_map(
     # accumulates and is never pruned, so a superseded nonce stays out of circulation (§5.8),
     # and it is STORED on the map rather than reconstructed from `mapping.values()`.
     forbidden: set[str] = set(type_set)
-    pool: list[str] = []
-    rank: dict[str, int] = {}
+    rounds = 0
     if swapping:
         assert counts is not None  # narrowed by the guard above
-        pool = swap_pool(type_set, counts, keep)
-        rank = {s: swap_rank(s, families[s], pool, counts) for s in sorted(stem_set)}
-        used: set[str] = set()
-        claimed_forms: set[str] = set()
-        for stem in sorted(stem_set):
-            word, salt, forms = _draw_swap(
-                stem,
-                params.seed,
-                params.match_prosody,
-                pool,
-                rank,
-                used,
-                suffixes[stem],
-                claimed_forms,
-                barred,
+        for pool in swap_pools(type_set, counts, keep).values():
+            mapping.update(_assign_swap_class(pool, params.seed, params.match_prosody))
+        # A + B₁, VERIFIED rather than searched for. `_assign_swap_class` deranges each class,
+        # so a violation here is a bug in the construction and not a collision to re-draw
+        # away; raising is the only honest response, and `remint_rounds` stays 0.
+        images = [mapping[t] for t in sorted(mapping)]
+        offenders = sorted(t for t, image in mapping.items() if image == t or image in barred)
+        if offenders or len(set(images)) != len(images):
+            raise ComputeError(
+                "the swap assignment is not a derangement of the vacatable domain types "
+                "(contract §5.2a, conditions A and B₁)",
+                {
+                    "fixed_or_barred": offenders[:20],
+                    "distinct_images": len(set(images)),
+                    "types": len(images),
+                },
             )
-            used.add(word)
-            claimed_forms.update(forms)
-            forbidden.add(word)
-            mapping[stem] = word
-            salts[stem] = salt
     else:
         for stem in sorted(stem_set):
             nonce, pattern, salt = _mint(stem, params.seed, params.match_prosody, forbidden)
@@ -1094,73 +1236,45 @@ def build_vacancy_map(
             minted_stress[nonce] = pattern
             salts[stem] = salt
 
-    rounds = 0
-    while True:
-        claimed: dict[str, str] = {}  # surface -> the stem that owns it
-        losers: set[str] = set()
-        for stem, suffix in pairs:
-            form = surface_form(mapping[stem], stem, suffix, params.seed)
-            if form in barred or form == stem + suffix:  # condition B (B₁ under swap)
-                losers.add(stem)
-            if form in claimed:  # condition A
-                losers.add(max(stem, claimed[form]))
-            else:
-                claimed[form] = stem
-        if not losers:
-            break
-        if rounds >= MAX_REMINT_ROUNDS:
-            raise ComputeError(
-                f"vacancy map still collides after {MAX_REMINT_ROUNDS} re-mint rounds",
-                {"stems": sorted(losers)[:20], "rounds": rounds, "mint": params.mint},
-            )
-        rounds += 1
-        for stem in sorted(losers):
-            others = {n for s, n in mapping.items() if s != stem}
-            start_salt = REMINT_SALT_STRIDE * rounds + salts[stem] + 1
-            if swapping:
-                # A superseded REPLACEMENT returns to the pool — unlike a superseded nonce,
-                # which stays forbidden forever. The pool is finite (1944 real words against
-                # 1680 stems on the shipped corpus), so retiring words permanently would
-                # starve later rounds; and a real word cannot "recreate the collision it was
-                # rejected for" the way a nonce can, because the collision was with a
-                # different stem's surface, which has itself moved.
-                elsewhere = {
-                    surface_form(mapping[s], s, suffix, params.seed)
-                    for s, suffix in pairs
-                    if s != stem
-                }
-                word, salt, _forms = _draw_swap(
+        while True:
+            claimed: dict[str, str] = {}  # surface -> the stem that owns it
+            losers: set[str] = set()
+            for stem, suffix in pairs:
+                form = surface_form(mapping[stem], stem, suffix, params.seed)
+                if form in barred or form == stem + suffix:  # condition B
+                    losers.add(stem)
+                if form in claimed:  # condition A
+                    losers.add(max(stem, claimed[form]))
+                else:
+                    claimed[form] = stem
+            if not losers:
+                break
+            if rounds >= MAX_REMINT_ROUNDS:
+                raise ComputeError(
+                    f"vacancy map still collides after {MAX_REMINT_ROUNDS} re-mint rounds",
+                    {"stems": sorted(losers)[:20], "rounds": rounds, "mint": params.mint},
+                )
+            rounds += 1
+            for stem in sorted(losers):
+                start_salt = REMINT_SALT_STRIDE * rounds + salts[stem] + 1
+                nonce, pattern, salt = _mint(
                     stem,
                     params.seed,
                     params.match_prosody,
-                    pool,
-                    rank,
-                    others,
-                    suffixes[stem],
-                    elsewhere,
-                    barred,
+                    forbidden,
                     start_salt=start_salt,
                 )
-                forbidden.add(word)
-                mapping[stem] = word
+                minted_stress.pop(mapping[stem], None)
+                forbidden.add(nonce)
+                mapping[stem] = nonce
+                minted_stress[nonce] = pattern
                 salts[stem] = salt
-                continue
-            nonce, pattern, salt = _mint(
-                stem,
-                params.seed,
-                params.match_prosody,
-                forbidden,
-                start_salt=start_salt,
-            )
-            minted_stress.pop(mapping[stem], None)
-            forbidden.add(nonce)
-            mapping[stem] = nonce
-            minted_stress[nonce] = pattern
-            salts[stem] = salt
 
-    seen = {_image_of(t, mapping, keep, params.seed) for t in type_set}
+    seen = {_image_of(t, mapping, keep, params.seed, params.mint) for t in type_set}
     return VacancyMap(
         mapping=mapping,
+        mint=params.mint,
+        stems=frozenset(stem_set),
         minted_stress=minted_stress,
         seed=params.seed,
         match_prosody=params.match_prosody,
@@ -1317,14 +1431,21 @@ def vacancy_stats(
 
     keep = params.keep_set
     types = {w.lower() for w in before_words}
-    eligible = {t for t in types if is_eligible(stem_and_suffix(t)[0], keep)}
+    eligible = {t for t in types if is_vacatable(t, keep)}
     changed = [b.lower() for b, a in zip(before_words, after_words) if b.lower() != a.lower()]
 
-    domain_eligible = {t for t in vmap.domain if is_eligible(stem_and_suffix(t)[0], keep)}
+    domain_eligible = {t for t in vmap.domain if is_vacatable(t, keep)}
+    # ONE RULE, in both stacks: a domain type is vacated iff it is vacatable and its stem's
+    # `u` is below `p`. TypeScript additionally required the image to DIFFER from the type,
+    # which is the same set today — conditions B and B₁ both forbid an image equal to its own
+    # source — but two definitions of one statistic are one regression away from being two
+    # numbers, and §5.8 spends five bullets on exactly that class of asymmetry. The membership
+    # rule is the one that survives: it is what "what would the map rewrite here" means, and
+    # it needs no map lookup at all.
     domain_vacated = {
         t for t in domain_eligible if vacancy_u(stem_and_suffix(t)[0], params.seed) < params.p
     }
-    stems_vacated = sum(1 for s in vmap.mapping if vacancy_u(s, params.seed) < params.p)
+    stems_vacated = sum(1 for s in vmap.stems if vacancy_u(s, params.seed) < params.p)
 
     # The original text is English, so it is scored WITHOUT the minted patterns; `avoid`
     # guarantees no English type is also a nonce, so `stressFromMintedBefore` is 0 by
@@ -1339,7 +1460,7 @@ def vacancy_stats(
         "corpusTypesTotal": len(types),
         "corpusTypesEligible": len(eligible),
         "corpusTypesVacated": len(set(changed)),
-        "stemsTotal": len(vmap.mapping),
+        "stemsTotal": len(vmap.stems),
         "stemsVacated": stems_vacated,
         "tokensTotal": len(before_words),
         "tokensVacated": len(changed),

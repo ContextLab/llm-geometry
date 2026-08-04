@@ -41,11 +41,14 @@ import {
   UNSTRESSED_TAILS,
   buildVacancyMap,
   effectiveKeepSet,
+  MAX_SEED,
   isEligible,
+  isVacatable,
   mapVocabWords,
   meterScore,
   stemAndSuffix,
   stress,
+  swapPools,
   syllables,
   transformWord,
   typeCounts,
@@ -480,7 +483,9 @@ describe("SC-704 injectivity on the real corpus", () => {
       // Order is the contract: word i of the budget becomes word i of the mapped budget.
       BUDGET.forEach((w, i) => {
         const [stem] = stemAndSuffix(w);
-        const eligible = isEligible(stem, effectiveKeepSet());
+        // `isVacatable`, not `isEligible`: §2.2's test 1 is on the WHOLE word, and `this`
+        // splits to the open-class stem `thi`.
+        const eligible = isVacatable(w, effectiveKeepSet());
         if (!eligible || !(vacancyU(stem, seed) < p)) expect(mapped[i]).toBe(w);
         else expect(mapped[i]).not.toBe(w);
       });
@@ -506,10 +511,9 @@ describe("FR-706: a nonce never collides with a real corpus type", () => {
     const survivors = new Set<string>();
     for (const t of after) if (CORPUS_TYPES.has(t)) survivors.add(t);
     for (const t of survivors) {
-      const [stem] = stemAndSuffix(t);
-      // A surviving English type must be one the transform was never allowed to touch.
-      const untouchable = !isEligible(stem, effectiveKeepSet());
-      expect(untouchable).toBe(true);
+      // A surviving English type must be one the transform was never allowed to touch —
+      // by §2.2's whole-word test, which is what protects `this` and `after`.
+      expect(isVacatable(t, effectiveKeepSet()), `${t} survived p = 1`).toBe(false);
     }
   });
 });
@@ -604,8 +608,7 @@ describe("the endpoints of the p sweep", () => {
     const after = tokenize(out);
     let eligibleTokens = 0;
     for (let i = 0; i < before.length; i++) {
-      const [stem] = stemAndSuffix(before[i]);
-      if (!isEligible(stem, keep)) {
+      if (!isVacatable(before[i], keep)) {
         expect(after[i]).toBe(before[i]);
         continue;
       }
@@ -665,16 +668,18 @@ describe("the control conditions really are different conditions", () => {
       const stats = vacancyStats(CORPUS, text, vmap, cfg);
       // At `p = 1` every eligible type vacates (§10) — in this control exactly as in the
       // mapped condition, which is the whole claim.
-      expect(stats.corpusTypesVacated, `seed ${s}`).toBe(1922);
-      expect(stats.corpusTypesEligible, `seed ${s}`).toBe(1922);
-      expect(stats.tokensVacated, `seed ${s}`).toBe(8202);
+      // 1918 / 8125 since §2.2's whole-word test stopped the suffix splitter breaking
+      // `after`, `this`, `does` and `always` out of the closed class.
+      expect(stats.corpusTypesVacated, `seed ${s}`).toBe(1918);
+      expect(stats.corpusTypesEligible, `seed ${s}`).toBe(1918);
+      expect(stats.tokensVacated, `seed ${s}`).toBe(8125);
 
       // No eligible token survives the transform as itself.
       const before = tokenize(CORPUS);
       const after = tokenize(text);
       const survivors: string[] = [];
       for (let i = 0; i < before.length; i++) {
-        if (!isEligible(stemAndSuffix(before[i])[0], effectiveKeepSet([]))) continue;
+        if (!isVacatable(before[i], effectiveKeepSet([]))) continue;
         if (after[i] === before[i]) survivors.push(before[i]);
       }
       expect(survivors, `seed ${s}`).toEqual([]);
@@ -833,28 +838,32 @@ describe("§10 statistics", () => {
 
     // ...and it is strictly smaller than what map membership would have said, which is the
     // number the domain scope still reports (deliberately — see below).
-    const byMap = [...CORPUS_TYPES].filter((t) => {
-      const [stem] = stemAndSuffix(t);
-      return isEligible(stem, effectiveKeepSet()) && vacancyU(stem, seed) < 1;
-    }).length;
+    const byMap = [...CORPUS_TYPES].filter(
+      (t) =>
+        isVacatable(t, effectiveKeepSet()) &&
+        vacancyU(stemAndSuffix(t)[0], seed) < 1,
+    ).length;
     expect(s.corpusTypesVacated).toBeLessThan(byMap);
     expect(byMap).toBe(s.corpusTypesEligible);
   });
 
   it("pins the exact golden-fixture case the defect was found at: p = 0.7, revealAfter = 2", () => {
     // The coordinate the two stacks split on, reproduced to the type. Map membership says
-    // 1337 and the texts say 665 — the 2x over-report, at the golden fixture's own p.
+    // 1334 and the texts say 663 — the 2x over-report, at the golden fixture's own p. (It
+    // read 1337 / 665 / 1354 before §2.2's whole-word test stopped the suffix splitter
+    // breaking `after`, `this`, `does` and `always` out of the closed class.)
     const seed = 0;
     const cfg = params({ seed, p: 0.7, revealAfter: 2 });
     const s = vacancyStats(CORPUS, vacateText(CORPUS, mapFor(seed), cfg), mapFor(seed), cfg);
-    const byMap = [...CORPUS_TYPES].filter((t) => {
-      const [stem] = stemAndSuffix(t);
-      return isEligible(stem, effectiveKeepSet()) && vacancyU(stem, seed) < 0.7;
-    }).length;
-    expect(byMap).toBe(1337);
-    expect(s.corpusTypesVacated).toBe(665);
+    const byMap = [...CORPUS_TYPES].filter(
+      (t) =>
+        isVacatable(t, effectiveKeepSet()) &&
+        vacancyU(stemAndSuffix(t)[0], seed) < 0.7,
+    ).length;
+    expect(byMap).toBe(1334);
+    expect(s.corpusTypesVacated).toBe(663);
     // The domain scope keeps the map reading, and so is unmoved by revealAfter.
-    expect(s.domainTypesVacated).toBe(1354);
+    expect(s.domainTypesVacated).toBe(1351);
   });
 
   it("agrees at revealAfter = 0 and diverges at revealAfter > 0", () => {
@@ -1087,4 +1096,155 @@ describe("the invariance theorem under mint = 'swap' (SC-703 / §5.2a)", () => {
     const atOne = new Set([...vmap.domain].map((t) => transformWord(t, vmap, full).toLowerCase()));
     expect(atOne.size).toBe(vmap.domain.size);
   });
+});
+
+
+// --- §2.2 test 1: the closed class is never split open ---------------------------------
+
+describe("§2.2 test 1: the suffix splitter must not break the closed class open", () => {
+  const keep = effectiveKeepSet();
+
+  it("names the seven function words the splitter opens, and refuses all of them", () => {
+    const splitOpen = [...FUNCTION_WORDS]
+      .filter((w) => isEligible(stemAndSuffix(w)[0], keep))
+      .sort();
+    expect(splitOpen).toEqual(["after", "always", "does", "during", "having", "this", "unless"]);
+    for (const w of splitOpen) {
+      expect(isEligible(stemAndSuffix(w)[0], keep), w).toBe(true); // test 2 alone passes it
+      expect(isVacatable(w, keep), w).toBe(false); // test 1 stops it
+    }
+    expect(stemAndSuffix("after")).toEqual(["aft", "er"]);
+    expect(stemAndSuffix("this")).toEqual(["thi", "s"]);
+  });
+
+  it("leaves every function-word token character-identical under both mints", () => {
+    const before = tokenize(CORPUS);
+    for (const mint of ["nonce", "swap"] as const) {
+      const ps = params({ p: 1, seed: 0, mint });
+      const vmap = mint === "swap" ? swapMapFor(0) : mapFor(0);
+      const after = tokenize(vacateText(CORPUS, vmap, ps));
+      expect(after.length).toBe(before.length);
+      const moved = before.filter(
+        (b, i) => FUNCTION_WORDS.has(b.toLowerCase()) && after[i] !== b,
+      );
+      expect(moved, mint).toEqual([]);
+    }
+  });
+});
+
+// --- §8.3: every swap form is a REAL word ----------------------------------------------
+
+describe("§8.3: every swap form is a real word of the domain", () => {
+  it("emits no form outside the domain, at either seed, at p = 0.5 and p = 1", () => {
+    for (const seed of SEEDS) {
+      const vmap = swapMapFor(seed);
+      for (const p of [0.5, 1]) {
+        const ps = params({ p, seed, mint: "swap" });
+        const before = tokenize(CORPUS);
+        const after = tokenize(vacateText(CORPUS, vmap, ps));
+        const unreal = new Set<string>();
+        for (let i = 0; i < before.length; i++) {
+          const image = after[i].toLowerCase();
+          if (after[i] !== before[i] && !vmap.domain.has(image)) unreal.add(image);
+        }
+        expect([...unreal].sort(), `seed ${seed} p ${p}`).toEqual([]);
+      }
+    }
+  });
+
+  it("keeps the inflection: the image is drawn from the same suffix class", () => {
+    const vmap = swapMapFor(0);
+    const wrongClass: string[] = [];
+    for (const [t, image] of vmap.mapping) {
+      if (stemAndSuffix(t)[1] !== stemAndSuffix(image)[1]) wrongClass.push(`${t} -> ${image}`);
+    }
+    expect(wrongClass).toEqual([]);
+    // The words the red team quoted: `jumped -> wented`, `leaping -> thying`, `huffed ->
+    // sacksed`, `November -> huffeder` before the fix. All real, all still inflected now.
+    const ps = params({ p: 1, seed: 0, mint: "swap" });
+    for (const word of ["jumped", "leaping", "huffed", "november"]) {
+      const image = transformWord(word, vmap, ps).toLowerCase();
+      expect(vmap.domain.has(image), `${word} -> ${image}`).toBe(true);
+      expect(stemAndSuffix(image)[1], `${word} -> ${image}`).toBe(stemAndSuffix(word)[1]);
+    }
+  });
+
+  it("refuses a swap class that cannot be permuted rather than leaving a fixed point", () => {
+    const keep = effectiveKeepSet();
+    expect([...swapPools(["cat", "dog"], new Map([["cat", 2], ["dog", 1]]), keep).keys()]).toEqual([
+      "",
+    ]);
+    expect(() =>
+      buildVacancyMap(["cat"], params({ mint: "swap" }), new Map([["cat", 1]])),
+    ).toThrow(/cannot be permuted/);
+  });
+});
+
+// --- §4: the seed's domain --------------------------------------------------------------
+
+describe("§4: the seed is bounded to the integers JavaScript represents exactly", () => {
+  it("accepts up to 2**53 - 1 and refuses beyond it, in params and in u", () => {
+    expect(MAX_SEED).toBe(2 ** 53 - 1);
+    expect(String(MAX_SEED)).toBe("9007199254740991");
+    for (const seed of [0, 7, -7, MAX_SEED, -MAX_SEED]) {
+      expect(vacancyU("little", seed)).toBeGreaterThanOrEqual(0);
+      expect(vacancyU("little", seed)).toBeLessThan(1);
+      expect(vacancyParams({ seed }).seed).toBe(seed);
+    }
+    // 2**53 + 1 is the first integer JS cannot write back as itself: it stringifies as
+    // "9007199254740992", so Python would hash a string JavaScript can never produce.
+    expect(String(2 ** 53 + 1)).toBe("9007199254740992");
+    for (const seed of [MAX_SEED + 1, -(MAX_SEED + 1), 2 ** 53 + 1, 12345678901234567890]) {
+      expect(() => vacancyParams({ seed })).toThrow(/seed must be an integer/);
+      expect(() => vacancyU("little", seed)).toThrow(/seed must be an integer/);
+    }
+  });
+});
+
+// --- §5.2a: the collision count, with its counting definition ---------------------------
+
+describe("§5.2a: swap's lost image slots, measured under one stated definition", () => {
+  const expected: Record<number, Record<string, number>> = {
+    0: { "0": 0, "0.25": 349, "0.5": 484, "0.75": 364, "1": 0 },
+    7: { "0": 0, "0.25": 336, "0.5": 475, "0.75": 372, "1": 0 },
+  };
+  for (const seed of SEEDS) {
+    it(`seed ${seed}: |domain| - |image| is Python's number at every p`, () => {
+      const vmap = swapMapFor(seed);
+      expect(vmap.domain.size).toBe(2233);
+      for (const [key, lost] of Object.entries(expected[seed])) {
+        const p = Number(key);
+        const ps = params({ p, seed, mint: "swap" });
+        const images = new Set(
+          [...vmap.domain].map((t) => transformWord(t, vmap, ps).toLowerCase()),
+        );
+        expect(vmap.domain.size - images.size, `p = ${p}`).toBe(lost);
+      }
+    });
+  }
+});
+
+// --- §10: one rule for domainTypesVacated ----------------------------------------------
+
+describe("§10: domainTypesVacated is map membership, under both mints", () => {
+  const keep = effectiveKeepSet();
+  for (const mint of ["nonce", "swap"] as const) {
+    it(`${mint}: membership and image-differs read the same number at every p`, () => {
+      const vmap = mint === "swap" ? swapMapFor(0) : mapFor(0);
+      for (const p of P_GRID) {
+        const ps = params({ p, seed: 0, mint });
+        const stats = vacancyStats(CORPUS, vacateText(CORPUS, vmap, ps), vmap, ps);
+        let byMembership = 0;
+        let byImage = 0;
+        for (const t of vmap.domain) {
+          if (!isVacatable(t, keep)) continue;
+          if (!(vacancyU(stemAndSuffix(t)[0], 0) < p)) continue;
+          byMembership++;
+          if (transformWord(t, vmap, ps).toLowerCase() !== t) byImage++;
+        }
+        expect(stats.domainTypesVacated, `${mint} p ${p}`).toBe(byMembership);
+        expect(byImage, `${mint} p ${p}`).toBe(byMembership);
+      }
+    });
+  }
 });

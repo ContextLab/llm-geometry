@@ -722,12 +722,12 @@ def test_vacancy_reports_every_statistic_the_contract_names() -> None:
     }
     # The measured numbers of §10 on the shipped corpus, at full vacancy.
     assert stats["domainTypesTotal"] == 2233
-    assert stats["domainTypesEligible"] == 1944
+    assert stats["domainTypesEligible"] == 1940
     assert stats["corpusTypesTotal"] == 2211
-    assert stats["corpusTypesEligible"] == 1922
-    assert stats["corpusTypesVacated"] == 1922
-    assert stats["tokensVacated"] == 8202
-    assert stats["stemsTotal"] == 1680
+    assert stats["corpusTypesEligible"] == 1918
+    assert stats["corpusTypesVacated"] == 1918
+    assert stats["tokensVacated"] == 8125
+    assert stats["stemsTotal"] == 1676
     # Identities, not observations: `u ∈ [0, 1)`, so p = 1 vacates everything eligible.
     assert stats["stemsVacated"] == stats["stemsTotal"]
     assert stats["domainTypesVacated"] == stats["domainTypesEligible"]
@@ -748,9 +748,9 @@ def test_vacancy_reports_the_measured_remint_at_seed_7() -> None:
     payload = _vacancy(p=1.0, seed=7)
     assert payload["remint_rounds"] == 1
     assert payload["bijective"] is True
-    # The transform is unharmed by it: the same 1 922 types and 8 202 tokens move.
-    assert payload["vacancy_stats"]["corpusTypesVacated"] == 1922
-    assert payload["vacancy_stats"]["tokensVacated"] == 8202
+    # The transform is unharmed by it: the same 1 918 types and 8 125 tokens move.
+    assert payload["vacancy_stats"]["corpusTypesVacated"] == 1918
+    assert payload["vacancy_stats"]["tokensVacated"] == 8125
 
 
 def test_vacancy_returns_an_excerpt_and_a_digest_rather_than_the_corpus() -> None:

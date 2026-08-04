@@ -29,6 +29,7 @@ from llm_geometry.lex.corpus import load_corpus_text
 from llm_geometry.lex.dolch import DOLCH_ORDER, dolch_budget
 from llm_geometry.lex.vacancy import (
     FUNCTION_WORDS,
+    MAX_SEED,
     REMINT_SALT_STRIDE,
     SPLIT_EXCEPTIONS,
     STRESS_TABLE,
@@ -38,11 +39,13 @@ from llm_geometry.lex.vacancy import (
     _mint,  # private: the salt semantics of §5.5/§5.8 are a contract detail, so they are pinned
     build_vacancy_map,
     is_eligible,
+    is_vacatable,
     map_vocab_words,
     meter_score,
     stem_and_suffix,
     stress,
     stress_source,
+    swap_pools,
     syllables,
     type_counts,
     vacancy_domain,
@@ -228,7 +231,7 @@ def test_nesting_across_p_grid_and_two_seeds(corpus, vacated):
 def test_vacancy_rate_tracks_p(corpus, corpus_types, vacated):
     """`p` is the fraction of ELIGIBLE TYPES vacated, so the measured rate should sit close
     to `p` — this is a distributional check on `u`, not a re-implementation of it."""
-    eligible = {t for t in corpus_types if is_eligible(stem_and_suffix(t)[0])}
+    eligible = {t for t in corpus_types if is_vacatable(t)}
     for seed in SEEDS:
         for p in (0.25, 0.5, 0.75):
             rate = len(_changed_types(corpus, vacated[(seed, p)])) / len(eligible)
@@ -545,7 +548,7 @@ def test_p_zero_is_the_identity(corpus, vacated):
 
 
 def test_p_one_vacates_every_eligible_type(corpus, corpus_types, vacated):
-    eligible = {t for t in corpus_types if is_eligible(stem_and_suffix(t)[0])}
+    eligible = {t for t in corpus_types if is_vacatable(t)}
     for seed in SEEDS:
         assert _changed_types(corpus, vacated[(seed, 1.0)]) == eligible
 
@@ -580,7 +583,7 @@ def test_map_vocab_words_preserves_order(budget, maps):
     words = map_vocab_words(budget, maps[0], params)
     assert len(words) == len(budget)
     for src, out in zip(budget, words):
-        if is_eligible(stem_and_suffix(src)[0]):
+        if is_vacatable(src):
             assert out != src
         else:
             assert out == src
@@ -684,7 +687,7 @@ def test_condition_b_applies_to_the_per_occurrence_path_too(corpus, maps):
     map and NOT on the `consistent=False` minting path. The gap is observable: at seed 7,
     `p = 1`, the stem `tak` (of `taking`) minted the nonce `tak`, so `Taking -> Taking` and
     one token silently failed to vacate. `corpus_types_vacated` read 1921 against the
-    consistent path's 1922 and `tokens_vacated` 8201 against 8202.
+    consistent path's 1918 and `tokens_vacated` one short of 8125.
 
     §7.1 denies this control a STABILITY property — that is about a nonce being reused
     across occurrences — and it does not license a word surviving the transform. A control
@@ -704,13 +707,14 @@ def test_condition_b_applies_to_the_per_occurrence_path_too(corpus, maps):
         stats = vacancy_stats(corpus, text, vmap, params)
         # At `p = 1` every eligible type vacates (§10) — in this control exactly as in the
         # mapped condition, which is the whole claim.
-        assert stats["corpusTypesVacated"] == stats["corpusTypesEligible"] == 1922, seed
-        assert stats["tokensVacated"] == 8202, seed
+        # 1918 / 8125, not 1922 / 8202: §2.2's whole-word test stopped the suffix splitter
+        # breaking `after`, `this`, `does` and `always` out of the closed class.
+        assert stats["corpusTypesVacated"] == stats["corpusTypesEligible"] == 1918, seed
+        assert stats["tokensVacated"] == 8125, seed
 
         # No token survives the transform, and none survives as itself least of all.
         for src, out in zip(WORD_RE.findall(corpus), WORD_RE.findall(text)):
-            stem = stem_and_suffix(src)[0]
-            if is_eligible(stem):
+            if is_vacatable(src):
                 assert out.lower() != src.lower(), (seed, src)
 
     # And the mechanism, directly: forbidding the stem is not implied by forbidding the
@@ -727,7 +731,7 @@ def test_reveal_after_keeps_the_first_n_occurrences(corpus, maps):
     seen: dict[str, int] = {}
     for b, a in zip(before, after):
         stem = stem_and_suffix(b)[0]
-        if not is_eligible(stem):
+        if not is_vacatable(b):
             continue
         key = stem.lower()
         seen[key] = seen.get(key, 0) + 1
@@ -838,7 +842,7 @@ def test_the_three_way_stress_split_sums_to_one_on_each_side(corpus, maps, vacat
 
 
 def test_stats_are_measured_not_asserted(corpus, corpus_types, maps, vacated):
-    eligible = {t for t in corpus_types if is_eligible(stem_and_suffix(t)[0])}
+    eligible = {t for t in corpus_types if is_vacatable(t)}
     for seed in SEEDS:
         previous = -1
         for p in P_GRID:
@@ -847,7 +851,7 @@ def test_stats_are_measured_not_asserted(corpus, corpus_types, maps, vacated):
             assert stats["corpusTypesTotal"] == len(set(tokenize(corpus)))
             assert stats["corpusTypesEligible"] == len(eligible)
             assert stats["domainTypesTotal"] == len(maps[seed].domain)
-            assert stats["stemsTotal"] == len(maps[seed].mapping)
+            assert stats["stemsTotal"] == len(maps[seed].stems)
             assert stats["tokensTotal"] == len(tokenize(corpus))
             assert stats["corpusTypesVacated"] <= stats["corpusTypesEligible"]
             assert stats["corpusTypesVacated"] > previous  # strictly graded in p
@@ -864,8 +868,8 @@ def test_corpus_types_vacated_is_measured_from_the_texts_not_from_map_membership
 
     Under `reveal_after` the two readings diverge sharply: a type whose every occurrence falls
     inside the reveal window is still in the map and still has `u(stem) < p`, so asking the map
-    over-reports roughly 2x. The panel would then tell a reader that 1337 types are vacant in a
-    text where 665 of them are printed in plain English.
+    over-reports roughly 2x. The panel would then tell a reader that 1334 types are vacant in a
+    text where 663 of them are printed in plain English.
     """
     params = VacancyParams(p=0.7, seed=0, reveal_after=2)
     text = vacate_text(corpus, maps[0], params)
@@ -876,12 +880,11 @@ def test_corpus_types_vacated_is_measured_from_the_texts_not_from_map_membership
         {
             t
             for t in set(tokenize(corpus))
-            if is_eligible(stem_and_suffix(t)[0])
-            and vacancy_u(stem_and_suffix(t)[0], params.seed) < params.p
+            if is_vacatable(t) and vacancy_u(stem_and_suffix(t)[0], params.seed) < params.p
         }
     )
-    assert stats["corpusTypesVacated"] == measured == 665
-    assert by_membership == 1337  # the map-membership reading, over-reporting 2.01x
+    assert stats["corpusTypesVacated"] == measured == 663
+    assert by_membership == 1334  # the map-membership reading, over-reporting 2.01x
     # Every type the two readings disagree about really is still English in the output.
     unchanged = {w for w, surfaces in _images(corpus, text).items() if surfaces == {w}}
     assert len(unchanged & {t.lower() for t in tokenize(corpus)}) >= by_membership - measured
@@ -904,17 +907,17 @@ def test_the_two_counting_scopes_and_their_identities(corpus, corpus_types, maps
     in what the panel shows a reader would inflate the vacancy rate they are being shown;
     leaving them out of the diagnostic would misstate what the map covers. Hence both.
     """
-    eligible = {t for t in corpus_types if is_eligible(stem_and_suffix(t)[0])}
+    eligible = {t for t in corpus_types if is_vacatable(t)}
     for seed in SEEDS:
         for p in P_GRID:
             params = VacancyParams(p=p, seed=seed)
             s = vacancy_stats(corpus, vacated[(seed, p)], maps[seed], params)
             assert s["domainTypesTotal"] == 2233
-            assert s["domainTypesEligible"] == 1944
+            assert s["domainTypesEligible"] == 1940
             assert s["corpusTypesTotal"] == 2211
-            assert s["corpusTypesEligible"] == 1922
+            assert s["corpusTypesEligible"] == 1918
             assert s["domainTypesEligible"] == s["corpusTypesEligible"] + 22
-            assert s["stemsTotal"] == 1680 <= s["domainTypesEligible"]
+            assert s["stemsTotal"] == 1676 <= s["domainTypesEligible"]
             assert s["domainTypesVacated"] >= s["corpusTypesVacated"]
             if p == 1.0:
                 # `u` lands in [0, 1), so at p = 1 every eligible stem vacates.
@@ -927,8 +930,8 @@ def test_both_scopes_reproduce_the_numbers_the_typescript_stack_measured(corpus,
     """Cross-stack parity, pinned as data. These are the sequences the TS side reported; if
     either stack's counting drifts, this is where it shows up."""
     expected = {
-        0: {"corpus": [0, 461, 954, 1430, 1922], "domain": [0, 469, 966, 1448, 1944]},
-        7: {"corpus": [0, 434, 975, 1440, 1922], "domain": [0, 440, 985, 1455, 1944]},
+        0: {"corpus": [0, 461, 951, 1427, 1918], "domain": [0, 469, 963, 1445, 1940]},
+        7: {"corpus": [0, 433, 972, 1436, 1918], "domain": [0, 439, 982, 1451, 1940]},
     }
     for seed in SEEDS:
         stats = [
@@ -937,7 +940,7 @@ def test_both_scopes_reproduce_the_numbers_the_typescript_stack_measured(corpus,
         ]
         assert [s["corpusTypesVacated"] for s in stats] == expected[seed]["corpus"]
         assert [s["domainTypesVacated"] for s in stats] == expected[seed]["domain"]
-        assert [s["tokensVacated"] for s in stats][-1] == 8202
+        assert [s["tokensVacated"] for s in stats][-1] == 8125
 
 
 def test_prosody_survives_full_vacancy(corpus, maps, vacated):
@@ -1059,7 +1062,7 @@ def test_swap_needs_the_frequency_counts_and_says_so(domain):
 
 
 def test_swap_refuses_the_inconsistent_control(domain):
-    """1680 open-class stems against 8202 vacated tokens — there is no supply (§8.3)."""
+    """1676 open-class stems against 8125 vacated tokens — there is no supply (§8.3)."""
     with pytest.raises(InvalidParamError):
         VacancyParams(mint="swap", consistent=False)
 
@@ -1166,12 +1169,12 @@ def test_swap_honours_match_prosody(domain, counts, swap_maps):
     """`matchProsody` is a real filter under swap, and — unlike minting — it is a filter over
     a FINITE pool, so it cannot always be honoured.
 
-    Measured at seed 0: 1586 of 1680 stems get a stress-matched real word, i.e. 94.4 %. The
-    other 94 exhaust the 1024 attempts of :data:`SWAP_RELAX_PROSODY` because their pattern is
-    rare in the corpus and the few words carrying it are already used — the relaxation of
-    §5.5, applied to a pool that can genuinely run out. Minting has no such limit, which is
-    exactly the difference between inventing a form and borrowing one, so the bound here is
-    the measurement rather than a claim of exactness.
+    Measured at seed 0: 1918 of 1940 types get a stress-matched real word, i.e. 98.9 %. The
+    other 22 fall through to the deterministic completion of §8.3 stage 2 because their
+    pattern is rare inside their own suffix class and the few words carrying it are already
+    used — the relaxation of §5.5, applied to a pool that can genuinely run out. Minting has
+    no such limit, which is exactly the difference between inventing a form and borrowing
+    one, so the bound here is the measurement rather than a claim of exactness.
     """
     matched = swap_maps[0].mapping
     hits = sum(1 for stem, word in matched.items() if stress(word) == stress(stem))
@@ -1258,3 +1261,197 @@ def test_sc703_over_the_full_grid_for_both_mint_strategies(corpus, domain, count
 
     assert (passed["nonce"], refused["nonce"]) == (120, 0)
     assert (passed["swap"], refused["swap"]) == (48, 72)
+
+
+# --- §2.2 test 1: the closed class is never split open ----------------------------------
+
+
+def test_the_suffix_splitter_breaks_function_words_open_and_test_1_stops_it():
+    """The defect `is_vacatable` exists for, at the level of the two predicates.
+
+    `stem_and_suffix` is a spelling heuristic, so it splits seven function words into stems
+    that are not function words. The stem-level test therefore passes them, and before the
+    whole-word test was applied they were vacated: at seed 0 `after` came out as `kitser`.
+    """
+    split_open = sorted(w for w in FUNCTION_WORDS if is_eligible(stem_and_suffix(w)[0]))
+    assert split_open == ["after", "always", "does", "during", "having", "this", "unless"]
+    for word in split_open:
+        assert is_eligible(stem_and_suffix(word)[0]) is True, word  # test 2 alone passes it
+        assert is_vacatable(word) is False, word  # test 1 stops it
+    assert stem_and_suffix("after") == ("aft", "er")
+    assert stem_and_suffix("this") == ("thi", "s")
+
+
+def test_the_closed_class_survives_the_transform_under_both_mints(corpus, domain, counts):
+    """§0's claim, checked on the text: every function-word TOKEN is character-identical.
+
+    Both strategies, at full vacancy, where nothing eligible is left standing — so any
+    function word that moved, moved because the transform was allowed to touch it.
+    """
+    before = WORD_RE.findall(corpus)
+    for mint in ("nonce", "swap"):
+        params = VacancyParams(p=1.0, seed=0, mint=mint)
+        vmap = build_vacancy_map(domain, params, counts)
+        after = WORD_RE.findall(vacate_text(corpus, vmap, params))
+        assert len(before) == len(after)
+        moved = sorted({b for b, a in zip(before, after) if b.lower() in FUNCTION_WORDS and a != b})
+        assert moved == [], (mint, moved[:10])
+
+
+# --- §8.3: every swap form is a REAL word -----------------------------------------------
+
+
+def test_every_swap_form_is_a_real_word_of_the_domain(corpus, domain, counts):
+    """The control's defining property, on the real text: *every form known*.
+
+    The first implementation drew a replacement for the STEM and re-attached the SOURCE
+    word's suffix, so the pool's own inflected types produced forms that are not words:
+    `jumped -> wented`, `leaping -> thying`, `huffed -> sacksed`, `after -> kitser`,
+    `November -> huffeder`. Measured over the six shipped Architecture passages at
+    `p = 1, seed = 0`, 165 of 776 vacated words (21.3 %) were not words of their own domain.
+    The map now runs type -> type inside one suffix class, so the image IS a domain type.
+    """
+    for seed in SEEDS:
+        vmap = build_vacancy_map(domain, VacancyParams(p=1.0, seed=seed, mint="swap"), counts)
+        for p in (0.5, 1.0):
+            params = VacancyParams(p=p, seed=seed, mint="swap")
+            before = WORD_RE.findall(corpus)
+            after = WORD_RE.findall(vacate_text(corpus, vmap, params))
+            unreal = sorted(
+                {
+                    a.lower()
+                    for b, a in zip(before, after)
+                    if a != b and a.lower() not in vmap.domain
+                }
+            )
+            assert unreal == [], (seed, p, unreal[:10])
+
+
+def test_a_swap_replacement_keeps_the_inflection_of_the_word_it_replaces(domain, counts):
+    """§8.3: the image is drawn from the SAME suffix class, so `-ed` replaces `-ed`.
+
+    That is what keeps the swap arm's morphology as parseable as the nonce arm's — the two
+    variants must differ in the lexicon, not in how much syntax survives.
+    """
+    params = VacancyParams(p=1.0, seed=0, mint="swap")
+    vmap = build_vacancy_map(domain, params, counts)
+    wrong_class = [
+        (t, image)
+        for t, image in vmap.mapping.items()
+        if stem_and_suffix(t)[1] != stem_and_suffix(image)[1]
+    ]
+    assert wrong_class == []
+    # The words the red team quoted, all of them now real and all still inflected.
+    for word in ("jumped", "leaping", "huffed", "november"):
+        image = vmap.apply_word(word, params).lower()
+        assert image in vmap.domain, (word, image)
+        assert stem_and_suffix(image)[1] == stem_and_suffix(word)[1], (word, image)
+
+
+def test_a_swap_class_that_cannot_be_permuted_is_refused():
+    """A class with one member has no non-identity image, and that raises rather than
+    leaving a word where it was. Every non-bare class on a domain this small is a singleton,
+    so they are merged into the bare class (§8.3); the bare class has nothing to merge with.
+    """
+    keep = VacancyParams().keep_set
+    assert set(swap_pools(["cat", "dog"], {"cat": 2, "dog": 1}, keep)) == {""}
+    with pytest.raises(ComputeError, match="cannot be permuted"):
+        build_vacancy_map(["cat"], VacancyParams(mint="swap"), {"cat": 1})
+
+
+def test_a_singleton_suffix_class_is_merged_into_the_bare_class():
+    """The passage-sized case, on real text: most of the six shipped Architecture passages
+    have a suffix class with exactly one member, so §8.3's merge rule is the common path and
+    not a corner. What it must never do is emit a form that is not a domain word.
+    """
+    from llm_geometry.arch.vacancy_score import default_passages
+
+    keep = VacancyParams().keep_set
+    merged = 0
+    for passage in default_passages():
+        tokens = tokenize(passage)
+        dom = vacancy_domain(tokens)
+        counts = type_counts(tokens)
+        classes = {stem_and_suffix(t)[1] for t in dom if is_vacatable(t, keep)}
+        pools = swap_pools(dom, counts, keep)
+        if classes - set(pools):
+            merged += 1
+        params = VacancyParams(p=1.0, seed=0, mint="swap")
+        vmap = build_vacancy_map(dom, params, counts)
+        for t, image in vmap.mapping.items():
+            assert image in vmap.domain, (t, image)
+    assert merged >= 4
+
+
+# --- §4: the seed's domain ---------------------------------------------------------------
+
+
+def test_seed_is_bounded_to_exactly_representable_integers():
+    """Beyond 2**53 Python stringifies the exact integer and JavaScript the rounded double,
+    so the two stacks hash different strings and build different maps — with nothing raised
+    in either. The bound is enforced, not clamped: a clamp would use a seed nobody asked for.
+    """
+    assert MAX_SEED == 2**53 - 1
+    assert str(MAX_SEED) == "9007199254740991"
+    for seed in (0, 7, -7, MAX_SEED, -MAX_SEED):
+        assert 0.0 <= vacancy_u("little", seed) < 1.0
+        assert VacancyParams(seed=seed).seed == seed
+    for seed in (MAX_SEED + 1, -(MAX_SEED + 1), 2**53 + 1, 12345678901234567890):
+        with pytest.raises(InvalidParamError, match="seed must"):
+            VacancyParams(seed=seed)
+        with pytest.raises(InvalidParamError, match="seed must"):
+            vacancy_u("little", seed)
+
+
+# --- §5.2a: the collision count, with its counting definition ----------------------------
+
+
+def test_swap_collisions_at_intermediate_p_are_measured_under_one_definition(swap_maps):
+    """§5.2a's measured claim, with the definition and the seed stated (both were missing).
+
+    LOST IMAGE SLOTS: `|domain| - |{T_p(t) : t in domain}|`, i.e. how many of the domain's
+    2 233 slots the type map at `p` fails to reach. That is the number the panel measures
+    live, and it is the one the contract now quotes.
+    """
+    expected = {
+        0: {0.0: 0, 0.25: 349, 0.5: 484, 0.75: 364, 1.0: 0},
+        7: {0.0: 0, 0.25: 336, 0.5: 475, 0.75: 372, 1.0: 0},
+    }
+    for seed, vmap in swap_maps.items():
+        assert len(vmap.domain) == 2233
+        for p, lost in expected[seed].items():
+            params = VacancyParams(p=p, seed=seed, mint="swap")
+            images = {vmap.apply_word(t, params).lower() for t in vmap.domain}
+            assert len(vmap.domain) - len(images) == lost, (seed, p)
+
+
+# --- §10: one rule for `domainTypesVacated` ----------------------------------------------
+
+
+def test_domain_types_vacated_is_map_membership_under_both_mints(corpus, domain, counts):
+    """§10: one rule, in both stacks — vacatable, and `u(stem) < p`.
+
+    TypeScript additionally required the image to DIFFER from the type. The two readings
+    coincide, because conditions B and B₁ both forbid an image equal to its own source — and
+    that coincidence is asserted here rather than assumed, so a regression in B shows up as a
+    failure of the DEFINITION rather than as two stacks quietly reporting two numbers.
+    """
+    keep = VacancyParams().keep_set
+    for mint in ("nonce", "swap"):
+        vmap = build_vacancy_map(domain, VacancyParams(p=1.0, seed=0, mint=mint), counts)
+        for p in P_GRID:
+            params = VacancyParams(p=p, seed=0, mint=mint)
+            stats = vacancy_stats(corpus, vacate_text(corpus, vmap, params), vmap, params)
+            by_membership = sum(
+                1
+                for t in vmap.domain
+                if is_vacatable(t, keep) and vacancy_u(stem_and_suffix(t)[0], 0) < p
+            )
+            by_image = sum(
+                1
+                for t in vmap.domain
+                if is_vacatable(t, keep)
+                and vacancy_u(stem_and_suffix(t)[0], 0) < p
+                and vmap.apply_word(t, params).lower() != t
+            )
+            assert stats["domainTypesVacated"] == by_membership == by_image, (mint, p)
