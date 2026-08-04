@@ -44,16 +44,44 @@ export interface DatasetFetchResult {
   rows: number;
 }
 
+/**
+ * Statuses worth trying again: the service is up but momentarily unable to answer.
+ * 429 is rate limiting; 5xx is the service failing on its own side. Everything else
+ * (404 unknown dataset, 401/403 gated) is a real answer and must NOT be retried — the
+ * user needs to see it immediately.
+ */
+const TRANSIENT = (status: number): boolean => status === 429 || status >= 500;
+const RETRY_DELAYS_MS = [500, 1500, 4000];
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * GET with retries for transient upstream failures, then FAIL LOUDLY.
+ *
+ * This is a live third-party service and it does go down: CI observed `HTTP 502` here
+ * while every other test passed, and the same run saw the Hub 429-ing the static export.
+ * Retrying is not about CI convenience — a reader who pastes a dataset id during a blip
+ * should get their data, not an error they can do nothing about. Nothing is faked and
+ * nothing is swallowed: after the last attempt the real status is raised.
+ */
 async function getJson(url: string, fetchImpl: typeof fetch): Promise<unknown> {
-  let res: Response;
-  try {
-    res = await fetchImpl(url);
-  } catch (e) {
-    throw computeError(
-      `Could not reach the HuggingFace dataset service: ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
-  if (!res.ok) {
+  let lastDetail = "";
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    let res: Response;
+    try {
+      res = await fetchImpl(url);
+    } catch (e) {
+      // A network-level failure is transient too (dropped connection, DNS blip).
+      lastDetail = e instanceof Error ? e.message : String(e);
+      if (attempt < RETRY_DELAYS_MS.length) {
+        await sleep(RETRY_DELAYS_MS[attempt]);
+        continue;
+      }
+      throw computeError(`Could not reach the HuggingFace dataset service: ${lastDetail}`);
+    }
+
+    if (res.ok) return res.json();
+
     // The service returns a useful `error` string for unknown / gated / not-yet-indexed
     // datasets; surface it rather than a bare status code.
     let detail = `HTTP ${res.status}`;
@@ -63,9 +91,16 @@ async function getJson(url: string, fetchImpl: typeof fetch): Promise<unknown> {
     } catch {
       // non-JSON body — the status is all we have
     }
+
+    if (TRANSIENT(res.status) && attempt < RETRY_DELAYS_MS.length) {
+      lastDetail = detail;
+      await sleep(RETRY_DELAYS_MS[attempt]);
+      continue;
+    }
     throw invalidParamError(`HuggingFace dataset service: ${detail}`);
   }
-  return res.json();
+  // Unreachable: the loop either returns or throws. Kept so the type is honest.
+  throw invalidParamError(`HuggingFace dataset service: ${lastDetail || "unavailable"}`);
 }
 
 /** The config/split pairs a dataset actually exposes. */

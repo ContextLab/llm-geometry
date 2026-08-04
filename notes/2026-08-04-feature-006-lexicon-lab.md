@@ -182,6 +182,49 @@ real PyTorch" — false for a tab that never calls the backend; and the corpus c
 advertised a verification the browser never performed, over the untrimmed file rather than
 the loaded body. The browser now genuinely rehashes what it loaded and refuses a mismatch.
 
+## What shipped broken, and why the tests did not stop it
+
+Worth keeping, because all four failures share one cause and it is not "not enough tests".
+
+**A crash on the DEFAULT configuration reached the live site.** With `steps=400` and
+`sampleEvery=50` the periodic sampler fires at step 400 and the final sample is also
+recorded at step 400; the samples list is keyed by step, so Svelte threw
+`each_key_duplicate` on every default run. Found by training on the deployed site — not by
+any test.
+
+The bug needs `steps % sampleEvery === 0`. The local browser check used 120 steps, the e2e
+test used 30, the unit tests used other non-multiples. Every one was chosen to be FAST, and
+every one accidentally avoided the collision. **The one configuration a visitor actually
+gets was the one nothing exercised.** The e2e test also never asserted the absence of
+console errors during a run, so executing it would still have passed.
+
+**Then CI failed on three tests written against imagined markup:**
+
+1. digit-stripping `lex-budget-size` to read `|V|` — that element is the whole radio
+   *group*, so it returned every option's digits concatenated;
+2. waiting for a radio matching `/frequenc/i` — the label is "corpus top-N", so Playwright
+   waited the full timeout for text that has never existed;
+3. `toContainText("314")` against that same group, which lists EVERY size — so it passed
+   regardless of what was selected. **A test that cannot fail is worse than no test**: it
+   reports coverage it does not provide, and it was green locally.
+
+**And a fourth:** the Lexicon tab was added without updating `shell.spec.ts`, which
+asserted `toHaveCount(3)`. It was doing its job; it broke in the same commit that added the
+tab, and the push happened after running only the Lexicon spec. Adding a tab is exactly the
+change that touches the shell contract.
+
+The common thread: assertions written against what the system was ASSUMED to contain rather
+than what it does — the same error as the `<eos>` divergence (a contract gap) and the
+`+29.3` copied from an agent report without recomputing. What corrected it every time was
+looking: querying the DOM, recomputing the arithmetic, driving the real thing.
+
+Durable changes made in response:
+- the e2e training test uses 100 steps **because** `100 % 50 == 0`, and fails on any
+  `pageerror` or console error during a run;
+- the shell contract asserts tabs by NAME and ORDER, table-driven over every tab so a new
+  one cannot be added without appearing there;
+- assertions read the element that states a number, never a container that includes it.
+
 ## Verification
 
 Backend **336 passed**, ruff + black clean. Frontend **247 passed** (1 skipped),
