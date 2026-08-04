@@ -190,7 +190,15 @@
       {#if matched.size > 0}
         <span class="found">{matched.size} match{matched.size === 1 ? "" : "es"} highlighted{matched.size > 24 ? ", 24 labelled" : ""}.</span>
       {/if}
-      {#if provenance === "untrained"}
+      {#if provenance === "unrecorded" || provenance === "edited-unrecorded"}
+        <span class="untrained">
+          These weights came from a file that does not record whether they were ever
+          trained{provenance === "edited-unrecorded"
+            ? ", and have since been hand-edited"
+            : ""}. The projection is a real projection of them; whether the structure in it
+          was learned is not something this page can tell you.
+        </span>
+      {:else if provenance === "untrained"}
         <span class="untrained">
           Nothing has been trained yet, so this is the projection of a random Gaussian
           matrix — a featureless blob is the correct picture, and a good thing to remember

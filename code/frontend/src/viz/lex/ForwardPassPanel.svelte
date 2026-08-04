@@ -35,14 +35,18 @@
   }
   let { model, vocab, provenance }: Props = $props();
 
-  /** One phrase per state: the trace is real in all four, of a different model in each. */
+  /** One phrase per state: the trace is real in every one, of a different model in each. */
   const sourceHint = $derived(
     {
       trained: "the trained model's own activations, stage by stage",
       untrained: "the untrained model's own activations — real weights, real trace, random patterns",
+      unrecorded:
+        "a loaded model's own activations — real trace, of weights whose history the file did not record",
       "edited-trained": "hand-edited weights' own activations — real trace, not the trained model's",
       "edited-untrained":
         "hand-edited weights over an untrained model — real trace, edited weights, random patterns",
+      "edited-unrecorded":
+        "hand-edited weights over a loaded model — real trace, edited weights, unrecorded history",
     }[provenance],
   );
 
@@ -229,7 +233,16 @@
       would look exactly like a real one.
     </p>
   {:else}
-    {#if provenance === "untrained"}
+    {#if provenance === "unrecorded" || provenance === "edited-unrecorded"}
+      <p class="untrained" data-testid="lex-forward-unrecorded">
+        <b>These weights came from a file that does not record whether they were ever
+        trained.</b> The trace below is a real trace of them{provenance === "edited-unrecorded"
+          ? ", with your weight edits applied"
+          : ""} — the attention maps and the readout
+        are genuinely what these weights compute. Whether that computation is the result of
+        training is not something this page can tell you.
+      </p>
+    {:else if provenance === "untrained"}
       <p class="untrained" data-testid="lex-forward-untrained">
         <b>Nothing has been trained yet.</b> What follows is a real trace of the
         <b>random-init</b> model at this shape — the attention maps and the readout below are

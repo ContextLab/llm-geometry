@@ -64,9 +64,18 @@
      * this tab demonstrates would be false for a reason nothing on screen explained.
      */
     vocabWords: readonly string[] | null;
-    trainedModel: LexModel | null;
-    trainedVocab: LexVocab | null;
-    trainedNote: string;
+    /**
+     * The active BASE model a fine-tune departs from, and the vocabulary its ids mean
+     * something in — or null while the page is on its random initialization.
+     *
+     * Named `base`, not `trained`: it may also be a model read back from a `.llmlex.json`
+     * file, whose own `metrics` block may say it was never trained at all. Fine-tuning it
+     * is legitimate either way; calling it "the trained model" in the code that reads it
+     * would be the same misnaming this tab's `provenance` state exists to prevent.
+     */
+    baseModel: LexModel | null;
+    baseVocab: LexVocab | null;
+    baseNote: string;
     onTrained: (model: LexModel, vocab: LexVocab, note: string) => void;
     onAdoptCorpus: (text: string, label: string) => void;
   }
@@ -77,9 +86,9 @@
     corpusText,
     corpusLabel,
     vocabWords,
-    trainedModel,
-    trainedVocab,
-    trainedNote,
+    baseModel,
+    baseVocab,
+    baseNote,
     onTrained,
     onAdoptCorpus,
   }: Props = $props();
@@ -152,7 +161,7 @@
    * derived from the vocabulary on screen rather than quoted.
    */
   const uniformLoss = $derived(cfg.vocabRows > 1 ? Math.log(cfg.vocabRows) : null);
-  const canFinetune = $derived(trainedModel !== null && trainedVocab !== null);
+  const canFinetune = $derived(baseModel !== null && baseVocab !== null);
   const ready = $derived(cfg.vocabRows > 4 && corpusText.length > 0);
 
   const MODES = [
@@ -333,8 +342,8 @@
    * `model.cfg`, not off the sliders.
    */
   function runFinetune(): void {
-    const model = trainedModel;
-    const vocab = trainedVocab;
+    const model = baseModel;
+    const vocab = baseVocab;
     if (!model || !vocab) return;
     const { vocabRows: _rows, ...dims } = model.cfg;
     runInWorker(
@@ -419,16 +428,16 @@
           class:active={mode === m.id}
           disabled={m.id === "finetune" && !canFinetune}
           title={m.id === "finetune" && !canFinetune
-            ? "Train a model from scratch first — there is nothing to fine-tune yet."
+            ? "Train a model from scratch, or load one from a file, first — there is nothing to fine-tune yet."
             : m.title}
           onclick={() => (mode = m.id as Mode)}
         >{m.label}</button>
       {/each}
     </div>
-    {#if mode === "finetune" && canFinetune && trainedVocab}
+    {#if mode === "finetune" && canFinetune && baseVocab}
       <p class="active-corpus" data-testid="lex-finetune-vocab">
-        keeps the active model's vocabulary: <b>{trainedVocab.budgetSize} words</b>
-        ({trainedVocab.source} {trainedVocab.budgetName}, {trainedVocab.rows} embedding
+        keeps the active model's vocabulary: <b>{baseVocab.budgetSize} words</b>
+        ({baseVocab.source} {baseVocab.budgetName}, {baseVocab.rows} embedding
         rows). Words the new text uses but this budget lacks arrive as
         <code>&lt;unk&gt;</code> — fine-tuning cannot add a word to a budget.
       </p>
@@ -597,8 +606,8 @@
     </div>
   {/if}
 
-  {#if trainedNote}
-    <p class="active-model" data-testid="lex-active-model">active model: {trainedNote}</p>
+  {#if baseNote}
+    <p class="active-model" data-testid="lex-active-model">active model: {baseNote}</p>
   {/if}
 
   <Explain
