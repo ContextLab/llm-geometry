@@ -413,6 +413,15 @@ These were gaps, not choices. Both stacks do it this way or the golden fixture f
   in document order. The `#` is not a legal `WORD_RE` character, so the key can never collide
   with a stem.
 
+  **Condition B applies to the per-occurrence path too.** It was enforced for the map and not
+  for this control, and the gap is observable: at seed 7, `p = 1`, the stem `tak` minted the
+  nonce `tak`, so `Taking → Taking` — a token that silently failed to vacate, leaving
+  `corpusTypesVacated` at 1921 against the consistent path's 1922. §7.1 says this control has no
+  *stability* property, which is about a nonce being reused across occurrences; it does not
+  license a word quietly surviving the transform. A control whose vacancy rate is not actually
+  the stated rate is not a control. So a per-occurrence nonce must equal neither any domain type
+  **nor the stem it replaces**, and the same re-mint loop applies.
+
   **The key feeds the byte stream and the uniqueness check only. The stress pattern comes from
   `stress(stem)`, never from `stress(key)`.** This was under-specified and the two stacks split
   on it: one passed the key into the minter, so the pattern became `stress("little#0") = "10"`
