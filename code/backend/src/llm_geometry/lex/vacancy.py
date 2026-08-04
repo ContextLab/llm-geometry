@@ -23,8 +23,12 @@ original `tiny-seuss/synth/jabberwockify.py` here is one the contract lists in i
 4. The map is built **once over the whole type set in canonical order**, never lazily while
    rewriting. The source's `used` set and give-up counter make a word's nonce depend on `p`
    and on document order, which breaks the stability property the source claims for itself.
-5. `avoid` is actually passed (the corpus type set), so a minted form can never merge with a
-   real English type.
+5. The domain is avoided **implicitly** — there is no caller-supplied `avoid` parameter — so
+   a minted form can never merge with a real English type and the map is a pure function of
+   `(domain, seed, match_prosody)`. The source accepts an `avoid` argument and never passes
+   one; making it optional reproduces the same failure a level up, where the map depends on
+   what the caller remembered (measured: seed 0 gives `remintRounds` 0 with the domain passed
+   and 1 without, with different nonces either way — both valid, which is the problem).
 6. The give-up path is a deterministic salt relaxation, not `syllable + str(len(used))`.
 7. Seams (`wee` + `er`) are repaired from a hash of `(stem, suffix)`, not a shared RNG.
 8. Injectivity is **verified** over assembled surface forms, at every `p`, and re-minted on
@@ -224,6 +228,24 @@ _SEAM_CHARS = "lnrtk"
 
 
 # --- word segmentation ------------------------------------------------------------------
+
+
+def _reject_bare_str(value: object, func: str, param: str) -> None:
+    """Raise if a text was passed where an iterable of TYPES was expected.
+
+    ``Iterable[str]`` happily accepts a ``str`` and iterates it character by character, so
+    ``vacancy_domain(corpus_text)`` silently yields a domain of single letters. That failure
+    surfaces much later and somewhere else — as `stem 'real' is outside the vacancy map's
+    domain` — so it is caught here, at the actual mistake.
+
+    ``TypeError`` rather than :class:`InvalidParamError`: this is a wrong argument TYPE, not a
+    value out of range, and it can never reach an HTTP boundary as a user's fault.
+    """
+    if isinstance(value, str):
+        raise TypeError(
+            f"{func}({param}=...) takes an iterable of word types, not a text; "
+            f"pass tokenize(text) or set(tokenize(text)), not the text itself"
+        )
 
 
 def stem_and_suffix(word: str) -> tuple[str, str]:
@@ -549,6 +571,8 @@ class VacancyParams:
                 f"reveal_after must be >= 0, got {self.reveal_after}",
                 {"reveal_after": self.reveal_after},
             )
+        # Same trap as `vacancy_domain`: `keep="little"` would quietly protect six letters.
+        _reject_bare_str(self.keep, "VacancyParams", "keep")
         for w in self.keep:
             if not isinstance(w, str):
                 raise InvalidParamError(
@@ -599,13 +623,11 @@ class VacancyMap:
     minted_stress: dict[str, str]
     seed: int
     match_prosody: bool
-    #: Lowercased forms a nonce may never take — the corpus type set, so a minted form can
-    #: never silently merge with a real English word.
-    avoid: frozenset[str]
     #: The lowercased domain this map was built over — :func:`vacancy_domain`, i.e. the
-    #: corpus's types plus the full Dolch list. Kept because §10's `domainTypes*` counts are
-    #: over it and it is NOT recoverable from the corpus text: budget-only words have images
-    #: but never appear.
+    #: corpus's types plus the full Dolch list. It is also the set a nonce may never equal,
+    #: so a minted form can never silently merge with a real English word. Kept because §10's
+    #: `domainTypes*` counts are over it and it is NOT recoverable from the corpus text:
+    #: budget-only words have images but never appear.
     domain: frozenset[str]
     #: ``|image|`` of the domain, at full vacancy.
     image_size: int
@@ -664,7 +686,7 @@ class VacancyMap:
                 f"{key}#{seen - 1}",
                 params.seed,
                 params.match_prosody,
-                self.avoid | state.used,
+                self.domain | state.used,
             )
             state.used.add(nonce)
             self.minted_stress.setdefault(nonce, pattern)
@@ -699,24 +721,35 @@ def vacancy_domain(types: Iterable[str]) -> list[str]:
     re-mint the corpus underneath a panel whose whole claim is that nonces are stable. Using
     the full list makes the map a function of `(corpus, seed, match_prosody)` alone.
 
-    Measured: the resulting map is byte-identical across all five Dolch domains anyway,
-    because minting is keyed on `(seed, stem)` and the extra words provoke no new collisions
-    (`test_map_is_identical_across_every_dolch_domain`). That is a property of this corpus's
-    collision structure, not a guarantee — which is exactly why it is pinned and why the
-    domain is fixed here rather than left to each call site to remember.
+    Since the domain is also the set a nonce may not equal (§5.2, no caller-supplied
+    `avoid`), a SMALLER domain genuinely mints differently: measured, building over
+    ``corpus ∪ dolch_budget(name)`` for any name below `full` moves exactly one stem, because
+    `floor` is a full-list Dolch word that never appears in the corpus and so is forbidden in
+    the full domain and free in the smaller ones. Unioning the full list here is what makes
+    that unreachable, so there is only ever one map
+    (`test_the_map_does_not_move_when_the_active_budget_changes`).
+
+    Takes an iterable of TYPES, not a text: see :func:`_reject_bare_str`.
     """
+    _reject_bare_str(types, "vacancy_domain", "types")
     return sorted({t.lower() for t in types} | {w.lower() for w in dolch_budget("full")})
 
 
-def build_vacancy_map(
-    types: Iterable[str], params: VacancyParams, avoid: Iterable[str] = ()
-) -> VacancyMap:
+def build_vacancy_map(types: Iterable[str], params: VacancyParams) -> VacancyMap:
     """Assign every eligible stem a nonce, once, in canonical order (contract §5.2).
 
     `types` is the domain — pass :func:`vacancy_domain(corpus_types)`, which pins it to the
-    corpus's types plus the full Dolch list. `avoid` is the lowercased corpus type set, so a
-    nonce can never collide with a real word — the source accepts an `avoid` parameter and
-    then never passes one, which lets a minted form silently merge with an English type.
+    corpus's types plus the full Dolch list.
+
+    **The domain is avoided implicitly; there is no caller-supplied `avoid` parameter.** With
+    one, the map depends on what the caller remembered to pass: measured, at seed 0 the same
+    corpus and seed give ``remint_rounds`` 0 with the domain passed and 1 without, and
+    different nonces either way. Both maps are valid — that is the problem, because one call
+    site passing it and another not (the panel and the golden fixture, say) is a silent
+    divergence with no failing test. Condition B below already forbids a surface form equal to
+    any domain type, so avoiding the domain at mint time is not extra policy, only the cheaper
+    route to the same fixed point. The map is now a pure function of
+    ``(domain, seed, match_prosody)``.
 
     `p` is deliberately unused: the map is built over ALL eligible stems and restricted to
     ``{u < p}`` at rewrite time. That is what makes nesting and stability structural.
@@ -739,9 +772,9 @@ def build_vacancy_map(
     among those involved — at salt ``1000 * round + previousSalt + 1``, so a re-mint never
     cascades (§5.8).
     """
+    _reject_bare_str(types, "build_vacancy_map", "types")
     keep = params.keep_set
     type_set = {t.lower() for t in types}
-    avoid_set = frozenset(w.lower() for w in avoid)
 
     pairs: list[tuple[str, str]] = []
     stem_set: set[str] = set()
@@ -755,7 +788,8 @@ def build_vacancy_map(
     mapping: dict[str, str] = {}
     minted_stress: dict[str, str] = {}
     salts: dict[str, int] = {}
-    forbidden: set[str] = set(avoid_set)
+    # `forbidden = used ∪ domain` — the domain, always, with nothing left to the caller.
+    forbidden: set[str] = set(type_set)
     for stem in sorted(stem_set):
         nonce, pattern, salt = _mint(stem, params.seed, params.match_prosody, forbidden)
         forbidden.add(nonce)
@@ -789,7 +823,7 @@ def build_vacancy_map(
                 stem,
                 params.seed,
                 params.match_prosody,
-                avoid_set | others,
+                type_set | others,
                 start_salt=REMINT_SALT_STRIDE * rounds + salts[stem] + 1,
             )
             minted_stress.pop(mapping[stem], None)
@@ -803,7 +837,6 @@ def build_vacancy_map(
         minted_stress=minted_stress,
         seed=params.seed,
         match_prosody=params.match_prosody,
-        avoid=avoid_set,
         domain=frozenset(type_set),
         image_size=len(seen),
         bijective=len(seen) == len(type_set),
@@ -840,6 +873,7 @@ def map_vocab_words(words: Sequence[str], vmap: VacancyMap, params: VacancyParam
     REBUILT from the vacated corpus instead — the collapse in coverage is the measurement.
     Calling this there would quietly manufacture a vocabulary that matches no corpus.
     """
+    _reject_bare_str(words, "map_vocab_words", "words")
     if not params.consistent or params.reveal_after:
         raise InvalidParamError(
             "the mapped vocabulary is only defined for consistent=True, reveal_after=0; "

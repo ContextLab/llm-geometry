@@ -78,12 +78,9 @@ def domain(corpus_types: list[str]) -> list[str]:
 
 
 @pytest.fixture(scope="module")
-def maps(domain: list[str], corpus_types: list[str]) -> dict[int, VacancyMap]:
+def maps(domain: list[str]) -> dict[int, VacancyMap]:
     """One map per seed, built once — they are `p`-independent by construction."""
-    return {
-        seed: build_vacancy_map(domain, VacancyParams(p=1.0, seed=seed), avoid=corpus_types)
-        for seed in SEEDS
-    }
+    return {seed: build_vacancy_map(domain, VacancyParams(p=1.0, seed=seed)) for seed in SEEDS}
 
 
 @pytest.fixture(scope="module")
@@ -292,14 +289,14 @@ def test_map_is_unchanged_by_shuffling_the_input_types(domain, corpus_types, map
     """The build order is canonical (sorted), never document order."""
     shuffled = list(domain)
     random.Random(1234).shuffle(shuffled)
-    rebuilt = build_vacancy_map(shuffled, VacancyParams(p=1.0, seed=0), avoid=corpus_types)
+    rebuilt = build_vacancy_map(shuffled, VacancyParams(p=1.0, seed=0))
     assert rebuilt.mapping == maps[0].mapping
     assert rebuilt.minted_stress == maps[0].minted_stress
 
 
 def test_map_does_not_depend_on_p(domain, corpus_types, maps):
     for p in (0.0, 0.35, 1.0):
-        built = build_vacancy_map(domain, VacancyParams(p=p, seed=0), avoid=corpus_types)
+        built = build_vacancy_map(domain, VacancyParams(p=p, seed=0))
         assert built.mapping == maps[0].mapping
 
 
@@ -410,22 +407,79 @@ def test_domain_is_the_corpus_plus_the_full_dolch_list_never_the_active_budget(
     assert domain == sorted(domain)  # canonical order, ASCII ascending
 
 
-def test_map_is_identical_across_every_dolch_domain(corpus_types, maps):
-    """True today by luck of the collision structure, so it is pinned rather than assumed.
+def test_map_is_a_pure_function_of_domain_seed_and_prosody(corpus, corpus_types, domain, maps):
+    """§5.2: there is no caller-supplied `avoid`, so no call path can build a different map.
 
-    Minting is keyed on `(seed, stem)`, and on this corpus the words a smaller Dolch list
-    omits provoke no new collisions — so every budget yields the same assignment. A future
-    change to `avoid`, to the canonical order, or to condition B could break that silently,
-    and the first symptom would be nonces moving when a user changes budget.
+    The parameter existed, defaulted to empty, and both stacks passed the type set — so they
+    agreed and no parity test could catch it. But the map was then a function of what the
+    caller remembered: at seed 0 the same corpus gives `remint_rounds` 0 with the domain
+    passed and 1 without, with different nonces either way. Both maps valid; that is the
+    problem. Here the same map is built through four different call paths.
+    """
+    reference = maps[0].mapping
+    paths = [
+        build_vacancy_map(domain, VacancyParams(p=1.0, seed=0)),
+        build_vacancy_map(vacancy_domain(corpus_types), VacancyParams(p=0.0, seed=0)),
+        build_vacancy_map(vacancy_domain(tokenize(corpus)), VacancyParams(p=0.5, seed=0)),
+        build_vacancy_map(vacancy_domain(set(corpus_types)), VacancyParams(p=1.0, seed=0)),
+    ]
+    for built in paths:
+        assert built.mapping == reference
+        assert built.minted_stress == maps[0].minted_stress
+        assert built.domain == maps[0].domain
+        assert built.remint_rounds == maps[0].remint_rounds
+    # ... and the domain is what a nonce is forbidden to equal, with nothing left to a caller.
+    assert not set(reference.values()) & maps[0].domain
+
+
+def test_iterables_of_types_reject_a_bare_text(corpus, domain, budget, maps):
+    """`Iterable[str]` accepts a `str` and iterates it character by character, so passing the
+    corpus text built a domain of single letters and failed much later, somewhere else."""
+    for call in (
+        lambda: vacancy_domain(corpus),
+        lambda: build_vacancy_map(corpus, VacancyParams(p=1.0, seed=0)),
+        lambda: map_vocab_words(corpus, maps[0], VacancyParams(p=1.0, seed=0)),
+        lambda: VacancyParams(p=1.0, seed=0, keep="little"),
+    ):
+        with pytest.raises(TypeError, match="not a text"):
+            call()
+    # The correct forms still work.
+    assert vacancy_domain(tokenize(corpus)) == domain
+    assert len(map_vocab_words(budget, maps[0], VacancyParams(p=1.0, seed=0))) == len(budget)
+    assert VacancyParams(keep=frozenset({"little"})).keep_set == FUNCTION_WORDS | {"little"}
+
+
+def test_the_map_does_not_move_when_the_active_budget_changes(corpus_types, maps):
+    """The property the panel depends on, and the reason the domain is the FULL Dolch list.
+
+    Once `avoid` became implicit (§5.2), the domain IS the forbidden set — so a *smaller*
+    domain forbids fewer words and genuinely mints differently. Measured: building over
+    `corpus ∪ dolch_budget(name)` for any name below `full` moves exactly one stem, `jam`,
+    because `floor` is a full-list Dolch word that never appears in the corpus and so is
+    forbidden in the full domain and free in the smaller ones.
+
+    That is not a defect, it is the argument: if the domain tracked the ACTIVE budget, a
+    reader switching budgets would watch the corpus re-mint under a panel demonstrating that
+    nonces are stable. `vacancy_domain` unions the full list regardless, so the smaller
+    domains are unreachable through the sanctioned API and there is only ever one map.
     """
     for name in DOLCH_ORDER:
-        extras = {w.lower() for w in dolch_budget(name)}
-        smaller = sorted({t.lower() for t in corpus_types} | extras)
+        assert vacancy_domain(corpus_types) == vacancy_domain(corpus_types + dolch_budget(name))
         for seed in SEEDS:
-            built = build_vacancy_map(smaller, VacancyParams(p=1.0, seed=seed), avoid=corpus_types)
-            assert built.remint_rounds == maps[seed].remint_rounds
-            for stem, nonce in built.mapping.items():
-                assert nonce == maps[seed].mapping[stem], f"{name}/{seed}: {stem} moved"
+            built = build_vacancy_map(
+                vacancy_domain(corpus_types + dolch_budget(name)),
+                VacancyParams(p=1.0, seed=seed),
+            )
+            assert built.mapping == maps[seed].mapping, f"{name}/{seed}: the map moved"
+
+    # The counterexample that makes the rule load-bearing, pinned so it cannot drift silently.
+    assert "floor" in dolch_budget("full")
+    assert "floor" not in corpus_types
+    smaller = sorted({t.lower() for t in corpus_types} | set(dolch_budget("pre_primer")))
+    off_contract = build_vacancy_map(smaller, VacancyParams(p=1.0, seed=0))
+    moved = [s for s, n in off_contract.mapping.items() if maps[0].mapping[s] != n]
+    assert moved == ["jam"]
+    assert off_contract.mapping["jam"] == "floor" != maps[0].mapping["jam"]
 
 
 def test_no_surface_form_is_ever_an_english_word_of_the_domain(corpus, domain, maps, vacated):
@@ -570,7 +624,6 @@ def test_the_control_conditions_all_differ_from_each_other(corpus, maps, vacated
     flat_map = build_vacancy_map(
         vacancy_domain(set(tokenize(corpus))),
         VacancyParams(p=1.0, seed=0, match_prosody=False),
-        avoid=set(tokenize(corpus)),
     )
     flat = vacate_text(corpus, flat_map, VacancyParams(p=1.0, seed=0, match_prosody=False))
     assert flat != baseline
