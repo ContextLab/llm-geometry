@@ -29,21 +29,30 @@ test("is reachable by URL and lands on the Lexicon tab", async ({ page }) => {
 });
 
 test("coverage is measured and shown BEFORE any training (US-1)", async ({ page }) => {
-  const size = page.getByTestId("lex-budget-size");
   const rows = page.getByTestId("lex-budget-rows");
-  await expect(size).toBeVisible();
+  await expect(page.getByTestId("lex-budget-size")).toBeVisible();
   await expect(rows).toBeVisible();
 
-  // |V| is the word count; rows adds the four specials. Conflating them was a real bug
+  // |V| is the word count; rows adds the four specials. Conflating them was a real defect
   // in the source project, so the tab must keep them distinct.
-  const sizeN = Number((await size.innerText()).replace(/\D+/g, ""));
-  const rowsN = Number((await rows.innerText()).replace(/\D+/g, ""));
-  expect(rowsN - sizeN).toBe(4);
+  //
+  // Parse the sentence that states BOTH, rather than stripping digits out of an element:
+  // `lex-budget-size` is the whole radio GROUP ("pre-primer 40 … full list 314"), so
+  // digit-stripping it yields a concatenation of every option. An earlier version of this
+  // test did exactly that and failed in CI.
+  const m = (await rows.innerText()).match(/\|V\|\s*=\s*([\d,]+)\s*words.*?([\d,]+)\s*embedding rows/s);
+  expect(m, `could not parse budget rows from: ${await rows.innerText()}`).not.toBeNull();
+  const num = (s: string) => Number(s.replace(/,/g, ""));
+  expect(num(m![2]) - num(m![1])).toBe(4);
 
   for (const id of ["lex-coverage-tokens", "lex-coverage-unk", "lex-coverage-lines"]) {
     await expect(page.getByTestId(id)).toBeVisible();
     await expect(page.getByTestId(id)).not.toHaveText("");
   }
+  // These are percentages and a ratio, not placeholders.
+  await expect(page.getByTestId("lex-coverage-tokens")).toHaveText(/^\d+(\.\d+)?%$/);
+  await expect(page.getByTestId("lex-coverage-unk")).toHaveText(/^\d+(\.\d+)?%$/);
+  await expect(page.getByTestId("lex-coverage-lines")).toHaveText(/^[\d,]+ \/ [\d,]+$/);
 });
 
 test("the Dolch budget tops out at 314, not the widely-cited 315", async ({ page }) => {
@@ -51,8 +60,16 @@ test("the Dolch budget tops out at 314, not the widely-cited 315", async ({ page
   // and silently had a 314-word "315" budget. If this ever reads 315 again, either the
   // entry came back or the count stopped being measured from the data.
   await page.getByTestId("lex-budget-source").getByRole("radio", { name: /dolch/i }).click();
-  await page.getByTestId("lex-budget").getByRole("radio").last().click();
-  await expect(page.getByTestId("lex-budget-size")).toContainText("314");
+  // The largest budget's radio is labelled "full list, 314 words".
+  const largest = page.getByTestId("lex-budget-size").getByRole("radio").last();
+  await largest.click();
+  await expect(largest).toHaveAttribute("aria-checked", "true");
+
+  // Assert on the sentence that states the count, not on the radio group — the group
+  // lists EVERY size, so `toContainText("314")` there passes no matter what is selected.
+  await expect(page.getByTestId("lex-budget-rows")).toContainText("|V| = 314 words");
+  await expect(page.getByTestId("lex-budget-rows")).toContainText("318 embedding rows");
+  await expect(page.getByTestId("lex-budget-rows")).not.toContainText("315");
 });
 
 test("switching the budget SOURCE at matched |V| changes coverage (US-3, SC-603)", async ({
@@ -60,17 +77,31 @@ test("switching the budget SOURCE at matched |V| changes coverage (US-3, SC-603)
 }) => {
   const source = page.getByTestId("lex-budget-source");
   const tokens = page.getByTestId("lex-coverage-tokens");
+  const rows = page.getByTestId("lex-budget-rows");
 
-  await source.getByRole("radio", { name: /dolch/i }).click();
-  const dolchSize = await page.getByTestId("lex-budget-size").innerText();
+  // The two options are labelled "Dolch (1936)" and "corpus top-N" — NOT "frequency".
+  // An earlier version of this test waited for /frequenc/i and timed out against text
+  // that never existed. Match the radios positionally-by-name as they actually read.
+  const dolchRadio = source.getByRole("radio", { name: /dolch/i });
+  const freqRadio = source.getByRole("radio", { name: /corpus top-N/i });
+  await expect(dolchRadio).toBeVisible();
+  await expect(freqRadio).toBeVisible();
+
+  const vOf = async () =>
+    (await rows.innerText()).match(/\|V\|\s*=\s*([\d,]+)\s*words/)?.[1] ?? null;
+
+  await dolchRadio.click();
+  await expect(dolchRadio).toHaveAttribute("aria-checked", "true");
+  const dolchV = await vOf();
   const dolchCoverage = await tokens.innerText();
 
-  await source.getByRole("radio", { name: /frequenc/i }).click();
-  const freqSize = await page.getByTestId("lex-budget-size").innerText();
+  await freqRadio.click();
+  await expect(freqRadio).toHaveAttribute("aria-checked", "true");
+  const freqV = await vOf();
   const freqCoverage = await tokens.innerText();
 
   // Same number of words...
-  expect(freqSize).toBe(dolchSize);
+  expect(freqV).toBe(dolchV);
   // ...different words, so measurably different coverage. If these ever match, the
   // comparison the tab invites is not the comparison it is making.
   expect(freqCoverage).not.toBe(dolchCoverage);
@@ -114,9 +145,20 @@ test("the token cloud is labelled a PCA projection, not a native embedding (FR-6
 test("trains a real model: loss falls and generated words are all in budget", async ({ page }) => {
   test.setTimeout(240_000);
 
+  // Any client-side exception during a run is a failure, not noise. A duplicate-key crash
+  // shipped to the live site because nothing here was watching.
+  const consoleErrors: string[] = [];
+  page.on("pageerror", (e) => consoleErrors.push(String(e)));
+  page.on("console", (m) => {
+    if (m.type() === "error") consoleErrors.push(m.text());
+  });
+
   // Smallest honest configuration, so the loop is exercised without a long wait.
   await page.getByTestId("lex-dmodel").getByRole("radio", { name: "16" }).click();
-  await page.getByTestId("lex-steps").fill("30");
+  // MUST be a multiple of the default sampleEvery (50): the periodic sampler and the
+  // final sample then both land on the last step. That collision is what produced
+  // `each_key_duplicate` on the deployed site, and a step count like 30 hides it.
+  await page.getByTestId("lex-steps").fill("100");
 
   await page.getByTestId("lex-train-run").click();
 
@@ -141,7 +183,18 @@ test("trains a real model: loss falls and generated words are all in budget", as
   // special token leaking through.
   const out = await page.getByTestId("lex-output").innerText();
   expect(out.trim().length).toBeGreaterThan(0);
-  expect(out).not.toMatch(/<unk>|<bos>|<pad>/);
+
+  // The caption legitimately NAMES the masked specials, so scope this to the generated
+  // text rather than the whole panel — checking the panel gives a false positive.
+  const genOnly = await page
+    .getByTestId("lex-output")
+    .locator(".gen, .text, pre, p")
+    .first()
+    .innerText();
+  expect(genOnly).not.toMatch(/<unk>|<bos>|<pad>/);
+
+  expect(consoleErrors, `client-side errors during training: ${consoleErrors.join(" | ")}`)
+    .toEqual([]);
 });
 
 test("no horizontal page overflow at 390px", async ({ page }) => {

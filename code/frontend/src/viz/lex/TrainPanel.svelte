@@ -253,7 +253,15 @@
           nTokens: msg.nTokens,
           elapsedMs,
         };
-        samples = [{ step: steps, text: msg.sample.text }, ...samples].slice(0, 6);
+        // The final sample lands on the last step, which the periodic sampler has ALREADY
+        // emitted whenever `steps % sampleEvery === 0` — true of the defaults (400 / 50).
+        // Keying the list by step then produced two entries with the same key and Svelte
+        // threw `each_key_duplicate` on the live site. The final sample supersedes the
+        // periodic one for that step rather than joining it.
+        samples = [
+          { step: steps, text: msg.sample.text },
+          ...samples.filter((s) => s.step !== steps),
+        ].slice(0, 6);
         // The vocabulary comes back FROM the worker — the one it actually encoded and
         // trained against — so the model and its word list are written together.
         onTrained(

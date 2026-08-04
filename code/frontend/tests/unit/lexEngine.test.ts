@@ -1120,3 +1120,38 @@ describe("fine-tuning through the worker keeps the active model's vocabulary", (
     }
   });
 });
+
+describe("training sample emission", () => {
+  // A live-site defect: with the DEFAULT steps=400 / sampleEvery=50, the periodic sampler
+  // fires at step 400 and the final sample is also recorded at step 400. The samples list
+  // is keyed by step, so Svelte threw `each_key_duplicate` on every default run. The unit
+  // tests missed it because they used step counts that were not multiples of sampleEvery.
+  it("emits at most one sample per step when steps is a multiple of sampleEvery", () => {
+    const vocab = buildVocab("dolch", "pre_primer", "the cat sat\non the mat\n");
+    const cfg = {
+      vocabRows: vocab.rows,
+      dModel: 16,
+      nLayers: 1,
+      nHeads: 1,
+      ctx: 8,
+      tied: true,
+      dropout: 0,
+    };
+    const tokens = tokenStream("the cat sat on the mat\na little dog\nup and down\n", vocab);
+
+    const seen: number[] = [];
+    runTraining({
+      cfg,
+      tokens,
+      steps: 20,
+      batchSize: 2,
+      seed: 0,
+      sampleEvery: 5, // 20 % 5 === 0 — the colliding case
+      onSample: (step) => seen.push(step),
+    });
+
+    // Whatever the schedule emits, no step may appear twice: the UI keys on it.
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(seen).toContain(20);
+  });
+});
