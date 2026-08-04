@@ -154,6 +154,30 @@ running the real thing and comparing against a known-good reference.
 
 ## Status
 
+### Contract defects found by BUILDING it (13, not one of which I caught by re-reading)
+
+The two stacks were written independently from the contract so they could disagree. Every
+disagreement turned out to be a defect in the document, never in one implementation:
+
+1. case — suffix sliced case-preserved, so `gums→flels` but `GUMS→FLESS` (one type, two surfaces)
+2. injectivity checked only at `p=1` and over bare nonces — `hanged→waked` collides at `p=0.25`
+3. `CODAS` documented as 49 entries; it has 46
+4. `typesVacated` undefined between stems and types (1922 vs 1665)
+5. salt thresholds ambiguous between attempt counter and absolute salt
+6. domain readable as the *active* budget — would re-mint on every budget switch
+7. `avoid` optional, so the map depended on caller memory (0 vs 1 re-mint rounds, different nonces)
+8. `vacancyDomain` helper existed in Python only
+9. `VacancyMap.map` vs `.mapping`
+10. `consistent=false` prosody drawn from the mint key, not the stem
+11. `corpusTypesVacated` from map membership vs measured from the texts (1337 vs 665)
+12. condition B not applied to the per-occurrence path — `tak→tak`, a word silently surviving
+13. `forbidden` stored in one stack, reconstructed in the other (drops superseded nonces)
+
+Four of these (1, 2, 10, 12) would have broken the invariance theorem. Numbers 4, 11 and 13 were
+found only because a stack was told to STOP and report rather than reconcile to the other — a
+golden fixture built over a silent reconciliation would have cemented both stacks being
+consistently wrong.
+
 - [x] Spec + contract written and committed (`36b9f3d`)
 - [ ] Python `lex/vacancy.py` + tests
 - [ ] TS `lexEngine/vacancy.ts` + tests
