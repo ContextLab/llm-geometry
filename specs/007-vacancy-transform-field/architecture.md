@@ -408,9 +408,17 @@ These were gaps, not choices. Both stacks do it this way or the golden fixture f
   **base salt** `1000 * round + previousBaseSalt + 1`. Round counts from 1. Winners keep their
   nonce, so a re-mint never cascades. The attempt counter restarts at `a = 0` inside the new
   call, so §5.5's quality checks apply in full (see the note there).
-- **`consistent = false` key.** The per-occurrence nonce is minted for the key
-  `f"{stem}#{idx}"` where `idx` is the 0-based occurrence index of that **stem** in document
-  order. The `#` is not a legal `WORD_RE` character, so the key can never collide with a stem.
+- **`consistent = false` key, and where its prosody comes from.** The per-occurrence nonce is
+  minted for the key `f"{stem}#{idx}"`, `idx` being the 0-based occurrence index of that **stem**
+  in document order. The `#` is not a legal `WORD_RE` character, so the key can never collide
+  with a stem.
+
+  **The key feeds the byte stream and the uniqueness check only. The stress pattern comes from
+  `stress(stem)`, never from `stress(key)`.** This was under-specified and the two stacks split
+  on it: one passed the key into the minter, so the pattern became `stress("little#0") = "10"`
+  instead of `stress("little") = "100"`, and `Little` minted as `Wrerken` rather than
+  `Wrerkenle`. §7.1 says the nonce carries *the stem's* syllable count and stress, so the key
+  must not reach the prosody lookup. Caught by the golden fixture, not by either test suite.
 - **Minted stress is passed, never global.** `stress(word, mintedStress)` takes the map as an
   argument. The source used a module-level `MINTED_STRESS` dict mutated by `register_minted`,
   which makes two concurrently-live maps corrupt each other — and the Lexicon Lab holds several
@@ -744,6 +752,15 @@ An unprefixed `types*` is therefore **forbidden**. Every count names its scope:
   shows a reader, because the 22 domain-only words (`funny`, `squirrel`, `today`, …) are in the
   budget but never appear in the text, and counting words the reader cannot see inflates the
   vacancy rate they are being shown.
+
+  **`corpusTypesVacated` is measured from the two texts, not from map membership.** A type
+  counts as vacated iff at least one of its occurrences actually changed. Under
+  `revealAfter > 0` the two are not the same number and the stacks split on it — one measured
+  the texts (665) and one asked whether the stem was in the vacated set (1337), over-reporting
+  by 2×, because a type whose every occurrence falls inside the reveal window is still listed
+  in the map. Under `revealAfter = 0` the readings coincide, which is why it took a control
+  condition to expose. Measuring the texts is the definition that matches what this number
+  claims to the reader.
 - `stemsTotal` — distinct eligible stems, i.e. the size of the map; `stemsVacated` — stems with
   `u(stem) < p`
 - `tokensTotal` / `tokensVacated` — over the **corpus** token stream
