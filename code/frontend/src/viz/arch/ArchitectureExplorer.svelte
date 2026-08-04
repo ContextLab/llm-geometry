@@ -331,7 +331,10 @@
       </p>
       <p>
         Models are capped at <b>1.5B parameters</b>, decided from hub metadata <i>before</i> any
-        weights are downloaded.
+        weights are downloaded. When a repository publishes no safetensors index the count has to
+        be an architectural estimate from its config, and an estimate can undercount — so that
+        path is held to <b>80% of the cap, 1.2B</b>, and the rejection says which ceiling it
+        applied.
       </p>
     </Explain>
     <Explain

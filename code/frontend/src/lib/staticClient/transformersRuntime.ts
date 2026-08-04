@@ -32,6 +32,7 @@ import {
 } from "@huggingface/transformers";
 
 import type { ArchGenerateBody, ArchGenerateResult, ArchGeneratedToken, TokenizeResult } from "../dataClient";
+import { nCharsOf } from "./byteSpans";
 import { computeError, invalidParamError } from "./errors";
 import { assertNonDegenerateLogits } from "./logitsSanity";
 import {
@@ -393,7 +394,8 @@ async function scoreTextsImpl(
       nll[t + 1] = -(row[ids[t + 1]] - max - Math.log(sum));
     }
     (result.logits as unknown as { dispose?: () => void }).dispose?.();
-    out.push({ pieces, nll, nChars: text.length });
+    // `nChars` is UNICODE CODE POINTS, matching Python's `len(str)` — see `nCharsOf`.
+    out.push({ pieces, nll, nChars: nCharsOf(text) });
   }
   return out;
 }

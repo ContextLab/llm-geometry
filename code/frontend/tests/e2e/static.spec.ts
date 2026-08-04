@@ -305,7 +305,9 @@ test("architecture: precomputed graph + example traces + real HF weight windows"
   const inspector = page.getByTestId("arch-inspector");
   await expect(inspector).toBeVisible();
   await expect(inspector.getByTestId("matrix-heatmap")).toBeVisible({ timeout: 60_000 });
-  await expect(inspector).toContainText("overview (whole tensor, downsampled)");
+  // `wte.weight` really is strided-mean downsampled AND uint8; the caption states both,
+  // because a 1-D parameter's tile is uint8 without being downsampled at all.
+  await expect(inspector).toContainText("overview (whole tensor, strided mean, 8-bit)");
   await inspector.getByRole("button", { name: /zoom into the weights/ }).click();
   await expect(inspector).toContainText("exact values", { timeout: 120_000 });
   await expect.poll(() => hfRequest, { timeout: 10_000 }).toBe(true);
@@ -390,6 +392,13 @@ test("the vacancy panel reports only what q8 has a measured bound for", async ({
   const wrong = page.getByTestId("arch-vac-wrong_content");
   await expect(wrong).toContainText(/\d\.\d{3}/);
   await expect(page.getByTestId("arch-vac-wrong_content-err")).toContainText("0.2 (quantization, measured)");
+  // …INCLUDING the secondary row. It rendered `0.879 ± 0.074` on the live site and
+  // dropped the ±0.2 the same response carried, stating an interval that excludes the
+  // float32 value 0.9892 (red team F4 / FR-720a).
+  await expect(page.getByTestId("arch-vac-total-err")).toContainText("(sampling)");
+  await expect(page.getByTestId("arch-vac-total-err")).toContainText(
+    "0.2 (quantization, measured)",
+  );
 
   // The residual caveat is stated even where the number is refused: a reader must not
   // have to earn the caveat by being shown a value.

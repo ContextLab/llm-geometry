@@ -1045,7 +1045,17 @@
     <li>
       <b>The swap control is injective only at <code>p = 0</code> and <code>p = 1</code></b>, which
       is a theorem about maps whose images are domain words, not a defect. In between, the mapped
-      vocabulary is refused with a typed error instead of being computed with two words on one row.
+      vocabulary is refused with a typed error instead of being computed with two words on one row —
+      and so is the <b>Architecture Explorer</b>'s three-variant decomposition, which travels
+      through the same map. Both stacks refuse it; neither substitutes a nearby <code>p</code>.
+    </li>
+    <li>
+      <b>The vacancy transform's word alphabet is ASCII letters.</b> Its word pattern is
+      <code>[A-Za-z]+(?:['-][A-Za-z]+)*</code>, so <code>café</code> is the word <code>caf</code>
+      to it and <code>naïvely</code> is the two words <code>na</code> and <code>vely</code> —
+      vacating those would rewrite a fragment of a word and score the result. A passage containing
+      such a word is refused by name rather than mangled. Emoji and CJK are fine: they are never
+      vacated, so they are byte-identical in all three variants, exactly like punctuation.
     </li>
     <li>
       <b>The static build refuses most of the pretrained arm's numbers</b>, and states ±0.2 nats of

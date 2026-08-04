@@ -112,3 +112,25 @@ test("a passage too short to resolve the small effect says so instead of conclud
   expect(pairs).toBeLessThan(300);
   await expect(page.getByTestId("arch-vac-verdict")).toContainText("does not resolve");
 });
+
+test("refuses intermediate p, as the Lexicon Lab does, and offers the defined ends", async ({
+  page,
+}) => {
+  // Red team F7: p was a bare 0.05-step input, and 19 of its 21 values are configurations
+  // in which the swap map is provably non-injective (contract §5.2a). The Lexicon Lab
+  // refuses them; this panel scored them.
+  test.setTimeout(300_000);
+  await page.goto("/");
+  await page.getByTestId("tab-architecture").click();
+  const panel = page.getByTestId("arch-vacancy");
+  await panel.scrollIntoViewIfNeeded();
+  // The reason is on screen BEFORE a run is spent finding out.
+  await expect(page.getByTestId("arch-vac-pnote")).toContainText("§5.2a");
+
+  await page.getByTestId("arch-vac-p").fill("0.5");
+  await page.getByTestId("arch-vac-p").blur();
+  await page.getByTestId("arch-vac-run").click();
+  await expect(page.getByTestId("arch-vac-error")).toContainText("§5.2a", { timeout: 280_000 });
+  await expect(page.getByTestId("arch-vac-table")).toHaveCount(0);
+  await expect(page.getByTestId("arch-vac-set-p1")).toBeVisible();
+});

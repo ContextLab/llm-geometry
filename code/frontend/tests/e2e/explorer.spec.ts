@@ -69,6 +69,26 @@ test.describe("Architecture Explorer", () => {
     await expect(tok).toBeAttached();
     await expect(tok).toHaveAttribute("aria-label", /%|prob/i);
   });
+
+  test("a reply's tooltip keeps the temperature it was drawn at", async ({ page }) => {
+    // Red team F5: the tooltip read the LIVE slider, so after a greedy run a token the
+    // model gave 8.5% announced "chance of being drawn at T=1.20: 100.0%".
+    await openArchitecture(page);
+    await page.getByTestId("arch-temperature").fill("0");
+    await page.getByTestId("arch-prompt").fill("The capital of France is");
+    await page.getByTestId("arch-generate").click();
+    await expect(page.getByTestId("arch-reply")).not.toBeEmpty({ timeout: 180_000 });
+    const tok = page.getByTestId("arch-reply").locator(".tok").first();
+    await expect(tok).toHaveAttribute("aria-label", /greedy pick/);
+    await expect(page.getByTestId("arch-reply-meta")).toContainText("drawn at T=0.00");
+    await expect(page.getByTestId("arch-temp-stale")).toHaveCount(0);
+
+    // Move the slider WITHOUT re-running: the reply on screen still belongs to T = 0.
+    await page.getByTestId("arch-temperature").fill("1.2");
+    await expect(tok).toHaveAttribute("aria-label", /greedy pick/);
+    await expect(tok).not.toHaveAttribute("aria-label", /T=1\.20/);
+    await expect(page.getByTestId("arch-temp-stale")).toBeVisible();
+  });
 });
 
 test.describe("Geometry Lab", () => {

@@ -33,7 +33,13 @@ import {
   vacateText,
 } from "../lexEngine/vacancy";
 import type { StaticAssets, StaticIndexModel } from "./assets";
-import { preservedTokenIndices, tokenByteSpans, wordSpans, type WordSpan } from "./byteSpans";
+import {
+  checkWordAlphabet,
+  preservedTokenIndices,
+  tokenByteSpans,
+  wordSpans,
+  type WordSpan,
+} from "./byteSpans";
 import { computeError, invalidParamError, notFoundError, staticModeError } from "./errors";
 import {
   IDLE_GENERATION_INFO,
@@ -68,7 +74,7 @@ interface TileEntry {
   shape: number[]; // matrixized [R, C] (the backend's full-window response)
   grid_shape: number[];
   downsampled: boolean;
-  method: string;
+  method: "exact" | "strided_mean";
   stats: { min: number; max: number; mean: number; std: number };
   offset: number;
   nbytes: number;
@@ -175,6 +181,15 @@ const VACANCY_Q8_UNCERTAINTY_NATS = 0.2;
  * Preserved tokens that must be pooled before a q8 number may be shown. The bound above
  * was measured on ~700 preserved tokens per condition; a single 250-word passage carries
  * ~120, and at that size q8 was wrong by up to 115 % of the passage's own delta.
+ *
+ * This is deliberately NOT the full stack's threshold, and the two are not a discrepancy.
+ * `MIN_PAIRED_PRESERVED = 2` (Python) is a *sampling* floor — the sample variance divides
+ * by n − 1, so at n = 1 a standard error does not exist — and it is all a float32 stack
+ * needs. 700 is a *quantization* floor, and a float32 stack has no quantization error to
+ * bound. Both stacks refuse with a typed error naming the count they got and the count
+ * they need; they differ in the number because they differ in the reason. (This gate also
+ * subsumes the sampling floor here: 700 ≫ 2, which is why `pairedDifference`'s `se = NaN`
+ * branch is unreachable in this build.)
  */
 const VACANCY_MIN_POOLED_PRESERVED = 700;
 
@@ -210,6 +225,11 @@ const VACANCY_CONFOUND =
  * The passage and its two vacated twins (§8.3), from the SAME TypeScript transform the
  * Lexicon Lab runs — so the nonce a stem gets here is the nonce it gets there, for the
  * same seed, and the golden fixture that pins TS against Python covers this too.
+ *
+ * INTERMEDIATE `p` IS REFUSED, exactly as the Lexicon Lab refuses it (§5.2a): swap's
+ * replacements are drawn from the domain, so at `0 < p < 1` a vacated type can land on
+ * one that was not vacated and the map is not injective. MIRROR of `variant_texts`
+ * (Python), checked against the map that was actually built.
  */
 export function vacancyVariantTexts(
   passage: string,
@@ -231,7 +251,19 @@ export function vacancyVariantTexts(
       keep: [...opts.keep],
       mint,
     });
-    out[mint] = vacateText(passage, buildVacancyMap(domain, params, counts), params);
+    const vmap = buildVacancyMap(domain, params, counts);
+    if (!vmap.injectiveAtEveryP && opts.p > 0 && opts.p < 1) {
+      throw invalidParamError(
+        `mint='${mint}' has no injective map at p=${opts.p}: its replacements are domain ` +
+          "types, so a vacated type can collide with an un-vacated one and the map is " +
+          "injective only at full vacancy (contract §5.2a — a theorem, not a rough edge). " +
+          "The decomposition of §8.3 compares three variants of one passage through that " +
+          "map, so it is not defined here either. Use p = 1 (full vacancy), which is the " +
+          "configuration the reference numbers were measured at, or p = 0 (the identity " +
+          "null).",
+      );
+    }
+    out[mint] = vacateText(passage, vmap, params);
   }
   return out;
 }
@@ -427,7 +459,21 @@ export const VACANCY_UNKNOWN_FORM_REFUSAL: ArchVacancyRefusal = {
 export function staticVacancyDifferences(
   swapMinusEnglish: { nats: number; se: number; nPairs: number },
   nonceMinusEnglish: { nats: number; se: number; nPairs: number },
+  identity = false,
 ): ArchVacancyDifference[] {
+  // At p = 0 nothing is vacated, so all three variants are the same string and every
+  // difference is exactly 0 by construction. A genuine null control, but an identity
+  // rather than a measurement, and the flag travels with the numbers so the panel says
+  // which one it has instead of printing "0.000 ± 0.000 nats (sampling, …)".
+  const nullControl = identity
+    ? {
+        identity: true,
+        identityNote:
+          "At p = 0 no stem is vacated, so english, swap and nonce are the same string " +
+          "character for character and every difference is exactly 0 by construction. " +
+          "This is the instrument's null control, not a measurement of anything.",
+      }
+    : { identity: false };
   return [
     {
       id: "wrong_content",
@@ -435,6 +481,7 @@ export function staticVacancyDifferences(
       expr: "nll(swap) − nll(english)",
       headline: true,
       quantizationUncertaintyNats: VACANCY_Q8_UNCERTAINTY_NATS,
+      ...nullControl,
       ...swapMinusEnglish,
     },
     {
@@ -447,6 +494,7 @@ export function staticVacancyDifferences(
       nats: null,
       se: null,
       nPairs: 0,
+      ...nullControl,
       refused: VACANCY_UNKNOWN_FORM_REFUSAL,
     },
     {
@@ -458,6 +506,7 @@ export function staticVacancyDifferences(
         "The sum of the two differences above. It conflates wrong content with unknown " +
         "form and is never the headline.",
       quantizationUncertaintyNats: VACANCY_Q8_UNCERTAINTY_NATS,
+      ...nullControl,
       ...nonceMinusEnglish,
     },
   ];
@@ -559,10 +608,17 @@ export class ArchSection {
       return this.exactWindow(m, tile, r0, r1, c0, c1);
     }
 
-    // Over-budget window → the precomputed strided-mean overview of the FULL
-    // tensor (the backend's own full-window response, uint8-quantized at build
-    // time). r0..c1 report what is actually served — the whole tensor — so the
-    // response never claims a sub-window resolution it doesn't have.
+    // Over-budget window → the precomputed overview of the FULL tensor (the backend's own
+    // full-window response, uint8-quantized at build time). r0..c1 report what is actually
+    // served — the whole tensor — so the response never claims a sub-window resolution it
+    // doesn't have.
+    //
+    // `downsampled` / `method` are the EXPORT's own, not a hardcoded pair. Every 1-D
+    // parameter (`ln_1.weight` and friends) fits its grid exactly, so the backend recorded
+    // `downsampled: false, method: "exact"` for it — and this branch used to overwrite that
+    // with `strided_mean`, describing a full-resolution strip as an average of cells it
+    // never averaged. The inspector reads both fields to caption the map, so the label was
+    // wrong on screen, not just in the payload.
     const bin = await this.assets.bin(`arch/${m.slug}/${tiles.bin}`);
     const bytes = new Uint8Array(bin, tile.offset, tile.nbytes);
     const [gr, gc] = tile.grid_shape;
@@ -573,11 +629,14 @@ export class ArchSection {
       r1: rows,
       c0: 0,
       c1: cols,
-      downsampled: true,
+      downsampled: tile.downsampled,
       grid_shape: [gr, gc],
       values: dequantizeTile(bytes, gr, gc, tile.vmin, tile.vmax),
       stats: tile.stats,
-      method: "strided_mean",
+      method: tile.method,
+      // …and the precision is stated separately, because carrying `method: "exact"`
+      // through on its own would let the inspector caption a uint8 strip "exact values".
+      quantized: "uint8",
     };
   }
 
@@ -769,20 +828,31 @@ export class ArchSection {
     // tokenizer normalizes internally and gpt2's/SmolLM2's do not, so without this a
     // decomposed character would shift every span after it (§8.2).
     const passages = requested.map((t) => t.normalize("NFC"));
+
+    // Transform first, model second: the word alphabet and the `p` gate need no weights,
+    // so a bad request is a typed 400 that costs nothing rather than a failure after a
+    // multi-megabyte ONNX download. MIRROR of the same ordering in `vacancy_score`.
+    const prepared = passages.map((passage, index) => {
+      checkWordAlphabet(passage, WORD_RE, index);
+      const texts = vacancyVariantTexts(passage, { p, seed, matchProsody, keep });
+      const { words, preserved } = preservedWordIndices(texts);
+      if (preserved.size === 0) {
+        throw invalidParamError(
+          `passage ${index} has no word that survives the transform, so there is no ` +
+            "scaffolding to score: every one of its words is an open-class stem this " +
+            "transform vacates. Lower p, or use a passage with closed-class words (the, " +
+            "and, of, did).",
+        );
+      }
+      return { texts, words, preserved };
+    });
+
     const rt = await this.runtime();
 
     const scored: Record<string, RuntimeScoredText[]> = { english: [], swap: [], nonce: [] };
     const preservedIdx: Record<string, number[][]> = { english: [], swap: [], nonce: [] };
     const previews: Record<string, string> = { english: "", swap: "", nonce: "" };
-    for (const passage of passages) {
-      const texts = vacancyVariantTexts(passage, { p, seed, matchProsody, keep });
-      const { words, preserved } = preservedWordIndices(texts);
-      if (preserved.size === 0) {
-        throw computeError(
-          "this passage has no word that survives the transform, so there is no " +
-            "scaffolding to score. Lower p, or use a passage with closed-class words.",
-        );
-      }
+    for (const { texts, words, preserved } of prepared) {
       const order = VACANCY_VARIANTS.map((name) => texts[name]);
       const results = await rt.scoreTexts(repo, order);
       VACANCY_VARIANTS.forEach((name, i) => {
@@ -824,6 +894,7 @@ export class ArchSection {
     const differences = staticVacancyDifferences(
       pairedDifference(scored.english, preservedIdx.english, scored.swap, preservedIdx.swap),
       pairedDifference(scored.english, preservedIdx.english, scored.nonce, preservedIdx.nonce),
+      p === 0,
     );
 
     return {
