@@ -684,6 +684,11 @@ content — the doc's T4 prediction that field ≫ location, on a model it did n
 - **q4f16 — the app's first-choice dtype — could not be measured outside a browser** (session
   init fails on the onnxruntime-node CPU EP for both models). Until it is measured in a real
   browser, the deployed default path has **no error bar at all**.
+  **RESOLVED (2026-08-04):** measured in a real browser on a real Apple Metal-3 adapter — on
+  gpt2 and both SmolLM2 exports q4f16 returns logits identical at every position (SmolLM2:
+  exactly 0, every NLL = ln V), so it has no error bar because it measures nothing. It is no
+  longer requested: the app's ladder is now `webgpu/q8 → wasm/q8`, both rungs gated by a
+  load-time non-degeneracy check, so **q8 is the dtype whose measured bounds apply here**.
 
 **Policy.** The full stack (torch/fp32) reports everything. The static build may report a
 number only where there is a measured bound for the dtype it actually ran:

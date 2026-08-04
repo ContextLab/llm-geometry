@@ -100,7 +100,7 @@ committed by the writer. The persisted `ExportedWeightSet` carried weights but n
 vocabulary, so `tokenizerFor()` fell back to the canonical tokenizer — right for edited and
 fine-tuned sets, catastrophic for scratch and imported ones.
 
-**2. q4f16 produces garbage on WebGPU** (in progress). The dtype the app tries FIRST. The
+**2. q4f16 produces garbage on WebGPU** (FIXED — see below). The dtype the app tries FIRST. The
 session builds successfully and then returns degenerate output: every row of the `[1,T,V]`
 logits bit-identical, gpt2 greedy-generating `,,,,,,,`, SmolLM2's logits all exactly 0 so every
 NLL is `ln(49152) = 10.80267`. The fallback in `transformersRuntime.ts` only fires on a thrown
@@ -111,6 +111,42 @@ q8, fp32 and q4 are correct; fp16 fails identically, so the fp16 *activation* pa
 Why it survived: **plain headless Chromium exposes no WebGPU adapter** (`requestAdapter()` →
 null), so the entire e2e suite has only ever exercised wasm/q8. That coverage gap is part of the
 fix.
+
+**The fix** (its own commit, independent of 007). Re-verified first in a real browser on the
+real Apple Metal-3 adapter, per repo, `maxAbsRowDiff` between the first and last logit row of one
+teacher-forced pass + a greedy continuation:
+
+| repo | webgpu/q4f16 | webgpu/q8 |
+|-|-|-|
+| gpt2-ONNX | 0.000, `,,,,,,,,,,` | 91.99, ` Berlin. The capital of the United States is Washington` |
+| SmolLM2-135M-Instruct-ONNX | 0.000, all logits 0, empty | 36.97, ` Berlin.\n\nThe capital of Italy is Rome` |
+| SmolLM2-360M-Instruct-ONNX | 0.000, all logits 0, empty | (correct) |
+| Qwen2.5-0.5B-Instruct | 16.47 — NOT degenerate, but worse text | 20.27, ` Berlin. What is…` |
+
+Three of the four curated models are destroyed by q4f16; Qwen survives it. `q4` is correct
+(SmolLM2-135M: 35.66, ` Berlin. The capital of the United States is Washington`) but is **not**
+the smaller download the earlier note assumed — in every curated repo `model_q4.onnx` is LARGER
+than `model_quantized.onnx` (gpt2 498 vs 280 MB, SmolLM2-135M 181 vs 136, SmolLM2-360M 386 vs
+363, Qwen2.5-0.5B 786 vs 512). So the ladder is now **webgpu/q8 → wasm/q8**: both rungs read the
+same file, so a rejected rung costs no second download.
+
+1. `staticClient/logitsSanity.ts` — ONE invariant, in the spirit of the Geometry Lab's training
+   gates: a causal LM's output must depend on its input, so the L∞ gap between the first and last
+   next-token distribution of a fixed 12-token probe must exceed 1e-3. All-identical rows and
+   all-zero logits are the same failure, not two rules. Asserted on every session at load, before
+   any number is shown; a rejected rung falls through and is NAMED in the badge (`· fallback`).
+2. `RUNTIME_LADDER` + `FP16_ACTIVATION_DTYPES` in `runtimeTypes.ts`, unit-tested
+   (`tests/unit/logitsSanity.test.ts`) so CI always checks that no fp16-activation dtype creeps
+   back, even where it cannot run a GPU.
+3. `tests/e2e/webgpu.spec.ts` + a `webgpu` Playwright project. **The flag that matters on macOS
+   is `--use-angle=metal`**: `--enable-unsafe-webgpu` alone still hands back google/swiftshader
+   (no `shader-f16`); with it, headless Chromium gets the real apple/metal-3 adapter. Verified to
+   FAIL on the pre-fix code (badge `webgpu · q4f16`; 2 distinct top-5 lists across 64 generated
+   positions) and PASS after (64/64 distinct).
+
+**Named residual gap:** GitHub-hosted runners have no GPU, so this test SKIPS in CI with a loud
+reason. The WebGPU path is verified only on a developer machine with a real GPU; CI verifies the
+invariant, the ladder, and one real session through the same gate on the WASM rung.
 
 Lesson worth keeping: both defects are invisible to unit tests and to any test that checks for
 thrown errors. They produce *plausible* wrong answers. The only thing that caught them was

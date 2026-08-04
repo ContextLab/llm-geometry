@@ -341,9 +341,11 @@ test("real in-browser generation on the smallest model", async ({ page }) => {
   const tok = page.getByTestId("arch-reply").locator(".tok").first();
   await expect(tok).toBeAttached();
   await expect(tok).toHaveAttribute("aria-label", /%/);
-  // the runtime ladder settled on a real device/dtype pair
+  // The runtime ladder settled on a device/dtype pair that PASSED the load-time
+  // non-degeneracy check (transformersRuntime.selfCheck). Both rungs read the same
+  // model_quantized.onnx; only the execution provider differs.
   await expect(page.getByTestId("static-runtime-badge")).toContainText(
-    /webgpu · q4f16|wasm · q8/,
+    /(webgpu|wasm) · q8/,
   );
   await page.screenshot({
     path: "tests/e2e/__screenshots__/static-generation.png",

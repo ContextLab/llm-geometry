@@ -28,8 +28,8 @@ const DEFAULT_MAX_CELLS = 4096; // ARCH_WEIGHTS_MAX_CELLS (backend config)
 const EXACT_CELLS_HARD_CAP = 65536; // bound the number/size of range reads
 const TRACE_EXPORT_MAX_CONTEXT = 64; // the exporter ran the backend default
 
-/** Community ONNX exports for the curated models (repos verified on the Hub;
- * all ship model_q4f16.onnx + a q8 "quantized" file). */
+/** Community ONNX exports for the curated models (repos verified on the Hub; all ship
+ * the `model_quantized.onnx` the runtime's q8 ladder loads — see transformersRuntime). */
 const ONNX_REPOS: Record<string, string> = {
   "HuggingFaceTB/SmolLM2-135M-Instruct": "onnx-community/SmolLM2-135M-Instruct-ONNX",
   "HuggingFaceTB/SmolLM2-360M-Instruct": "onnx-community/SmolLM2-360M-Instruct-ONNX",

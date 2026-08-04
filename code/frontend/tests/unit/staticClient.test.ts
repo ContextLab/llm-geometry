@@ -156,6 +156,9 @@ describe("live runtime seam (no model downloads)", () => {
       model_id: "gpt2",
       onnx_repo: "onnx-community/gpt2-ONNX",
       error: null,
+      // No fallback rungs were rejected on the way to this one — the badge's "you are on
+      // a fallback path" signal must be explicitly empty, not absent.
+      rejected: [],
     }),
     tokenize: async (modelId, revision, text): Promise<TokenizeResult> => {
       calls.push(["tokenize", modelId, revision, text]);

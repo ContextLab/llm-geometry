@@ -7,7 +7,7 @@
  * Honesty contract (FR-203):
  * - Tokenization uses the ORIGINAL model repo's tokenizer files at the pinned
  *   revision from meta.json — real BPE, no vendored copies.
- * - Generation runs the model's community ONNX export (webgpu/q4f16, falling
+ * - Generation runs the model's community ONNX export (webgpu/q8, falling
  *   back to wasm/q8) and reports per-token probabilities computed from REAL
  *   logits via one teacher-forced forward pass over prompt+reply — the same
  *   quantities the backend reports (chosen-token prob under the temperature
@@ -33,7 +33,8 @@ import {
 
 import type { ArchGenerateBody, ArchGenerateResult, ArchGeneratedToken, TokenizeResult } from "../dataClient";
 import { computeError, invalidParamError } from "./errors";
-import { IDLE_GENERATION_INFO, type ArchRuntime, type RuntimeGenerationInfo } from "./runtimeTypes";
+import { assertNonDegenerateLogits } from "./logitsSanity";
+import { IDLE_GENERATION_INFO, RUNTIME_LADDER, type ArchRuntime, type RuntimeGenerationInfo } from "./runtimeTypes";
 
 const MAX_NEW_TOKENS_LIMIT = 128; // ARCH_MAX_NEW_TOKENS (backend config)
 const TOPK = 5;
@@ -77,10 +78,39 @@ async function webgpuUsable(): Promise<boolean> {
     const adapter = (await gpu.requestAdapter()) as {
       features?: { has(name: string): boolean };
     } | null;
-    // q4f16 needs f16 shaders; without them WASM/q8 is the honest fallback.
+    // `shader-f16` is NOT needed by the q8 path — it is kept as the marker of a
+    // HARDWARE adapter. Measured across Chromium configurations on this stack: the
+    // real Apple Metal-3 adapter advertises it, the software (SwiftShader) adapter
+    // does not, and plain headless Chromium has no adapter at all. Software WebGPU
+    // is slower than the WASM backend, so it is not worth preferring.
     return adapter != null && adapter.features?.has("shader-f16") === true;
   } catch {
     return false;
+  }
+}
+
+// One forward pass over a handful of tokens — the whole load-time check.
+const SELF_CHECK_PROMPT = "The capital of France is Paris. The capital of Germany is";
+
+/**
+ * The load-time correctness gate (see logitsSanity.ts for why a thrown-exception
+ * ladder is not enough). Throws if the freshly built session's next-token
+ * distribution does not depend on its input.
+ */
+async function selfCheck(p: TextGenerationPipeline, label: string): Promise<number> {
+  const ids = p.tokenizer.encode(SELF_CHECK_PROMPT, { add_special_tokens: false });
+  if (ids.length < 2) {
+    throw new Error(`${label}: tokenizer returned ${ids.length} tokens for the self-check prompt`);
+  }
+  const out = (await (p.model as unknown as (o: Record<string, unknown>) => Promise<{ logits: Tensor }>)({
+    input_ids: idsTensor(ids),
+    attention_mask: new Tensor("int64", BigInt64Array.from(ids, () => 1n), [1, ids.length]),
+  })) as { logits: Tensor };
+  const [, seqLen, vocab] = out.logits.dims as number[];
+  try {
+    return assertNonDegenerateLogits(out.logits.data as Float32Array, seqLen, vocab, label);
+  } finally {
+    (out.logits as unknown as { dispose?: () => void }).dispose?.();
   }
 }
 
@@ -88,37 +118,32 @@ async function getPipeline(onnxRepo: string): Promise<TextGenerationPipeline> {
   if (pipelineCache?.key === onnxRepo) return pipelineCache.promise;
   const promise = (async () => {
     generationInfo = {
+      ...IDLE_GENERATION_INFO,
       status: "loading",
-      device: null,
-      dtype: null,
-      model_id: null,
       onnx_repo: onnxRepo,
-      error: null,
     };
-    const tryLoad = async (device: "webgpu" | "wasm", dtype: "q4f16" | "q8") => {
-      generationInfo = { ...generationInfo, status: "loading", device, dtype };
-      const p = (await pipeline("text-generation", onnxRepo, {
-        dtype,
-        device,
-      })) as TextGenerationPipeline;
-      generationInfo = { ...generationInfo, status: "ready", device, dtype };
-      return p;
-    };
-    if (await webgpuUsable()) {
+    const skipWebgpu = !(await webgpuUsable());
+    const rejected: string[] = [];
+    let lastError = "";
+    for (const { device, dtype } of RUNTIME_LADDER) {
+      const label = `${device}/${dtype}`;
+      if (device === "webgpu" && skipWebgpu) continue;
+      generationInfo = { ...generationInfo, status: "loading", device, dtype, rejected: [...rejected] };
       try {
-        return await tryLoad("webgpu", "q4f16");
+        const p = (await pipeline("text-generation", onnxRepo, { dtype, device })) as TextGenerationPipeline;
+        // "The session constructed" is not evidence that the model works.
+        await selfCheck(p, `${onnxRepo} on ${label}`);
+        generationInfo = { ...generationInfo, status: "ready", device, dtype, rejected: [...rejected] };
+        return p;
       } catch (e) {
-        // Degradation ladder: WebGPU failed → retry on WASM before giving up.
-        console.warn(`[staticClient] webgpu/q4f16 load failed for ${onnxRepo}; falling back to wasm/q8:`, e);
+        lastError = e instanceof Error ? e.message : String(e);
+        rejected.push(label);
+        console.warn(`[staticClient] rejected ${label} for ${onnxRepo}: ${lastError}`);
       }
     }
-    try {
-      return await tryLoad("wasm", "q8");
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      generationInfo = { ...generationInfo, status: "error", error: msg };
-      throw computeError(`Could not load the in-browser model ${onnxRepo}: ${msg}`);
-    }
+    const msg = lastError || "no usable device/dtype for this browser";
+    generationInfo = { ...generationInfo, status: "error", error: msg, rejected: [...rejected] };
+    throw computeError(`Could not load the in-browser model ${onnxRepo}: ${msg}`);
   })();
   pipelineCache = { key: onnxRepo, promise };
   promise.catch(() => {
