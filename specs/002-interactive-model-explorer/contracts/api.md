@@ -93,10 +93,21 @@ Unlike fine-tuning, this builds a **fresh vocabulary from the supplied text** an
 freshly initialized weights: the result is a different model whose token ids mean
 different words. The canonical checkpoint is never modified.
 
-→ `200 { "weights_token", "vocab_size", "final_loss", "n_tokens", "n_distinct",
-"epochs", "seed", "ready": true }` on a content-hash cache hit, else
-`202 { "job_id", "ready": false }` with SSE `phase: "train_scratch"` and the same
-fields on the `done` event.
+→ `200 { "weights_token", "vocab_size", "final_loss", "uniform_baseline", "learned",
+"n_tokens", "n_distinct", "epochs", "seed", "ready": true }` on a content-hash cache
+hit, else `202 { "job_id", "ready": false }` with SSE `phase: "train_scratch"` and the
+same fields on the `done` event.
+
+`uniform_baseline` is `ln(vocab_size)` — the cross-entropy a model reaches by learning
+nothing — and `learned` is `final_loss < uniform_baseline − 0.5`. **Both are additive
+(amended 2026-08-04, red-team 007 F3).** Training on structureless text correctly ends
+*at* the baseline and the trainer is right not to refuse it, but the response carried
+nothing that distinguished such a run from one that learned, and a client had no honest
+way to say so. The two non-degeneracy metrics on `/api/geo/spec` cannot substitute:
+they guard against collapse, and a model that learned nothing scores *better* on both.
+A client MUST surface `learned: false` rather than presenting the run as a trained
+model. Older cached entries predate the fields and may omit them; absent means unknown,
+never `true`.
 
 → `400 InvalidParamError` when the text has fewer distinct word types than the
 vocabulary is wide. The model's vocabulary size is an architectural dimension, so a
@@ -113,23 +124,45 @@ train on *before* submitting it.
 
 `?weights_token=<hash|"learned">` → `200` a portable, self-describing bundle:
 
-`{ "format": "llm-geometry/geo-model", "version": 1, "weights_token": <hash>,
+`{ "format": "llm-geometry/geo-model", "version": 2, "weights_token": <hash>,
    "config": { "d_model", "n_layers", "n_heads", "mlp_hidden", "vocab_size",
                "context_window" },
    "vocab": <tokenizer JSON string>,
+   "vocab_sha256": <hex SHA-256 of the `vocab` string>,
    "weights": { "<name>": { "shape": [...], "data": <base64 float32-LE> }, … } }`
 
 The vocabulary travels WITH the weights because a scratch-trained model's ids are
-meaningless without it.
+meaningless without it — and so does any model DERIVED from such a one by fine-tuning
+or a weight edit. Where a model's vocabulary cannot be recovered, this endpoint returns
+`400 InvalidParamError` rather than substituting the shipped one.
+
+`vocab` is a **canonical serialization**: keys sorted, compact `,`/`:` separators, and
+every non-ASCII character escaped (`\uXXXX`). `vocab_sha256` is the digest of exactly
+those bytes, so the Python backend and the in-browser build write byte-identical files
+for the same model.
+
+*(`version: 2` and `vocab_sha256` were shipped by feature 004's vocabulary-integrity
+fix but never written down here; the canonical serialization and the derived-model rule
+were added 2026-08-04 for red-team 007 F1/F6. Recorded now so "frozen" means frozen,
+not undocumented.)*
 
 ### POST /api/geo/model
 
 ← a bundle from `GET /api/geo/model` → `200 { "weights_token", "vocab_size" }`.
 
-Validation is strict: format, version, every `config` field, weight shapes, and a
-re-hash of the decoded weights against the declared `weights_token`. A mismatch is
-`400 InvalidParamError`, never a partial load — pairing the wrong vocabulary with a
-set of weights would make every label in the UI quietly wrong.
+Validation is strict, and in this order: format, version, every `config` field, per-
+tensor decode, **completeness and shape of the whole weight set**, a re-hash of the
+decoded weights against the declared `weights_token`, then the vocabulary and a re-hash
+of it against the declared `vocab_sha256`. Any failure is `400 InvalidParamError`, never
+a partial load — pairing the wrong vocabulary with a set of weights would make every
+label in the UI quietly wrong.
+
+*(The completeness/shape step is an amendment of 2026-08-04, red-team 007 F4: a bundle
+carrying one tensor, with every digest honestly recomputed over that one tensor, was
+accepted with a `200` and later surfaced as a `500` whose entire message was the bare
+string `'layers.0.W_V'`. A hash only says the bytes are the bytes the file declares; it
+says nothing about whether they form a model. `GET /api/geo/weights` on such a set is
+now also a typed `400`, never a raw `KeyError`.)*
 
 ### GET /api/geo/trace
 
@@ -213,11 +246,32 @@ deduplicating, valid across workers/restarts; artifacts LRU-evicted with the cac
    — or multipart with a `.txt`/`.md` `file` field replacing `text`.
    Exactly one source of {text, file, hf_dataset}.
 → `202 { "job_id": "<id>", "ready": false }` (SSE `phase: "finetune"`; `done` data:
-   `{ "weights_token": "<new hash>", "loss_before": <float>, "loss_after": <float> }`)
-→ `200 { "weights_token": …, "loss_before": …, "loss_after": …, "ready": true }`
-   on content-hash cache hit.
+   `{ "weights_token": "<new hash>", "loss_before": <float>, "loss_after": <float>,
+      "n_tokens": <int>, "n_unk": <int>, "unk_rate": <float> }`)
+→ `200 { "weights_token": …, "loss_before": …, "loss_after": …, "n_tokens": …,
+   "n_unk": …, "unk_rate": …, "ready": true }` on content-hash cache hit.
 → `400` no source / more than one source; `422` unusable dataset id.
+→ `400 InvalidParamError` when more than 90 % of the tokenized text is `<unk>` under
+   the base model's vocabulary.
 Never mutates the canonical checkpoint.
+
+**Amended 2026-08-04 (red-team 007 F1/F2, issue #6).** Two changes, both to stop a
+believable number coming out of a meaningless run:
+
+1. The text is tokenized with **`tokenizer_for(base)`**, not the canonical tokenizer.
+   Previously a scratch-trained model's own corpus encoded to a stream that was 100 %
+   `<unk>`, and the response still reported a clean loss drop. `n_tokens` / `n_unk` /
+   `unk_rate` are **additive** and report how much of the text that vocabulary actually
+   knew; a client showing the loss MUST be able to show them (absent ⇒ unknown, from a
+   cache entry that predates the fields — never reported as zero). Above 90 % the
+   request is refused instead.
+2. The minted checkpoint **inherits `base`'s vocabulary**, as `POST /api/geo/weights`
+   also now does. This is not a response-shape change; it is what `GET /api/geo/model`
+   then writes into the bundle. Previously a fine-tune or an edit of a model with its
+   own word list saved under the shipped Alice vocabulary, with `vocab_sha256` computed
+   over the substituted list — so the file verified and every label was wrong. Where a
+   vocabulary cannot be recovered, `GET /api/geo/model` now returns
+   `400 InvalidParamError` rather than substituting one.
 
 ---
 

@@ -489,6 +489,17 @@
     runtime. A checkpoint that fell below them would still be saved — CI is what catches it.
   </p>
   <p class="para">
+    And be careful what you read into them. Both are gates against <b>collapse</b> — embeddings
+    piling into one cap, arrows all pointing one way — not against <b>not learning</b>. A model
+    trained on structureless text scores <i>better</i> on both than the real checkpoint does
+    (measured: field directional entropy 3.28 vs 2.81, coverage uniformity 0.988 vs 0.900), because
+    near-random embeddings are maximally dispersed and maximally multi-directional. The only number
+    that separates the two is the loss, which is why <b>Train a new model</b> compares its final
+    loss against <code>ln 1003 ≈ 6.91</code> and says on screen when a run never left that
+    baseline. Such a run is not a failure of the trainer — text with no structure in it has nothing
+    to learn — but presenting it as a trained model would be a lie of omission.
+  </p>
+  <p class="para">
     Those chips under the Geometry Lab heading are exactly these numbers for whichever checkpoint is
     active, and each one explains itself on hover. The one to read first is <b>final loss</b>: it is
     next-token cross-entropy in nats, so the reference point is a uniform model over 1003 tokens at
@@ -499,10 +510,12 @@
     <li>
       <b>Fine-tune</b> continues training the currently active weights on new text — plain SGD,
       up to 500 steps, default 100, lr 1e-2, with the embedding renormalized onto the sphere after
-      every step. It mints a new checkpoint; the trained one is never overwritten. One caveat worth
-      stating plainly: fine-tuning always tokenizes with the <i>shipped</i> vocabulary, so
-      fine-tuning a from-scratch model does not use that model's own word list
-      (<a href="https://github.com/ContextLab/llm-geometry/issues/6" target="_blank" rel="noopener">issue #6</a>).
+      every step. It mints a new checkpoint; the trained one is never overwritten. Your text is
+      tokenized with <b>the active model's own vocabulary</b>, so fine-tuning a from-scratch model
+      really does use that model's word list, and the new checkpoint keeps it. The panel reports how
+      much of your text that vocabulary actually knew; a stream that is more than 90 % <code>&lt;unk&gt;</code>
+      is refused outright, because the loss would then be measuring the model's ability to emit the
+      unknown-word token rather than anything about your words.
     </li>
     <li>
       <b>Train from scratch</b> is a genuinely new model: fresh random weights <i>and</i> a fresh
@@ -521,9 +534,22 @@
     Because a from-scratch model builds its own vocabulary, <b>token id 17 means different words in
     different models</b>. That is why a saved model is a bundle rather than a weight file: format
     <code>llm-geometry/geo-model</code> v2 carries the weights, the vocabulary, a content hash of
-    the weights, and a separate SHA-256 of the vocabulary. Both digests are mandatory on load. A
-    file with real weights and a tampered word list would silently mislabel every point on the
-    sphere, so it is refused instead.
+    the weights, and a separate SHA-256 of the vocabulary. Both digests are mandatory on load, and
+    the weights are checked for completeness and shape before either digest is consulted — a hash
+    only says the bytes are the bytes the file declares, not that they form a model. A file with
+    real weights and a tampered word list would silently mislabel every point on the sphere, so it
+    is refused instead.
+  </p>
+  <p class="para">
+    A word list belongs to a <i>derivation</i>, not to a training run: fine-tuning or editing the
+    weights of a from-scratch model produces a new model whose ids still mean <b>that</b> model's
+    words, and both stacks carry the vocabulary along every such hop. The digests cannot police
+    this on their own — a writer that substituted the shipped word list would also compute
+    <code>vocab_sha256</code> over the substituted list, and the file would verify. So where a
+    vocabulary cannot be recovered, saving is <b>refused</b> rather than completed with the wrong
+    words. That serialization is pinned byte-for-byte in both builds (keys sorted, compact
+    separators, non-ASCII escaped), so a model saved by the browser and the same model saved by the
+    Python backend are the same file.
   </p>
 
   <!-- ------------------------------------------------------------------- real -->

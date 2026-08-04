@@ -339,8 +339,8 @@
         <p class="chips" data-testid="geo-active-model">
           <span class="chip" title="the checkpoint that ships with this build — trained by the real backend on the corpus named here">shipped checkpoint · corpus {spec.model.corpus}</span>
           {#if spec.checkpoint.final_loss != null}<span class="chip" title="next-token cross-entropy in nats at the end of training. A uniform model over 1003 tokens would score ln 1003 ≈ 6.91, so lower than that is real learning.">final loss {spec.checkpoint.final_loss.toFixed(2)}</span>{/if}
-          {#if spec.checkpoint.coverage_uniformity != null}<span class="chip" title="how evenly the 1003 embeddings occupy the sphere: normalized entropy of their occupancy over 64 equal-area bins, 0 = one cluster, 1 = perfectly spread. The test suite requires ≥ 0.80.">coverage {spec.checkpoint.coverage_uniformity.toFixed(2)}</span>{/if}
-          {#if spec.checkpoint.field_directional_entropy != null}<span class="chip" title="how many distinct directions the next-next field points in: entropy of arrow directions over the same 64 bins, in nats, max ln 64 ≈ 4.16. The test suite requires ≥ 2.0.">field entropy {spec.checkpoint.field_directional_entropy.toFixed(2)}</span>{/if}
+          {#if spec.checkpoint.coverage_uniformity != null}<span class="chip" title="how evenly the 1003 embeddings occupy the sphere: normalized entropy of their occupancy over 64 equal-area bins, 0 = one cluster, 1 = perfectly spread. The test suite requires ≥ 0.80. This measures SPREAD, not learning — an untrained model scores higher, not lower.">coverage {spec.checkpoint.coverage_uniformity.toFixed(2)}</span>{/if}
+          {#if spec.checkpoint.field_directional_entropy != null}<span class="chip" title="how many distinct directions the next-next field points in: entropy of arrow directions over the same 64 bins, in nats, max ln 64 ≈ 4.16. The test suite requires ≥ 2.0. This guards against COLLAPSE, not against failing to learn — a model trained on structureless text scores higher than this one. Read the final loss for that.">field entropy {spec.checkpoint.field_directional_entropy.toFixed(2)}</span>{/if}
         </p>
       {/if}
     </div>
@@ -468,9 +468,10 @@
         </li>
         <li>
           <b>Fine-tune</b> continues training the current weights (≤ 500 steps, default 100, lr
-          1e-2). <b>Train from scratch</b> builds a genuinely new model: fresh weights <i>and</i>
-          a fresh vocabulary rebuilt from your text, which is why a saved model file carries its
-          vocabulary alongside its weights.
+          1e-2), tokenizing with the active model's own vocabulary. <b>Train from scratch</b>
+          builds a genuinely new model: fresh weights <i>and</i> a fresh vocabulary rebuilt from
+          your text, which is why a saved model file carries its vocabulary alongside its weights
+          — and why every model you derive from it keeps that vocabulary too.
         </li>
       </ul>
       <p>

@@ -34,8 +34,8 @@ from scipy.ndimage import gaussian_filter
 
 from ..cache.store import CacheStore
 from ..config import SCHEMA_VERSION
-from ..errors import InvalidWeightEditError, NotFoundError
-from .config import D_MODEL, N_LAYERS, VOCAB_SIZE
+from ..errors import InvalidParamError, InvalidWeightEditError, NotFoundError
+from .config import CONTEXT_WINDOW, D_MODEL, MLP_HIDDEN, N_LAYERS, VOCAB_SIZE
 
 PRESETS = ("identity", "toeplitz_fuzzy", "random", "random_autocorr", "zero", "learned")
 EDITABLE_MATRICES = ("W_Q", "W_K", "W_V", "W_O", "embedding")
@@ -230,12 +230,21 @@ def save_weight_set(
     source: str,
     store: CacheStore | None = None,
     vocab_json: str | None = None,
+    owns_vocab: bool | None = None,
 ) -> str:
     """Persist a weight set under its content-hash token; return the token.
 
-    ``vocab_json`` travels with models trained from scratch on a user's own text: their
-    token ids mean different words than the canonical checkpoint's, so the vocabulary
-    is part of the model, not a global. Omitted (None) ⇒ the canonical vocabulary.
+    ``vocab_json`` travels with any model whose token ids mean words of its OWN:
+    trained from scratch on a user's text, imported from such a file, or DERIVED from
+    one of those by fine-tuning or a weight edit. Omitted (None) ⇒ the canonical
+    vocabulary, which is the right answer only for sets descended from the canonical
+    checkpoint.
+
+    ``owns_vocab`` records that claim independently of the payload (it defaults to
+    ``vocab_json is not None``). The two are written together, so a set that says it
+    owns a word list but carries none is a corrupted entry — and ``export_bundle``
+    refuses it rather than silently substituting the shipped vocabulary, which is the
+    exact substitution the three digests exist to prevent.
     """
     store = store or CacheStore()
     token = weights_token(ws)
@@ -246,7 +255,12 @@ def save_weight_set(
             "artifact_type": _ARTIFACT_PREFIX,
             "weights_token": token,
         }
-        meta: dict[str, Any] = {"weights_token": token, "source": source, "names": sorted(ws)}
+        meta: dict[str, Any] = {
+            "weights_token": token,
+            "source": source,
+            "names": sorted(ws),
+            "owns_vocab": bool(vocab_json is not None if owns_vocab is None else owns_vocab),
+        }
         if vocab_json is not None:
             meta["vocab"] = vocab_json
         store.put(key, spec, meta, {name: np.asarray(a, np.float32) for name, a in ws.items()})
@@ -261,6 +275,82 @@ def load_weight_set_vocab(token: str, store: CacheStore | None = None) -> str | 
         return None
     vocab = entry["meta"].get("vocab")
     return vocab if isinstance(vocab, str) else None
+
+
+def weight_set_owns_vocab(token: str, store: CacheStore | None = None) -> bool:
+    """True iff ``token``'s ids mean its own words rather than the canonical ones."""
+    store = store or CacheStore()
+    entry = store.get(_artifact_key(token))
+    if entry is None:
+        return False
+    meta = entry["meta"]
+    # Entries written before `owns_vocab` existed recorded ownership only implicitly,
+    # by carrying a vocabulary; read them the same way rather than guessing.
+    return bool(meta.get("owns_vocab", isinstance(meta.get("vocab"), str)))
+
+
+def inherited_vocab(base: str, store: CacheStore | None = None) -> tuple[str | None, bool]:
+    """The (vocabulary JSON, owns_vocab) a set DERIVED from ``base`` must carry.
+
+    Fine-tuning and weight editing produce a new model whose ids still mean the base
+    model's words. Dropping that word list on the way through is not a cosmetic loss:
+    the derived set then reads under the shipped Alice-in-Wonderland vocabulary and a
+    saved file pairs your weights with those words under a `vocab_sha256` computed
+    over them, so the file verifies and every label on screen is wrong.
+    """
+    if base == "learned":
+        return None, False
+    return load_weight_set_vocab(base, store=store), weight_set_owns_vocab(base, store=store)
+
+
+# -- completeness / shape validation ------------------------------------------------------
+
+#: Every tensor a GeoTransformer weight set must contain, and its exact shape. Kept as
+#: plain data (rather than reached through ``GeoTransformer.weight_names()``) so file
+#: validation costs no torch module construction. ``test_weight_shapes_match_the_model``
+#: pins it against the real module.
+WEIGHT_SHAPES: dict[str, tuple[int, ...]] = {
+    "embedding": (VOCAB_SIZE, D_MODEL),
+    "pos_embedding": (CONTEXT_WINDOW, D_MODEL),
+    **{
+        f"layers.{i}.{name}": shape
+        for i in range(N_LAYERS)
+        for name, shape in (
+            ("W_Q", (D_MODEL, D_MODEL)),
+            ("W_K", (D_MODEL, D_MODEL)),
+            ("W_V", (D_MODEL, D_MODEL)),
+            ("W_O", (D_MODEL, D_MODEL)),
+            ("W_in", (D_MODEL, MLP_HIDDEN)),
+            ("b_in", (MLP_HIDDEN,)),
+            ("W_out", (MLP_HIDDEN, D_MODEL)),
+            ("b_out", (D_MODEL,)),
+        )
+    },
+}
+
+
+def validate_weight_set(ws: dict[str, np.ndarray], context: str = "weight set") -> None:
+    """Raise unless ``ws`` is a COMPLETE, correctly-shaped GeoTransformer weight set.
+
+    The mirror of ``lib/geoEngine/model.validateWeightSet``. Without it a model file
+    carrying one tensor (with every digest honestly recomputed over that one tensor)
+    loaded with a 200 and only fell over later, once as an opaque 500 whose message was
+    the bare string ``'layers.0.W_V'``.
+    """
+    missing = sorted(n for n in WEIGHT_SHAPES if n not in ws)
+    extra = sorted(n for n in ws if n not in WEIGHT_SHAPES)
+    if missing or extra:
+        raise InvalidParamError(
+            f"{context} is incomplete (missing: {missing or 'none'}, "
+            f"unexpected: {extra or 'none'}) — a GeoTransformer needs all "
+            f"{len(WEIGHT_SHAPES)} tensors, so it cannot be run"
+        )
+    for name, shape in WEIGHT_SHAPES.items():
+        actual = tuple(np.asarray(ws[name]).shape)
+        if actual != shape:
+            raise InvalidParamError(
+                f"{context}: weight {name!r} has shape {actual}, expected {shape}"
+            )
 
 
 def load_weight_set(token: str, store: CacheStore | None = None) -> dict[str, np.ndarray]:

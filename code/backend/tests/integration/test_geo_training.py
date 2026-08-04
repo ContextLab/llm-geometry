@@ -52,6 +52,54 @@ def test_same_seed_twice_gives_identical_checkpoint_hash():
     assert weights_token(ws3) != weights_token(ws1)
 
 
+def test_train_batch_step_reproduces_the_training_loop():
+    """`train_batch_step` IS the loop's body — driving it by hand must give the exact
+    same model, bit for bit.
+
+    The step was factored out so one training step could be pinned across languages
+    (`tests/fixtures/geo/scratch_step.json`). That refactor is only safe if it changed
+    nothing: this drives the extracted step with the same RNG consumption order the
+    loop uses (one randperm per epoch, one randint per batch) and demands an identical
+    content hash. (The canonical checkpoint's own id is machine-specific — Linux and
+    macOS BLAS legitimately diverge — so equivalence, not a hard-coded hash, is what
+    can honestly be pinned here.)
+    """
+    import torch
+
+    from llm_geometry.geo.config import REPULSION_WEIGHT, TRAIN_LR
+    from llm_geometry.geo.model import GeoTransformer
+    from llm_geometry.geo.train import (
+        deterministic_torch,
+        sample_uniformity_indices,
+        train_batch_step,
+    )
+
+    stream = corpus_token_stream()[:4000]
+    windows = make_windows(stream, stride=10)
+    epochs, batch_size, seed = 2, 64, 0
+
+    expected_ws, expected_loss = train_geo_model(
+        epochs=epochs, batch_size=batch_size, stride=10, seed=seed, corpus_stream=stream
+    )
+
+    with deterministic_torch(seed):
+        model = GeoTransformer(seed=seed)
+        gen = torch.Generator().manual_seed(seed + 1)
+        opt = torch.optim.Adam(model.parameters(), lr=TRAIN_LR)
+        n = windows.shape[0]
+        for _epoch in range(epochs):
+            order = torch.randperm(n, generator=gen).numpy()
+            for start in range(0, n, batch_size):
+                batch = torch.from_numpy(windows[order[start : start + batch_size]])
+                idx = sample_uniformity_indices(gen)
+                train_batch_step(model, opt, batch, idx, repulsion_weight=REPULSION_WEIGHT)
+        manual_loss = eval_loss(model, windows)
+    manual_ws = model.get_weight_set()
+
+    assert weights_token(manual_ws) == weights_token(expected_ws)
+    assert manual_loss == expected_loss
+
+
 def test_checkpoint_save_load_equivalence(tmp_path):
     store = CacheStore(tmp_path)
     progress: list[tuple[float, str]] = []

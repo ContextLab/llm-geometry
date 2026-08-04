@@ -206,6 +206,16 @@ def weights_get(
                 f"layer must be an int in 0..{N_LAYERS - 1} for {matrix}, got {layer!r}"
             )
         name, src_layer = f"layers.{layer}.{matrix}", layer
+    if name not in ws:
+        # A weight set can be incomplete only if it was written by a build that did not
+        # validate on the way in (see geo/bundle.import_bundle). `ws[name]` then raised
+        # a bare KeyError, which the error middleware rendered as
+        # `500 {"message": "'layers.0.W_V'"}` — an opaque string the UI showed verbatim.
+        raise InvalidParamError(
+            f"the weight set for weights_token {weights_token or 'learned'!r} is "
+            f"incomplete: it has no {name!r}. It cannot be read or run; re-import the "
+            "model file (a current build refuses incomplete files on load)."
+        )
     values = np.asarray(ws[name], dtype=np.float32)
     return _jsonable(
         {

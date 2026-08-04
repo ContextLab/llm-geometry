@@ -25,7 +25,13 @@ from ..errors import InvalidParamError
 from .config import CONTEXT_WINDOW, D_MODEL, MLP_HIDDEN, N_HEADS, N_LAYERS, VOCAB_SIZE
 from .tokenizer import GeoTokenizer
 from .train import resolve_weight_set
-from .weights import load_weight_set_vocab, save_weight_set, weights_token
+from .weights import (
+    load_weight_set_vocab,
+    save_weight_set,
+    validate_weight_set,
+    weight_set_owns_vocab,
+    weights_token,
+)
 
 BUNDLE_FORMAT = "llm-geometry/geo-model"
 BUNDLE_VERSION = 2  # v1 had no vocabulary integrity check (see import_bundle)
@@ -73,6 +79,19 @@ def export_bundle(token: str, store: CacheStore | None = None) -> dict[str, Any]
     real_token = weights_token(ws)
     vocab_json = None if token == "learned" else load_weight_set_vocab(token, store=store)
     if vocab_json is None:
+        # Falling back to the canonical vocabulary is RIGHT for anything descended from
+        # the shipped checkpoint and CATASTROPHIC for a model whose ids mean its own
+        # words: the file would carry these weights under Alice in Wonderland's word
+        # list, with `vocab_sha256` computed over that list, so it would verify and no
+        # reader could ever detect it. Refuse instead — the same guard the TS engine's
+        # `exportBundle` already had.
+        if token != "learned" and weight_set_owns_vocab(token, store=store):
+            raise InvalidParamError(
+                f"weights_token {token!r} has no vocabulary stored beside it, and its "
+                "ids mean its own words rather than the shipped model's — saving it "
+                "now would pair these weights with the wrong word list. Load the model "
+                "file again (or retrain) so its vocabulary is present."
+            )
         from .tokenizer import get_tokenizer
 
         vocab_json = get_tokenizer().to_json()
@@ -131,6 +150,14 @@ def import_bundle(bundle: Any, store: CacheStore | None = None) -> dict[str, Any
         except Exception as exc:
             raise InvalidParamError(f"weight {name!r} could not be decoded: {exc}")
 
+    # Completeness and shapes, BEFORE the hash check — exactly what the TS engine's
+    # `validateWeightSet` already did. Hashing says only "these bytes are the bytes
+    # this file declares"; it says nothing about whether they form a model. A file
+    # carrying one tensor, with every digest honestly recomputed over that one tensor,
+    # used to load with a 200 and then surface as a 500 whose whole message was the
+    # bare string 'layers.0.W_V'.
+    validate_weight_set(ws, context="model file")
+
     # Integrity is MANDATORY, not opt-in. Treating a missing `weights_token` as "nothing
     # to check" let a file with tampered weights load silently just by deleting a field.
     declared = bundle.get("weights_token")
@@ -168,5 +195,9 @@ def import_bundle(bundle: Any, store: CacheStore | None = None) -> dict[str, Any
         )
     tokenizer = GeoTokenizer.from_json(vocab_json)  # raises on a malformed vocabulary
 
-    token = save_weight_set(ws, source="imported", store=store, vocab_json=vocab_json)
+    # An imported model always owns its word list: the file carried one, and that is
+    # what the ids in these weights mean.
+    token = save_weight_set(
+        ws, source="imported", store=store, vocab_json=vocab_json, owns_vocab=True
+    )
     return {"weights_token": token, "vocab_size": len(tokenizer.id_to_text)}

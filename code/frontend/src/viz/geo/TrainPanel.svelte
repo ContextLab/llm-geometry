@@ -15,11 +15,16 @@
   // Train a BRAND NEW model on your own corpus (feature 004, FR-420), and save/load
   // models as files (FR-422).
   //
-  // This is deliberately separate from the fine-tune panel: fine-tuning keeps the
-  // shipped ~1000-word vocabulary, so text about anything Alice in Wonderland does not
-  // cover mostly becomes <unk>. Training from scratch rebuilds the vocabulary from YOUR
-  // text, which is the only way the model can actually learn a different domain — and
-  // the reason a saved model has to carry its vocabulary with it.
+  // This is deliberately separate from the fine-tune panel: fine-tuning keeps the ACTIVE
+  // model's vocabulary, so fine-tuning the shipped checkpoint on text Alice in Wonderland
+  // does not cover mostly becomes <unk>. Training from scratch rebuilds the vocabulary
+  // from YOUR text, which is the only way the model can actually learn a different domain
+  // — and the reason a saved model has to carry its vocabulary with it (and why every
+  // model DERIVED from it by a fine-tune or an edit carries that vocabulary too).
+  //
+  // The result banner reports `learned`: a run on structureless text ends at the uniform
+  // baseline ln(1003) ≈ 6.91 and genuinely cannot do better, but announcing it as a
+  // trained model with no further comment was a lie of omission.
   type Source = "paste" | "file" | "hf";
 
   let source = $state<Source>("paste");
@@ -201,9 +206,11 @@
   <p class="panel-note">
     The vocabulary is rebuilt as the 1000 most frequent word and punctuation types in
     <b>your</b> text, so token ids mean different words than in any other model here — which is why
-    a saved model file carries its vocabulary alongside its weights, each with its own checksum.
-    Give it a book's worth of text: fewer than 1000 distinct types and the run is refused rather
-    than padded out.
+    a saved model file carries its vocabulary alongside its weights, each with its own checksum,
+    and why anything you then derive from this model (a fine-tune, a weight edit) keeps that same
+    vocabulary. Give it a book's worth of text: fewer than 1000 distinct types and the run is
+    refused rather than padded out. Text with no structure in it will train without error and end
+    at the uniform baseline <code>ln 1003 ≈ 6.91</code> — the result says so when that happens.
   </p>
 
   <div class="tabs" role="tablist">
@@ -277,6 +284,20 @@
       {result.n_tokens?.toLocaleString()} tokens · {result.epochs} epochs — it is now the
       active model, with its own vocabulary
     </div>
+    {#if result.learned === false && result.uniform_baseline != null}
+      <!-- Not a failure of the trainer: text with no structure in it has nothing to
+           learn. But the banner above, and the field-entropy chip in the header, both
+           read as success, so the run has to say what it actually did. -->
+      <div class="not-learned" data-testid="geo-train-not-learned">
+        <b>This run never left the uniform baseline.</b>
+        A model that predicts every token equally scores
+        {result.uniform_baseline.toFixed(2)} nats (that is <code>ln 1003</code>), and this run
+        finished at {result.final_loss?.toFixed(2)}. It has not learned anything from the text
+        yet — either the text has no structure to learn, or it needs more epochs. The
+        embedding chips in the header will still look healthy: they measure spread, not
+        learning, and near-random embeddings are maximally spread.
+      </div>
+    {/if}
   {/if}
 
   <div class="divider"></div>
@@ -327,6 +348,13 @@
     border: 1px solid rgba(91, 224, 176, 0.28); border-radius: 9px;
     padding: 0.45rem 0.6rem; font-size: 0.76rem; line-height: 1.45;
   }
+  .not-learned {
+    background: rgba(255, 190, 92, 0.1); color: #ffbe5c;
+    border: 1px solid rgba(255, 190, 92, 0.32); border-radius: 9px;
+    padding: 0.45rem 0.6rem; font-size: 0.74rem; line-height: 1.5;
+  }
+  .not-learned b { color: #ffd08a; }
+  .not-learned code { font-family: var(--mono); }
   .divider { height: 1px; background: var(--border); margin: 0.15rem 0; }
   .io { display: flex; flex-direction: column; gap: 0.4rem; }
   .io-row { display: flex; gap: 0.4rem; flex-wrap: wrap; }

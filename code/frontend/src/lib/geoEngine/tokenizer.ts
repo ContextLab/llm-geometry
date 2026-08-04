@@ -49,6 +49,39 @@ const SPECIAL_TEXTS: ReadonlyMap<number, string> = new Map([
 const NO_SPACE_BEFORE = new Set([...".,;:!?)]}'…", "''"]);
 const NO_SPACE_AFTER = new Set([..."([{"]);
 
+/**
+ * The CANONICAL vocabulary serialization — byte-identical to the backend's
+ * `GeoTokenizer.to_json()`.
+ *
+ * `vocab_sha256` is a digest of these exact bytes, so the spelling is part of the
+ * format, not a formatting preference. This build used to emit `JSON.stringify`'s
+ * output in its own key order while Python used `", "`/`": "` separators and sorted
+ * keys, so the SAME model had two different digests depending on which build wrote the
+ * file. Both stacks now emit: keys sorted, compact separators, and every non-ASCII
+ * character escaped (Python's `ensure_ascii=True`) so the bytes never depend on the
+ * encoding. The token regex admits any non-space symbol, so accented letters and
+ * em-dashes really do reach the word list.
+ */
+export function canonicalVocabJson(words: readonly string[]): string {
+  // Key order: "format" < "specials" < "words", and inside specials "<eos>" < "<pad>"
+  // < "<unk>" — written out rather than sorted at runtime so the order is reviewable.
+  const raw = JSON.stringify({
+    format: "geo-tokenizer-v1",
+    specials: { [EOS_TOKEN]: EOS_ID, [PAD_TOKEN]: PAD_ID, [UNK_TOKEN]: UNK_ID },
+    words: [...words],
+  });
+  // JSON.stringify escapes control characters, quotes and backslashes exactly as
+  // Python does; it leaves non-ASCII literal, which Python does not. Escape per
+  // UTF-16 CODE UNIT (not code point), so an astral character becomes its two
+  // surrogate escapes — which is exactly what `ensure_ascii` emits for one.
+  let out = "";
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i);
+    out += code < 0x80 ? raw[i] : "\\u" + code.toString(16).padStart(4, "0");
+  }
+  return out;
+}
+
 /** Deterministically split `text` into lowercase word/punctuation tokens. */
 export function splitWords(text: string): string[] {
   const normalized = text.toLowerCase().replace(NORMALIZE_RE, (ch) => NORMALIZE_MAP[ch]);

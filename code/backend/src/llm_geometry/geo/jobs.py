@@ -21,14 +21,15 @@ from ..errors import InvalidParamError, LLMGeometryError
 from ..jobs.registry import registry
 from ..torchstate import TORCH_GLOBAL_LOCK
 from .config import N_LAYERS, SEED
-from .finetune import finetune, finetune_cache_key
+from .finetune import FINETUNE_MAX_UNK_RATE, finetune, finetune_cache_key
 from .scratch import corpus_stats, scratch_cache_key, train_scratch
-from .tokenizer import get_tokenizer
+from .tokenizer import tokenizer_for
 from .train import canonical_cache_key, resolve_weight_set, train_canonical
 from .weights import (
     _ARTIFACT_PREFIX as _WEIGHTS_PREFIX,  # stable on-disk prefix ("geo-weights")
     EDITABLE_MATRICES,
     build_weight_set,
+    inherited_vocab,
     save_weight_set,
     weights_token,
 )
@@ -117,11 +118,23 @@ def request_finetune(
     """
     if not text.strip():
         raise InvalidParamError("fine-tuning text is empty")
-    if len(get_tokenizer().encode_stream(text)) < 2:
+    store = CacheStore()
+    # Both checks use the BASE model's vocabulary, so the answers match what the job
+    # will actually train on, and both are synchronous 400s rather than a late job
+    # error event (the same rule the empty-text check follows).
+    enc = tokenizer_for(base, store=store).encode(text, truncate=False)
+    if len(enc.ids) < 2:
         raise InvalidParamError(
             "fine-tuning text is too short after tokenization (need at least 2 tokens)"
         )
-    store = CacheStore()
+    unk_rate = enc.n_unk / len(enc.ids)
+    if unk_rate > FINETUNE_MAX_UNK_RATE:
+        raise InvalidParamError(
+            f"{enc.n_unk} of {len(enc.ids)} tokens ({unk_rate:.0%}) in this text are "
+            "outside the active model's vocabulary, so fine-tuning on it would mostly "
+            "teach the model to emit <unk> and the loss would say nothing about your "
+            "words. Use 'Train a new model' to build a vocabulary from this text instead."
+        )
     base_token = weights_token(resolve_weight_set(base, store=store))
     key, _ = finetune_cache_key(base_token, text, steps, lr, seed)
     entry = store.get(key)
@@ -131,6 +144,7 @@ def request_finetune(
             "weights_token": meta["weights_token"],
             "loss_before": meta["loss_before"],
             "loss_after": meta["loss_after"],
+            **_unk_fields(meta),
             "ready": True,
         }
     job, created = registry.get_or_create(key, phase="finetune")
@@ -139,6 +153,21 @@ def request_finetune(
             target=_run_finetune, args=(job.job_id, text, base, steps, lr, seed), daemon=True
         ).start()
     return {"job_id": job.job_id, "ready": False}
+
+
+def _unk_fields(meta: dict[str, Any]) -> dict[str, Any]:
+    """The out-of-vocabulary report that travels with every fine-tune result.
+
+    A loss drop is only "on your text" to the extent your text was in the model's
+    vocabulary; a client that shows the loss must be able to show this beside it.
+    Older cache entries predate these fields, hence the .get()s — an absent value is
+    reported as None (unknown), never as a reassuring zero.
+    """
+    return {
+        "n_tokens": meta.get("n_tokens"),
+        "n_unk": meta.get("n_unk"),
+        "unk_rate": meta.get("unk_rate"),
+    }
 
 
 def _run_finetune(job_id: str, text: str, base: str, steps: int, lr: float, seed: int) -> None:
@@ -155,6 +184,7 @@ def _run_finetune(job_id: str, text: str, base: str, steps: int, lr: float, seed
                 "weights_token": result["weights_token"],
                 "loss_before": result["loss_before"],
                 "loss_after": result["loss_after"],
+                **_unk_fields(result),
             },
         )
     except LLMGeometryError as exc:
@@ -212,6 +242,11 @@ def _run_train_scratch(job_id: str, text: str, epochs: int, seed: int) -> None:
                 "weights_token": result["weights_token"],
                 "vocab_size": result["vocab_size"],
                 "final_loss": result["final_loss"],
+                # Whether the run actually left the uniform-distribution baseline. The
+                # client shows this next to the loss; without it a run that learned
+                # nothing reads exactly like one that learned something.
+                "uniform_baseline": result["uniform_baseline"],
+                "learned": result["learned"],
                 "n_tokens": result["n_tokens"],
                 "n_distinct": result["n_distinct"],
                 "epochs": result["epochs"],
@@ -226,17 +261,27 @@ def _run_train_scratch(job_id: str, text: str, epochs: int, seed: int) -> None:
 # -- weight-set minting + per-matrix source tracking -------------------------------------
 
 
-def mint_weight_set(base: str, edits: list[dict[str, Any]]) -> dict[str, Any]:
+def mint_weight_set(
+    base: str, edits: list[dict[str, Any]], store: CacheStore | None = None
+) -> dict[str, Any]:
     """POST /api/geo/weights: apply ``edits`` to ``base``; mint a content-hash token.
 
     Alongside the weight artifact, a small sidecar records the per-matrix source map
     (inherited from ``base``'s own sidecar, overlaid with these edits) so
     GET /api/geo/weights can report exact `"preset:<name>" / "edited"` provenance.
+
+    Editing a matrix does not change what the model's token ids MEAN, so the base's
+    vocabulary is inherited too. Dropping it silently reverted an edited scratch model
+    to the canonical Alice word list — and a file saved from it verified, because the
+    writer computed `vocab_sha256` over the substituted list.
     """
-    store = CacheStore()
+    store = store or CacheStore()
     base_ws = resolve_weight_set(base, store=store)
     ws, summaries = build_weight_set(base_ws, edits)
-    token = save_weight_set(ws, source="edited", store=store)
+    vocab_json, owns_vocab = inherited_vocab(base, store=store)
+    token = save_weight_set(
+        ws, source="edited", store=store, vocab_json=vocab_json, owns_vocab=owns_vocab
+    )
 
     sources = dict(_source_map(base, store))
     for s in summaries:

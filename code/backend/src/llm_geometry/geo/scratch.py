@@ -18,6 +18,7 @@ with a plain-language error naming the shortfall rather than silently padding.
 from __future__ import annotations
 
 import hashlib
+import math
 from typing import Any, Callable
 
 import numpy as np
@@ -47,6 +48,32 @@ SCRATCH_DEFAULT_EPOCHS = 12
 SCRATCH_MAX_EPOCHS = 60
 #: Records pulled when the corpus comes from a HuggingFace dataset.
 SCRATCH_DEFAULT_MAX_SAMPLES = 2000
+
+#: How far below ``ln(VOCAB_SIZE)`` a run's final cross-entropy has to land before we
+#: are willing to call it "learned". A model that predicts the uniform distribution
+#: scores exactly ``ln(VOCAB_SIZE)`` nats, so half a nat below it means the model's
+#: next-token distribution is at least e^0.5 ≈ 1.65× more concentrated than uniform —
+#: a low bar on purpose, because this flag exists to catch runs that never left the
+#: baseline, not to grade good ones. (`tests/unit/geoScratch.test.ts` asks a full nat
+#: of a real corpus, so a genuine run clears this comfortably.)
+#:
+#: NOTE: the checkpoint's two "non-degeneracy" gates — ``coverage_uniformity`` and
+#: ``field_directional_entropy`` — CANNOT stand in for this. They guard against
+#: COLLAPSE (embeddings piling into one spot, arrows all pointing one way), and a model
+#: that learned nothing scores BETTER on both than the real checkpoint does, because
+#: near-random embeddings are maximally dispersed and maximally multi-directional
+#: (measured: entropy 3.28 vs 2.81, coverage 0.988 vs 0.900). Only the loss separates
+#: "did not learn" from "learned"; `test_the_two_existing_gates_do_not_catch_a_baseline_run`
+#: pins that so nobody later mistakes those gates for coverage here.
+SCRATCH_LEARNED_MARGIN = 0.5
+
+
+def uniform_baseline_loss() -> float:
+    """Cross-entropy (nats) of the uniform next-token distribution: ``ln(VOCAB_SIZE)``.
+
+    The floor any model reaches by learning nothing at all.
+    """
+    return math.log(VOCAB_SIZE)
 
 
 def scratch_cache_key(text: str, epochs: int, seed: int) -> tuple[str, dict[str, Any]]:
@@ -88,8 +115,9 @@ def train_scratch(
 ) -> dict[str, Any]:
     """Train a new model on ``text`` (or a streamed HF dataset).
 
-    Returns ``{"weights_token", "vocab_size", "final_loss", "n_tokens", "n_distinct",
-    "epochs", "cached"}``. The canonical checkpoint is never touched.
+    Returns ``{"weights_token", "vocab_size", "final_loss", "uniform_baseline",
+    "learned", "n_tokens", "n_distinct", "epochs", "seed", "cached"}``. The canonical
+    checkpoint is never touched.
     """
     if (text is None) == (hf_dataset is None):
         raise InvalidParamError("exactly one of text/hf_dataset must be provided")
@@ -144,10 +172,17 @@ def train_scratch(
 
     vocab_json = tokenizer.to_json()
     token = save_weight_set(ws, source="scratch", store=store, vocab_json=vocab_json)
+    baseline = uniform_baseline_loss()
     meta = {
         "weights_token": token,
         "vocab_size": VOCAB_SIZE,
         "final_loss": float(final_loss),
+        # Honesty, not a gate: text with no structure in it cannot be learned, and such
+        # a run genuinely ends at ln(VOCAB_SIZE). Refusing it would be wrong (the run
+        # did what it could); announcing "trained a new model · final loss 6.89" with
+        # nothing saying it never left the uniform baseline is what was wrong.
+        "uniform_baseline": float(baseline),
+        "learned": bool(final_loss < baseline - SCRATCH_LEARNED_MARGIN),
         "n_tokens": int(stats["n_tokens"]),
         "n_distinct": int(stats["n_distinct"]),
         "epochs": epochs,

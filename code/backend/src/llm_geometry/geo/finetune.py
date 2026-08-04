@@ -5,12 +5,19 @@ contents of an uploaded .txt/.md file (the route reads the file and passes it he
 ``text``), or a HuggingFace dataset id streamed with ``datasets`` (first
 ``max_samples`` records; the ``text`` field, or the first string field found).
 
+The text is tokenized with **the base model's own vocabulary** (``tokenizer_for(base)``),
+not the canonical one: a model trained from scratch has different words behind the same
+ids, and encoding its fine-tuning corpus with the shipped Alice vocabulary turned the
+whole stream into ``<unk>`` while still reporting a loss drop "on your text" (issue #6).
+The resulting ``<unk>`` rate is reported with the losses, and a stream that is almost
+entirely unknown is refused outright — see ``FINETUNE_MAX_UNK_RATE``.
+
 The base weight set is copied, fine-tuned with plain ``torch.optim.SGD`` for at most
 500 steps (embedding rows renormalized to unit norm after every step, preserving the
-S² invariant), and saved as a *new* content-hash checkpoint. ``loss_before`` /
-``loss_after`` are the mean token cross-entropy on the fine-tuning text evaluated
-with the base and the fine-tuned weights respectively. Results are cached under a
-content-derived key so identical requests are 200-cache-hits.
+S² invariant), and saved as a *new* content-hash checkpoint **carrying the base's
+vocabulary**. ``loss_before`` / ``loss_after`` are the mean token cross-entropy on the
+fine-tuning text evaluated with the base and the fine-tuned weights respectively.
+Results are cached under a content-derived key so identical requests are 200-cache-hits.
 """
 
 from __future__ import annotations
@@ -34,11 +41,22 @@ from .config import (
     SEED,
 )
 from .model import model_from_weight_set
-from .tokenizer import get_tokenizer
+from .tokenizer import tokenizer_for
 from .train import ProgressCb, deterministic_torch, eval_loss, make_windows, resolve_weight_set
-from .weights import save_weight_set, weights_token
+from .weights import inherited_vocab, save_weight_set, weights_token
 
 _ARTIFACT_TYPE = "geo_finetune"
+
+#: A fine-tuning stream this far into ``<unk>`` is not "your text" in any meaningful
+#: sense: the model is being taught to emit the unknown-word token, and the resulting
+#: loss drop says nothing about the words you pasted. Refused rather than reported.
+#: (The red team measured `n_tokens 40 n_unk 38` presented as "loss 6.58 → 5.58 on your
+#: text".) Anything below this is allowed but its unk rate is reported to the caller —
+#: fine-tuning the shipped Alice model on modern prose legitimately unks a good share
+#: of it, and refusing that would be worse than saying so.
+FINETUNE_MAX_UNK_RATE = 0.9
+#: Above this the client is expected to say so on screen next to the loss.
+FINETUNE_UNK_WARN_RATE = 0.25
 
 
 def load_text_from_hf(
@@ -119,8 +137,9 @@ def finetune(
     progress_cb: ProgressCb | None = None,
     store: CacheStore | None = None,
 ) -> dict[str, Any]:
-    """Fine-tune from ``base`` on one text source; return
-    ``{"weights_token", "loss_before", "loss_after", "cached"}``."""
+    """Fine-tune from ``base`` on one text source; return ``{"weights_token",
+    "loss_before", "loss_after", "base_token", "n_tokens", "n_unk", "unk_rate",
+    "cached"}``."""
     if (text is None) == (hf_dataset is None):
         raise InvalidParamError("exactly one of text/hf_dataset must be provided")
     if not 1 <= int(steps) <= FINETUNE_MAX_STEPS:
@@ -139,6 +158,7 @@ def finetune(
 
     user_store = store
     store = store or CacheStore()
+    base_store: CacheStore | None = store
     try:
         base_ws = resolve_weight_set(base, store=store)
     except NotFoundError:
@@ -147,6 +167,7 @@ def finetune(
         # An isolated result store was supplied but the base lives in the shared
         # cache (e.g. base="learned"): resolve from there, write results here.
         base_ws = resolve_weight_set(base)
+        base_store = None
     base_token = weights_token(base_ws)
 
     key, spec = finetune_cache_key(base_token, text, steps, lr, seed)
@@ -154,10 +175,23 @@ def finetune(
     if entry is not None:
         return {**entry["meta"], "cached": True}
 
-    ids = get_tokenizer().encode_stream(text)
+    # Tokenize with the BASE MODEL's own vocabulary (issue #6). Using the canonical
+    # tokenizer regardless of `base` turned a scratch model's fine-tuning corpus into
+    # a stream of <unk> and then reported the resulting loss drop as progress "on your
+    # text" — a believable number from a meaningless run.
+    enc = tokenizer_for(base, store=base_store).encode(text, truncate=False)
+    ids = enc.ids
     if len(ids) < 2:
         raise InvalidParamError(
             "fine-tuning text is too short after tokenization (need at least 2 tokens)"
+        )
+    unk_rate = enc.n_unk / len(ids)
+    if unk_rate > FINETUNE_MAX_UNK_RATE:
+        raise InvalidParamError(
+            f"{enc.n_unk} of {len(ids)} tokens ({unk_rate:.0%}) in this text are outside "
+            "the active model's vocabulary, so fine-tuning on it would mostly teach the "
+            "model to emit <unk> and the loss would say nothing about your words. Use "
+            "'Train a new model' to build a vocabulary from this text instead."
         )
     windows = make_windows(np.asarray(ids + [EOS_ID], dtype=np.int64), stride=25)
 
@@ -204,12 +238,21 @@ def finetune(
             raise ComputeError("fine-tuning produced a non-finite loss; refusing to save")
 
     new_ws = model.get_weight_set()
-    new_token = save_weight_set(new_ws, source="finetuned", store=store)
+    # A fine-tune of a model with its own word list is still that model's word list.
+    # Saving without it reverted the result to the canonical vocabulary and the saved
+    # file's digests still verified, because the writer hashed the substituted list.
+    vocab_json, owns_vocab = inherited_vocab(base, store=base_store)
+    new_token = save_weight_set(
+        new_ws, source="finetuned", store=store, vocab_json=vocab_json, owns_vocab=owns_vocab
+    )
     meta = {
         "weights_token": new_token,
         "loss_before": float(loss_before),
         "loss_after": float(loss_after),
         "base_token": base_token,
+        "n_tokens": int(len(ids)),
+        "n_unk": int(enc.n_unk),
+        "unk_rate": float(unk_rate),
     }
     store.put(key, spec, meta, {name: np.asarray(a, np.float32) for name, a in new_ws.items()})
     return {**meta, "cached": False}
