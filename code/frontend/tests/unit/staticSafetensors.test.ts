@@ -281,3 +281,83 @@ describe("safetensors range reads (REAL HuggingFace CDN)", () => {
     expect(w.stats.max).toBeGreaterThanOrEqual(w.stats.mean);
   }, 120_000);
 });
+
+/**
+ * Tensor names in a safetensors header are chosen by a REMOTE file, and the reader turns
+ * them into keys of a JavaScript object. `tensors["__proto__"] = entry` on an ordinary
+ * object literal does not create a property at all: it invokes `Object.prototype`'s
+ * `__proto__` setter and replaces the map's prototype with the entry. The named tensor
+ * then vanishes from the map with no error, and every field of that entry — `dtype`,
+ * `shape`, `data_offsets` — becomes visible on the map itself, so any reader that resolves
+ * a name with a truthiness test rather than `Object.hasOwn` gets a remote host's string
+ * back for a tensor that was never declared.
+ *
+ * These build a REAL safetensors byte stream (8-byte little-endian header length, JSON
+ * header, F32 payload) and serve it over a transport that honours `Range` exactly as the
+ * CDN does. Nothing about the reader is stubbed — the bytes are the format.
+ */
+function realSafetensorsFile(headerJson: string, payload: Float32Array): Uint8Array {
+  // The header is written as TEXT, not as an object literal: `{ __proto__: … }` in
+  // JavaScript source sets the literal's prototype and `JSON.stringify` then emits `{}`,
+  // so an object literal cannot express the very file this test is about.
+  const headerBytes = new TextEncoder().encode(headerJson);
+  const out = new Uint8Array(8 + headerBytes.length + payload.byteLength);
+  new DataView(out.buffer).setBigUint64(0, BigInt(headerBytes.length), true);
+  out.set(headerBytes, 8);
+  out.set(new Uint8Array(payload.buffer.slice(0)), 8 + headerBytes.length);
+  return out;
+}
+
+/** A transport that serves `bytes` and honours the Range header, like the real CDN. */
+function rangeServer(bytes: Uint8Array) {
+  return async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const range = String((init?.headers as Record<string, string>)?.Range ?? "");
+    const m = /bytes=(\d+)-(\d+)/.exec(range);
+    if (!m) return new Response(bytes.slice(0), { status: 200 });
+    const start = Number(m[1]);
+    const end = Number(m[2]) + 1;
+    return new Response(bytes.slice(start, end), { status: 206 });
+  };
+}
+
+describe("a remote header cannot reach through the tensor map's prototype", () => {
+  const payload = Float32Array.from([1, 2, 3, 4]);
+
+  it("keeps a tensor literally named __proto__ as an own key, and inherits nothing", async () => {
+    const bytes = realSafetensorsFile(
+      '{"__metadata__":{"format":"pt"},' +
+        '"__proto__":{"dtype":"F32","shape":[2,2],"data_offsets":[0,16]}}',
+      payload,
+    );
+    const file = new SafetensorsFile("https://example.invalid/model.safetensors", rangeServer(bytes));
+    const header = await file.header();
+
+    // Before: the assignment ran the `__proto__` SETTER, so the entry was not an own key…
+    expect(Object.hasOwn(header.tensors, "__proto__")).toBe(true);
+    expect(Object.keys(header.tensors)).toEqual(["__proto__"]);
+    // …and its fields leaked onto the map itself, readable as if the map declared them.
+    expect((header.tensors as unknown as Record<string, unknown>).dtype).toBeUndefined();
+    expect((header.tensors as unknown as Record<string, unknown>).shape).toBeUndefined();
+    expect(Object.getPrototypeOf(header.tensors)).toBeNull();
+
+    const win = await file.readWindow("__proto__", 0, 2, 0, 2);
+    expect(Array.from(win.values)).toEqual([1, 2, 3, 4]);
+  });
+
+  it("resolves nothing for an Object.prototype member the file did not declare", async () => {
+    const bytes = realSafetensorsFile(
+      '{"wte.weight":{"dtype":"F32","shape":[2,2],"data_offsets":[0,16]}}',
+      payload,
+    );
+    const file = new SafetensorsFile("https://example.invalid/model.safetensors", rangeServer(bytes));
+    const header = await file.header();
+    for (const name of ["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__"]) {
+      expect((header.tensors as unknown as Record<string, unknown>)[name]).toBeUndefined();
+      await expect(file.readWindow(name, 0, 1, 0, 1)).rejects.toMatchObject({
+        type: "NotFoundError",
+      });
+    }
+    const win = await file.readWindow("wte.weight", 0, 2, 0, 2);
+    expect(Array.from(win.values)).toEqual([1, 2, 3, 4]);
+  });
+});

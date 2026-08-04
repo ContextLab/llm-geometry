@@ -112,7 +112,12 @@ export function createStaticClient(opts: StaticClientOptions = {}): StaticClient
       model_id: m.model_id,
       revision: m.revision,
       source: "curated",
-      display_name: DISPLAY_NAMES[m.model_id] ?? m.model_id,
+      // `Object.hasOwn`, not `?? `: `DISPLAY_NAMES` is an object literal, so
+      // `DISPLAY_NAMES["constructor"]` is the `Object` function itself — not nullish, so
+      // `??` would not fall through — and a model whose id happened to be an
+      // `Object.prototype` member would be listed in the tab's model menu under the
+      // stringification of a JavaScript builtin instead of under its own id.
+      display_name: Object.hasOwn(DISPLAY_NAMES, m.model_id) ? DISPLAY_NAMES[m.model_id] : m.model_id,
       status: "supported",
       capabilities: {
         num_layers: graph.meta.n_layers,

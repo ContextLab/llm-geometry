@@ -332,10 +332,45 @@ def _as_int(value: Any, name: str) -> int:
 
 
 def _as_float(value: Any, name: str) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
+    """A FINITE JSON number, or a typed refusal — the float half of ``_as_int``'s rule.
+
+    ``float(value)`` was left in place when ``_as_int`` was rewritten, and it accepts the
+    same silent rewrites one type down. Measured against the running route by the red
+    team:
+
+        {"p": Infinity}   500  InternalError: Out of range float values are not JSON compliant
+        {"p": NaN}        — every comparison against it is False, so a range check passes
+        {"lr": "1e-3"}    202, and the string never appears again
+        {"lr": true}      202 with lr = 1.0
+        {"dropout": "٧"}  Python reads Arabic-Indic digits; JavaScript's `Number` does not
+
+    ``Infinity`` is the worst of them: it survives ``0 <= p <= 1``-style checks by being
+    unordered or by passing them outright, reaches a response, and dies in the JSON
+    encoder as an untyped 500 — the exact ``OverflowError``-shaped leak the ``_as_int``
+    rewrite removed one type up. ``NaN`` is worse still because nothing at all throws:
+    every ``<`` and ``>`` against it is ``False``, so a range guard written as
+    ``if lr <= 0: raise`` waves it through and the run diverges at step 1.
+
+    Strings are refused rather than parsed for the same reason ``_as_int`` refuses them:
+    the TypeScript engine's ``Number`` and Python's ``float`` do not agree about what a
+    numeric string is (``"٧"``, ``"０.５"``, ``"1_0"``, ``"0x10"``), so the two stacks
+    would compute with different numbers from one request body. Every caller here reads
+    a JSON body, never a query string, so nothing legitimate arrives as text.
+    """
+    if isinstance(value, bool):
         raise InvalidParamError(f"{name} must be a number, got {value!r}")
+    if isinstance(value, (int, float)):
+        try:
+            number = float(value)
+        except OverflowError:  # an int too large for a double, e.g. 10**400
+            raise InvalidParamError(
+                f"{name} must be a number a float64 can represent exactly enough to use, "
+                f"got {value!r}"
+            )
+        if not math.isfinite(number):
+            raise InvalidParamError(f"{name} must be a finite number, got {value!r}")
+        return number
+    raise InvalidParamError(f"{name} must be a number, got {value!r}")
 
 
 def _as_bool(value: Any, name: str) -> bool:

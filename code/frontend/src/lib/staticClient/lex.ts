@@ -92,6 +92,7 @@ import {
   noMappedVocabularyRefusal,
 } from "../lexEngine/vacancyRefusals";
 import {
+  MAX_SEED,
   buildVacancyMap,
   mapVocabWords,
   typeCounts,
@@ -780,31 +781,77 @@ function decodeF32(data: string, shape: number[]): Float32Array {
 
 // --- parameter coercion (the backend's error envelope, verbatim) ------------------------
 
-function asInt(value: unknown, name: string, fallback: number): number {
-  if (value === undefined || value === null) return fallback;
-  const n = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(n) || !Number.isInteger(n)) {
-    throw invalidParamError(`${name} must be an integer, got ${JSON.stringify(value)}`);
+/**
+ * How a refused value is quoted back. `JSON.stringify` is not usable on its own here:
+ * it renders `NaN`, `Infinity` and `-Infinity` all as the string `null`, so the three
+ * numbers hardest to notice would be reported as the one value nobody sent.
+ */
+function show(value: unknown): string {
+  if (typeof value === "number") return String(value);
+  if (typeof value === "bigint") return `${value}n`;
+  if (value === undefined) return "undefined";
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
   }
-  return n;
 }
 
-function asFloat(value: unknown, name: string, fallback: number): number {
-  if (value === undefined || value === null) return fallback;
-  const n = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(n)) {
-    throw invalidParamError(`${name} must be a number, got ${JSON.stringify(value)}`);
+/**
+ * A JSON integer, or a typed refusal — never a coercion. Mirrors `routes_lex._as_int`.
+ *
+ * `Number(value)` was the whole rule, and `Number` is the widest parser in the language:
+ * it reads hexadecimal (`"0x10"` → 16), binary and octal literals (`"0b101"`, `"0o17"`),
+ * exponent notation (`"1e3"` → 1000), a leading `+`, surrounding whitespace (`" 7 "`),
+ * the empty string (`""` → 0), `null` (→ 0), `true` (→ 1), `[]` (→ 0) and `[7]` (→ 7).
+ * Every one of those reached the engine as a number that is NOT the text that was sent,
+ * and `0x10` is the sharpest: a field documented as "an integer", given `0x10`, ran with
+ * 16. Python's `_as_int` answers all of them with a typed 400, so the static build — the
+ * one the public site runs — was the lenient half of a two-stack disagreement.
+ *
+ * The rule is therefore the backend's: only a JSON number is a number. `7.0` IS accepted
+ * as 7 (JSON cannot express the int/float distinction and Python reads it as 7 too); a
+ * fractional or non-finite one is refused rather than truncated. An explicit `null` is
+ * refused for the same reason it is refused in Python — `undefined` means "the key was
+ * not sent", `null` means "the key was sent, carrying nothing", and only the first can
+ * honestly take a default.
+ */
+function asInt(value: unknown, name: string, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== "number") {
+    throw invalidParamError(`${name} must be an integer, got ${show(value)}`);
   }
-  return n;
+  if (!Number.isFinite(value)) {
+    throw invalidParamError(`${name} must be a finite integer, got ${show(value)}`);
+  }
+  if (!Number.isInteger(value)) {
+    throw invalidParamError(
+      `${name} must be an integer, got ${show(value)} — it is not rounded or truncated, ` +
+        "because a number that is not the number you asked for is worse than a refusal",
+    );
+  }
+  return value;
+}
+
+/** A finite JSON number, or a typed refusal. `asInt`'s rule, one type down. */
+function asFloat(value: unknown, name: string, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== "number") {
+    throw invalidParamError(`${name} must be a number, got ${show(value)}`);
+  }
+  if (!Number.isFinite(value)) {
+    throw invalidParamError(`${name} must be a finite number, got ${show(value)}`);
+  }
+  return value;
 }
 
 function asBool(value: unknown, name: string, fallback: boolean): boolean {
-  if (value === undefined || value === null) return fallback;
+  if (value === undefined) return fallback;
   if (typeof value === "boolean") return value;
   if (typeof value === "string" && ["true", "false", "1", "0"].includes(value.toLowerCase())) {
     return value.toLowerCase() === "true" || value === "1";
   }
-  throw invalidParamError(`${name} must be a boolean, got ${JSON.stringify(value)}`);
+  throw invalidParamError(`${name} must be a boolean, got ${show(value)}`);
 }
 
 function oneOf(value: unknown, choices: readonly number[], name: string, fallback: number): number {
@@ -1213,6 +1260,17 @@ export class LexSection {
     const weightDecay = asFloat(body.weight_decay, "weight_decay", DEFAULT_WEIGHT_DECAY);
     if (weightDecay < 0) throw invalidParamError(`weight_decay must be >= 0, got ${weightDecay}`);
     const seed = asInt(body.seed, "seed", DEFAULT_SEED);
+    // The same bound the backend puts on this seed, and for the same reason: it is echoed
+    // back in the job's result and in `spec`. `Number.isInteger(1e300)` is TRUE, so
+    // `asInt` alone lets a seed through that no RNG here can use and that Python would
+    // have refused with a typed 400 — one request body, two stacks, two different runs.
+    if (Math.abs(seed) > MAX_SEED) {
+      throw invalidParamError(
+        `seed must lie in [-${MAX_SEED}, ${MAX_SEED}]: outside that range JavaScript ` +
+          "cannot represent the integer exactly, so the seed reported back would not be " +
+          `the seed this run used. Got ${seed}`,
+      );
+    }
     const sampleEvery = asInt(body.sample_every, "sample_every", DEFAULT_SAMPLE_EVERY);
     if (sampleEvery < 1) throw invalidParamError(`sample_every must be at least 1, got ${sampleEvery}`);
 
@@ -1565,8 +1623,27 @@ export class LexSection {
     const engineWeights: WeightSet = {};
     for (const name of expected) {
       const entry = supplied[name];
-      if (!entry || typeof entry !== "object" || !("shape" in entry) || !("data" in entry)) {
+      // `Object.hasOwn`, not `in`, for the same reason as the two membership tests above:
+      // `in` walks the prototype chain, so `{}` written by a file as a weight entry would
+      // satisfy a `"constructor" in entry`-shaped check, and any future rename of these
+      // two field names to something `Object.prototype` carries would validate on every
+      // object in the file. The rule is uniform here so no later reader has to ask which
+      // keys happen to be safe.
+      if (
+        !entry ||
+        typeof entry !== "object" ||
+        !Object.hasOwn(entry, "shape") ||
+        !Object.hasOwn(entry, "data")
+      ) {
         throw invalidParamError(`weight ${JSON.stringify(name)} must be an object with shape and data`);
+      }
+      // A typed refusal rather than `(5).map is not a function`: everything else this
+      // loader rejects arrives as an `InvalidParamError` the file dialog can print.
+      if (!Array.isArray(entry.shape)) {
+        throw invalidParamError(
+          `weight ${JSON.stringify(name)} declares shape ${show(entry.shape)}, which is ` +
+            "not a list of dimensions",
+        );
       }
       const shape = (entry.shape as unknown[]).map((v, i) => asInt(v, `${name}.shape[${i}]`, -1));
       if (JSON.stringify(shape) !== JSON.stringify(shapes[name])) {

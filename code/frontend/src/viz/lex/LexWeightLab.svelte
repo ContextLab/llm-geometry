@@ -66,8 +66,38 @@
 
   let name = $state("embed");
   let preset = $state<Preset>("halve");
-  let seed = $state(0);
   let error = $state("");
+
+  /** The ceiling the seed box declares, and the one `applyPreset` actually enforces. */
+  const MAX_SEED = 9999;
+
+  /**
+   * The seed box's text, not its number.
+   *
+   * `bind:value` on `<input type="number">` hands back `null` for an empty box and a
+   * `number` for everything the element will parse — so clearing the field re-drew the
+   * tensor at seed 0 while the note under it read "at seed null", and `2.5` or `1e3` were
+   * applied verbatim to an RNG that expects an integer in 0..9999. `randomize` is
+   * reproducible ONLY by its seed: a seed that is not the one on screen makes the note a
+   * false record of what the weights are, which is the one thing this panel exists to say.
+   */
+  let seedText = $state("0");
+
+  /** The seed to draw with, or a sentence saying why nothing was drawn. Never a third thing. */
+  function parseSeed(raw: string): { seed: number } | { error: string } {
+    const text = raw.trim();
+    // Digits only, as in the Vacancy panel's seed box: `Number()` reads "0x10", "1e3",
+    // " 12 " and "3.0" and returns a number that is not the text that was typed.
+    if (!/^\d+$/.test(text) || Number(text) > MAX_SEED) {
+      return {
+        error:
+          `A seed is a whole number from 0 to ${MAX_SEED}. ${JSON.stringify(raw)} is not ` +
+          "one, so nothing was re-drawn — `randomize` is reproducible only by its seed, " +
+          "and a seed that is not the one you typed would make the note below wrong.",
+      };
+    }
+    return { seed: Number(text) };
+  }
 
   const cfg = $derived(base?.cfg ?? null);
   const names = $derived(cfg ? weightNames(cfg) : []);
@@ -155,10 +185,15 @@
       for (let i = 0; i < rows; i++) out[i * cols + i] = 1;
       note = `${name} set to the identity`;
     } else if (preset === "randomize") {
+      const parsed = parseSeed(seedText);
+      if (!("seed" in parsed)) {
+        error = parsed.error;
+        return;
+      }
       // The tensor's OWN initializer — N(0, 0.02²) for every matrix except the packed
       // QKV projection, which keeps PyTorch's xavier-uniform default.
-      out.set(initWeights(cfg, seed)[name]);
-      note = `${name} re-drawn from its initializer at seed ${seed}`;
+      out.set(initWeights(cfg, parsed.seed)[name]);
+      note = `${name} re-drawn from its initializer at seed ${parsed.seed}`;
     } else {
       const k = preset === "halve" ? 0.5 : 2;
       const src = active[name];
@@ -238,7 +273,15 @@
       {#if preset === "randomize"}
         <label class="field">
           <span>seed</span>
-          <input type="number" min="0" max="9999" step="1" bind:value={seed} data-testid="lex-weight-seed" />
+          <input
+            type="number"
+            min="0"
+            max={MAX_SEED}
+            step="1"
+            value={seedText}
+            oninput={(e) => (seedText = e.currentTarget.value)}
+            data-testid="lex-weight-seed"
+          />
         </label>
       {/if}
       <button data-testid="lex-weight-apply" onclick={applyPreset}>Apply</button>

@@ -130,6 +130,40 @@
   /** Why the last thing typed into the seed box was not applied, or `""`. */
   let seedError = $state("");
 
+  /** The ceiling the `reveal first` box declares, and the one it actually enforces. */
+  const MAX_REVEAL = 99;
+
+  /**
+   * What the `reveal first` box does with what was typed — the seed box's rule, applied to
+   * the other number on this panel.
+   *
+   * This one read `Math.trunc(Number(value))` and then `Math.max(1, v)`, which is three
+   * silent rewrites in one line: `2.5` became 2, `1e3` became 1000 with `max="99"` on the
+   * element, and 0 — or anything the number input sanitizes to the empty string — became
+   * 1 and ran a transform nobody asked for. `reveal_after` is a boundary in the vacancy
+   * map, so a substituted value produces a different corpus, a different digest and a
+   * different loss curve, with the box still showing what was typed.
+   */
+  function parseRevealAfter(raw: string): { value: number } | { error: string } {
+    const text = raw.trim();
+    if (text === "") {
+      return { error: `the reveal box is empty — still revealing the first ${revealAfter}` };
+    }
+    // Digits only, for the reason `parseSeed` gives: `Number()` reads "1e3", " 12 ",
+    // "0x10", "+2" and "3.0" and turns each into a number that is not what was typed.
+    if (!/^\d+$/.test(text) || Number(text) < 1 || Number(text) > MAX_REVEAL) {
+      return {
+        error:
+          `reveal first takes a whole number from 1 to ${MAX_REVEAL} — ${JSON.stringify(raw)} ` +
+          `is not one, so the first ${revealAfter} are still being revealed`,
+      };
+    }
+    return { value: Number(text) };
+  }
+
+  /** Why the last thing typed into the reveal box was not applied, or `""`. */
+  let revealError = $state("");
+
   interface Props {
     /** The untransformed corpus — the `p = 0` reference for every comparison here. */
     corpusText: string;
@@ -739,17 +773,36 @@
         <input
           type="number"
           min="1"
-          max="99"
+          max={MAX_REVEAL}
           step="1"
           class="num"
+          class:bad={revealError !== ""}
+          aria-invalid={revealError !== "" ? "true" : undefined}
+          aria-describedby={revealError !== "" ? "lex-vacancy-reveal-error" : undefined}
           data-testid="lex-vacancy-reveal"
           value={revealAfter}
           oninput={(e) => {
-            const v = Math.trunc(Number(e.currentTarget.value));
-            if (Number.isFinite(v)) onRevealAfter(Math.max(1, v));
+            // Refused, never substituted — the same rule as the seed box above.
+            const parsed = parseRevealAfter(e.currentTarget.value);
+            if ("value" in parsed) {
+              revealError = "";
+              onRevealAfter(parsed.value);
+            } else {
+              revealError = parsed.error;
+            }
           }}
         />
       </label>
+      {#if revealError}
+        <p
+          class="seed-error"
+          id="lex-vacancy-reveal-error"
+          role="alert"
+          data-testid="lex-vacancy-reveal-error"
+        >
+          {revealError}
+        </p>
+      {/if}
     {/if}
 
     <label class="check">

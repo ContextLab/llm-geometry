@@ -169,3 +169,127 @@ describe("the seed box never applies a seed other than the one typed", () => {
     }
   });
 });
+
+/**
+ * The `reveal first` box: the same control, the same rule, and the box the F4 fix missed.
+ *
+ * It read `Math.trunc(Number(value))` and then `Math.max(1, v)`, which is three silent
+ * rewrites in one line — `2.5` applied as 2, `1e3` applied as 1000 under `max="99"`, and
+ * `0` (or anything the number input sanitizes away) applied as 1. `reveal_after` is a
+ * boundary in the vacancy map, so a substituted value produces a different corpus, a
+ * different `vacated_sha256` and a different loss curve, with the box still showing what
+ * was typed. Round 3 fixed the seed box beside it and left this one.
+ */
+const REVEAL_IN_USE = 4;
+
+interface MountedReveal {
+  reveals: number[];
+  input: HTMLInputElement;
+  error: () => HTMLElement | null;
+  dispose: () => void;
+}
+
+function mountRevealPanel(): MountedReveal {
+  const params = vacancyParams({ p: 0.5, seed: SEED_IN_USE, revealAfter: REVEAL_IN_USE });
+  const map = buildVacancyMap(vacancyDomain(tokenize(TEXT)), vacancyParams({ seed: SEED_IN_USE }));
+  const vacated = vacateText(TEXT, map, params);
+  const words = [...new Set(tokenize(TEXT))].sort();
+  const vocab = new LexVocab(words, "frequency", "full");
+
+  const target = document.createElement("div");
+  document.body.appendChild(target);
+  const reveals: number[] = [];
+  const app = mount(VacancyPanel, {
+    target,
+    props: {
+      corpusText: TEXT,
+      vacatedText: vacated,
+      map,
+      params,
+      baseVocab: vocab,
+      vocab,
+      condition: "reveal",
+      revealAfter: REVEAL_IN_USE,
+      mint: "nonce",
+      refusal: "",
+      onP: () => {},
+      onSeed: () => {},
+      onCondition: () => {},
+      onRevealAfter: (v: number) => reveals.push(v),
+      onProsody: () => {},
+      onMint: () => {},
+    },
+  });
+  flushSync();
+  const input = target.querySelector<HTMLInputElement>('[data-testid="lex-vacancy-reveal"]');
+  if (input === null) throw new Error("the reveal input did not render");
+  return {
+    reveals,
+    input,
+    error: () => target.querySelector<HTMLElement>('[data-testid="lex-vacancy-reveal-error"]'),
+    dispose: () => {
+      unmount(app);
+      target.remove();
+    },
+  };
+}
+
+function typeReveal(m: MountedReveal, raw: string): void {
+  m.input.value = raw;
+  m.input.dispatchEvent(new Event("input", { bubbles: true }));
+  flushSync();
+}
+
+describe("the reveal box never applies a number other than the one typed", () => {
+  it.each([
+    ["a fraction, which was truncated", "2.5"],
+    ["exponent notation, which sailed past max", "1e3"],
+    ["hexadecimal", "0x10"],
+    ["a leading plus", "+2"],
+    ["surrounding whitespace around a valid value", " 2 "],
+    ["a negative number, which became 1", "-5"],
+    ["zero, which became 1", "0"],
+    ["one above the declared maximum", "100"],
+    ["the empty box, which became 1", ""],
+    ["not a number at all", "abc"],
+  ])("refuses %s rather than rewriting it", (_what, raw) => {
+    const m = mountRevealPanel();
+    try {
+      typeReveal(m, raw);
+      expect(m.reveals).toEqual([]);
+      expect(m.error()).not.toBeNull();
+      expect(m.error()?.textContent ?? "").toContain(String(REVEAL_IN_USE));
+    } finally {
+      m.dispose();
+    }
+  });
+
+  it("accepts its own declared bounds and everything between them", () => {
+    const m = mountRevealPanel();
+    try {
+      const max = Number(m.input.getAttribute("max"));
+      const min = Number(m.input.getAttribute("min"));
+      expect(Number.isInteger(max) && max > 0).toBe(true);
+      typeReveal(m, String(min));
+      typeReveal(m, String(max));
+      typeReveal(m, "7");
+      expect(m.reveals).toEqual([min, max, 7]);
+      expect(m.error()).toBeNull();
+    } finally {
+      m.dispose();
+    }
+  });
+
+  it("clears the refusal once a usable number is typed", () => {
+    const m = mountRevealPanel();
+    try {
+      typeReveal(m, "2.5");
+      expect(m.error()).not.toBeNull();
+      typeReveal(m, "3");
+      expect(m.reveals).toEqual([3]);
+      expect(m.error()).toBeNull();
+    } finally {
+      m.dispose();
+    }
+  });
+});

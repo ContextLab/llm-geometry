@@ -158,10 +158,13 @@ export class SafetensorsFile {
     c1: number,
   ): Promise<{ values: Float32Array; rows: number; cols: number; dtype: SafeDtype }> {
     const header = await this.header();
-    // `Object.hasOwn`, not a truthiness test on the lookup: `header.tensors` is an ordinary
-    // object literal, so `tensors["constructor"]` is `Object` itself and a request for a
-    // tensor named after any `Object.prototype` member sailed past this guard into
-    // `entry.dtype === undefined`, reporting a dtype problem for a tensor that is not there.
+    // `Object.hasOwn`, not a truthiness test on the lookup. `header.tensors` used to be an
+    // ordinary object literal, so `tensors["constructor"]` was `Object` itself and a
+    // request for a tensor named after any `Object.prototype` member sailed past this
+    // guard into `entry.dtype === undefined`, reporting a dtype problem for a tensor that
+    // is not there. The map is built with a null prototype now (see `header()`), which
+    // closes that door from the other side — the two are kept together on purpose, because
+    // this method is also reached with names from the caller, not only from the file.
     if (!Object.hasOwn(header.tensors, name)) {
       throw new ApiError(
         "NotFoundError",
@@ -302,7 +305,16 @@ export class SafetensorsFile {
     } catch {
       throw new ApiError("ComputeError", `Invalid safetensors header JSON in ${this.url}.`);
     }
-    const tensors: Record<string, TensorEntry> = {};
+    // `Object.create(null)`, not `{}`: the keys here are tensor names chosen by a REMOTE
+    // file, and `tensors["__proto__"] = e` on an ordinary object literal does not create a
+    // property at all — it invokes `Object.prototype`'s `__proto__` setter and replaces
+    // the map's prototype with the attacker's entry. The named tensor then silently
+    // vanishes from the map (no throw, no missing-key error), and every field of that
+    // entry — `dtype`, `shape`, `data_offsets` — becomes visible on the map itself, so any
+    // reader that looks a name up with a truthiness test rather than `Object.hasOwn`
+    // resolves `tensors.dtype` to a string a remote host supplied. A null-prototype map
+    // has no such setter and no inherited keys to confuse a lookup with.
+    const tensors: Record<string, TensorEntry> = Object.create(null);
     for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
       if (k === "__metadata__") continue;
       const e = v as TensorEntry;

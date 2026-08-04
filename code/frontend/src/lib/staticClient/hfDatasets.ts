@@ -121,12 +121,20 @@ export async function listSplits(
   return splits;
 }
 
-/** Mirrors geo/finetune.load_text_from_hf's column choice. */
+/**
+ * Mirrors geo/finetune.load_text_from_hf's column choice.
+ *
+ * Column names come out of a remote JSON document, so every lookup below is own-property
+ * only. Python's `dict` has no prototype chain and its half of this pair cannot be fooled;
+ * a JavaScript object read with `obj[key]` can be, and the failure would not be a crash —
+ * it would be this loader picking a "column" that is really an `Object.prototype` member
+ * and training a model on whatever that stringifies to.
+ */
 function pickTextColumn(rows: Record<string, unknown>[]): string {
   const first = rows.find((r) => r && typeof r === "object");
   if (!first) throw computeError("the dataset returned no usable rows");
   for (const preferred of ["text", "content"]) {
-    if (typeof first[preferred] === "string") return preferred;
+    if (Object.hasOwn(first, preferred) && typeof first[preferred] === "string") return preferred;
   }
   for (const [k, v] of Object.entries(first)) {
     if (typeof v === "string") return k;
@@ -176,7 +184,10 @@ export async function fetchDatasetText(
     if (rows.length === 0) break; // dataset ended before maxSamples — that's fine
     if (!column) column = pickTextColumn(rows);
     for (const row of rows) {
-      const value = row[column];
+      // Own property only — see `pickTextColumn`. A row that does not carry the column
+      // contributes nothing, rather than contributing whatever the prototype chain has
+      // under that name.
+      const value = Object.hasOwn(row, column) ? row[column] : undefined;
       if (typeof value === "string" && value.trim()) texts.push(value);
     }
   }
