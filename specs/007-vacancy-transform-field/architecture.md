@@ -154,10 +154,20 @@ vacate iff u < p
 ```
 
 **The `>> 11` is mandatory and is a departure from the source** (which used
-`top64 / 2**64`). A 64-bit integer divided by 2⁶⁴ is not exactly representable as a float64, so
-Python and JavaScript can land on different doubles for the same digest and disagree about a
-word at the boundary. Shifting to 53 bits makes the numerator exactly representable, so
-`u` is *the same double* in both languages and the comparison `u < p` cannot diverge.
+`top64 / 2**64`).
+
+The reason is *not* that the source's expression diverges across the two languages. It was
+measured, and it does not: `int / 2**64` in CPython is a single correctly-rounded division,
+while `Number(bigint) / 2**64` in JS rounds to float64 and then divides by a power of two —
+which is exact — so the two agree. This was checked on 200 006 values, including random 64-bit
+integers and hand-picked ties at the rounding boundary (`(1<<63)|((1<<11)-1)`, `(1<<64)-1`, and
+neighbours). Every one matched bit for bit.
+
+The reason is that `(top64 >> 11) / 2**53` needs **no such argument**. A 53-bit integer over
+2⁵³ is exactly representable, so `u` is self-evidently the same double in both languages, and
+the property survives a reimplementation that assembles the value differently — from two 32-bit
+halves, say, where the rounding argument above stops holding. A cross-language equality that
+depends on a subtle proof is one refactor away from being false; this one does not.
 
 - TS: `Number(BigInt("0x" + hex.slice(0, 16)) >> 11n) / 2 ** 53`
 - Py: `(int.from_bytes(digest[:8], "big") >> 11) / 2 ** 53`
@@ -446,7 +456,7 @@ same model and passage, to the tolerance the existing arch parity tests use.
 | # | Source | Here | Why |
 |-|-|-|-|
 | 1 | `[A-Za-z][A-Za-z']*` | the tokenizer's `WORD_RE` | otherwise the transform and the trainer disagree about `good-bye` and §7.3 is false |
-| 2 | `top64 / 2**64` | `(top64 >> 11) / 2**53` | 64-bit/2⁶⁴ is not exactly representable; Python and JS could disagree at the boundary |
+| 2 | `top64 / 2**64` | `(top64 >> 11) / 2**53` | not a bug in the source — the two languages were *measured* to agree on it (§4). Exact representability makes the agreement structural instead of a proof that a refactor could invalidate |
 | 3 | `random.Random(str)` | sha256 counter stream | MT19937 seeded from a string is not reproducible in TS |
 | 4 | map built lazily while rewriting | map built once over all types in canonical order | the source's `used` set and give-up counter make the nonce depend on `p`, breaking its own stability claim |
 | 5 | `avoid` accepted, never passed | `avoid` = corpus type set | a minted form could otherwise merge with a real English type |
@@ -458,7 +468,8 @@ same model and passage, to the tolerance the existing arch parity tests use.
 | 11 | `vacated` count reported as `len(self.map)` | count of stems actually vacated | the zip copy reports the wrong number; the audited copy fixes it |
 
 Departures 4, 6, 7 and 8 are corrections to bugs that break properties the source *claims*.
-Departure 2 is a correction to a bug that would only ever appear across our two stacks.
+Departure 2 is **not** a bug fix — the source's expression was tested and is fine; the change
+buys structural rather than argued cross-language equality.
 
 ---
 
