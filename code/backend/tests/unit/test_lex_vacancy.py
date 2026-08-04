@@ -26,14 +26,16 @@ import pytest
 
 from llm_geometry.errors import ComputeError, InvalidParamError
 from llm_geometry.lex.corpus import load_corpus_text
-from llm_geometry.lex.dolch import dolch_budget
+from llm_geometry.lex.dolch import DOLCH_ORDER, dolch_budget
 from llm_geometry.lex.vacancy import (
     FUNCTION_WORDS,
+    REMINT_SALT_STRIDE,
     SPLIT_EXCEPTIONS,
     STRESS_TABLE,
     SUFFIXES,
     VacancyMap,
     VacancyParams,
+    _mint,  # private: the salt semantics of §5.5/§5.8 are a contract detail, so they are pinned
     build_vacancy_map,
     is_eligible,
     map_vocab_words,
@@ -42,6 +44,7 @@ from llm_geometry.lex.vacancy import (
     stress,
     stress_source,
     syllables,
+    vacancy_domain,
     vacancy_stats,
     vacancy_u,
     vacate_text,
@@ -69,9 +72,9 @@ def budget() -> list[str]:
 
 
 @pytest.fixture(scope="module")
-def domain(corpus_types: list[str], budget: list[str]) -> list[str]:
-    """Contract §5.2: the corpus's types UNION the budget's words."""
-    return sorted(set(corpus_types) | set(budget))
+def domain(corpus_types: list[str]) -> list[str]:
+    """Contract §5.2: the corpus's types UNION the FULL Dolch list, never the active budget."""
+    return vacancy_domain(corpus_types)
 
 
 @pytest.fixture(scope="module")
@@ -338,6 +341,35 @@ def test_injectivity_holds_at_every_p_not_just_the_endpoints(corpus, vacated):
             ), f"seed={seed} p={p}: two source types share a surface form"
 
 
+def test_a_remint_is_held_to_the_same_quality_bar_as_an_original_mint(maps):
+    """§5.5's thresholds are on the ATTEMPT COUNTER `a`, not on the absolute salt.
+
+    A mint call carries a base salt `S`; the stream is keyed on `S + a` and a re-mint restarts
+    `a` at 0. Read the thresholds absolutely instead and a re-mint at `S = 1001` would begin
+    with the length and syllable checks already relaxed — and a second round, at `S = 2001`,
+    could not run at all, contradicting "raise after 8 rounds".
+
+    The observable: `hang` is monosyllabic, and its RE-MINTED nonce still is.
+    """
+    assert syllables("hang") == 1
+    assert syllables(maps[7].mapping["hang"]) == 1
+    assert maps[7].minted_stress[maps[7].mapping["hang"]] == stress("hang")
+    assert len(maps[7].mapping["hang"]) >= 3
+    # Directly: a mint from a base salt past every threshold still enforces every check.
+    for base in (0, 401, 801, 1001, REMINT_SALT_STRIDE + 500):
+        nonce, pattern, salt = _mint("hang", 7, True, frozenset(), start_salt=base)
+        assert syllables(nonce) == len(pattern) == 1
+        assert len(nonce) >= 3
+        assert base <= salt < base + 1200
+    # ... and the stream is keyed on `S + a`: forbidding the first candidate at `S` gives
+    # exactly what a fresh call at `S + 1` produces.
+    first, _pattern, first_salt = _mint("hang", 7, True, frozenset(), start_salt=100)
+    assert first_salt == 100
+    assert _mint("hang", 7, True, frozenset({first}), start_salt=100)[0] == (
+        _mint("hang", 7, True, frozenset(), start_salt=101)[0]
+    )
+
+
 def test_hanged_no_longer_surfaces_as_the_english_word_waked(corpus, corpus_types, maps, vacated):
     """Regression for trap 2 of §7.3, the case that motivated condition B.
 
@@ -365,6 +397,35 @@ def test_no_nonce_is_a_real_corpus_type(maps, corpus_types):
     real = set(corpus_types)
     for seed in SEEDS:
         assert not (set(maps[seed].mapping.values()) & real)
+
+
+def test_domain_is_the_corpus_plus_the_full_dolch_list_never_the_active_budget(
+    corpus_types, domain, budget
+):
+    """§5.2. If the domain tracked the ACTIVE budget, switching budgets in the UI would
+    rebuild the map and re-mint the corpus underneath a panel demonstrating that nonces are
+    stable."""
+    assert set(domain) == {t.lower() for t in corpus_types} | {w.lower() for w in budget}
+    assert set(vacancy_domain([])) == {w.lower() for w in dolch_budget("full")}
+    assert domain == sorted(domain)  # canonical order, ASCII ascending
+
+
+def test_map_is_identical_across_every_dolch_domain(corpus_types, maps):
+    """True today by luck of the collision structure, so it is pinned rather than assumed.
+
+    Minting is keyed on `(seed, stem)`, and on this corpus the words a smaller Dolch list
+    omits provoke no new collisions — so every budget yields the same assignment. A future
+    change to `avoid`, to the canonical order, or to condition B could break that silently,
+    and the first symptom would be nonces moving when a user changes budget.
+    """
+    for name in DOLCH_ORDER:
+        extras = {w.lower() for w in dolch_budget(name)}
+        smaller = sorted({t.lower() for t in corpus_types} | extras)
+        for seed in SEEDS:
+            built = build_vacancy_map(smaller, VacancyParams(p=1.0, seed=seed), avoid=corpus_types)
+            assert built.remint_rounds == maps[seed].remint_rounds
+            for stem, nonce in built.mapping.items():
+                assert nonce == maps[seed].mapping[stem], f"{name}/{seed}: {stem} moved"
 
 
 def test_no_surface_form_is_ever_an_english_word_of_the_domain(corpus, domain, maps, vacated):
@@ -507,7 +568,7 @@ def test_the_control_conditions_all_differ_from_each_other(corpus, maps, vacated
     # is applied, so re-using a prosody-matched map cannot show a difference.
     assert flat == baseline
     flat_map = build_vacancy_map(
-        sorted(set(tokenize(corpus))),
+        vacancy_domain(set(tokenize(corpus))),
         VacancyParams(p=1.0, seed=0, match_prosody=False),
         avoid=set(tokenize(corpus)),
     )
@@ -596,9 +657,14 @@ def test_meter_score_is_a_fraction_and_rejects_unknown_feet():
 def test_stats_have_exactly_the_contract_field_names(corpus, maps, vacated):
     stats = vacancy_stats(corpus, vacated[(0, 0.5)], maps[0], VacancyParams(p=0.5, seed=0))
     assert set(stats) == {
-        "typesTotal",
-        "typesEligible",
-        "typesVacated",
+        "domainTypesTotal",
+        "domainTypesEligible",
+        "domainTypesVacated",
+        "corpusTypesTotal",
+        "corpusTypesEligible",
+        "corpusTypesVacated",
+        "stemsTotal",
+        "stemsVacated",
         "tokensTotal",
         "tokensVacated",
         "meanSyllablesBefore",
@@ -615,6 +681,7 @@ def test_stats_have_exactly_the_contract_field_names(corpus, maps, vacated):
         "imageSize",
         "remintRounds",
     }
+    assert not [k for k in stats if k.startswith("types")], "an unprefixed types* is forbidden"
 
 
 def test_the_three_way_stress_split_sums_to_one_on_each_side(corpus, maps, vacated):
@@ -647,17 +714,63 @@ def test_stats_are_measured_not_asserted(corpus, corpus_types, maps, vacated):
         for p in P_GRID:
             params = VacancyParams(p=p, seed=seed)
             stats = vacancy_stats(corpus, vacated[(seed, p)], maps[seed], params)
-            assert stats["typesTotal"] == len(set(tokenize(corpus)))
-            assert stats["typesEligible"] == len(eligible)
+            assert stats["corpusTypesTotal"] == len(set(tokenize(corpus)))
+            assert stats["corpusTypesEligible"] == len(eligible)
+            assert stats["domainTypesTotal"] == len(maps[seed].domain)
+            assert stats["stemsTotal"] == len(maps[seed].mapping)
             assert stats["tokensTotal"] == len(tokenize(corpus))
-            assert stats["typesVacated"] <= stats["typesEligible"]
-            assert stats["typesVacated"] > previous  # strictly graded in p
-            previous = stats["typesVacated"]
+            assert stats["corpusTypesVacated"] <= stats["corpusTypesEligible"]
+            assert stats["corpusTypesVacated"] > previous  # strictly graded in p
+            previous = stats["corpusTypesVacated"]
             assert stats["bijective"] is True
             assert stats["remintRounds"] == maps[seed].remint_rounds
             assert 0.0 <= stats["stressFromTableAfter"] <= 1.0
-        assert stats["typesVacated"] == len(eligible)
+        assert stats["corpusTypesVacated"] == len(eligible)
         assert stats["tokensVacated"] > 0
+
+
+def test_the_two_counting_scopes_and_their_identities(corpus, corpus_types, maps, vacated):
+    """§10: the scope is in the name, and the identities are what exposed the confusion.
+
+    The domain has 22 more eligible types than the corpus — Dolch words like `funny`,
+    `squirrel` and `today` that are in the budget but never appear in the text. Counting them
+    in what the panel shows a reader would inflate the vacancy rate they are being shown;
+    leaving them out of the diagnostic would misstate what the map covers. Hence both.
+    """
+    eligible = {t for t in corpus_types if is_eligible(stem_and_suffix(t)[0])}
+    for seed in SEEDS:
+        for p in P_GRID:
+            params = VacancyParams(p=p, seed=seed)
+            s = vacancy_stats(corpus, vacated[(seed, p)], maps[seed], params)
+            assert s["domainTypesTotal"] == 2233
+            assert s["domainTypesEligible"] == 1944
+            assert s["corpusTypesTotal"] == 2211
+            assert s["corpusTypesEligible"] == 1922
+            assert s["domainTypesEligible"] == s["corpusTypesEligible"] + 22
+            assert s["stemsTotal"] == 1680 <= s["domainTypesEligible"]
+            assert s["domainTypesVacated"] >= s["corpusTypesVacated"]
+            if p == 1.0:
+                # `u` lands in [0, 1), so at p = 1 every eligible stem vacates.
+                assert s["stemsVacated"] == s["stemsTotal"]
+                assert s["domainTypesVacated"] == s["domainTypesEligible"]
+                assert s["corpusTypesVacated"] == s["corpusTypesEligible"] == len(eligible)
+
+
+def test_both_scopes_reproduce_the_numbers_the_typescript_stack_measured(corpus, maps, vacated):
+    """Cross-stack parity, pinned as data. These are the sequences the TS side reported; if
+    either stack's counting drifts, this is where it shows up."""
+    expected = {
+        0: {"corpus": [0, 461, 954, 1430, 1922], "domain": [0, 469, 966, 1448, 1944]},
+        7: {"corpus": [0, 434, 975, 1440, 1922], "domain": [0, 440, 985, 1455, 1944]},
+    }
+    for seed in SEEDS:
+        stats = [
+            vacancy_stats(corpus, vacated[(seed, p)], maps[seed], VacancyParams(p=p, seed=seed))
+            for p in P_GRID
+        ]
+        assert [s["corpusTypesVacated"] for s in stats] == expected[seed]["corpus"]
+        assert [s["domainTypesVacated"] for s in stats] == expected[seed]["domain"]
+        assert [s["tokensVacated"] for s in stats][-1] == 8202
 
 
 def test_prosody_survives_full_vacancy(corpus, maps, vacated):

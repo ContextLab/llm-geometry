@@ -35,8 +35,9 @@ original `tiny-seuss/synth/jabberwockify.py` here is one the contract lists in i
 10. No claim of exact prosody: :data:`STRESS_TABLE` is 61 hand entries over the Dolch list,
     described by its own author as "seeded by rule; wants roughly an hour of human
     checking", so every prosody number ships with the three-way `stressFrom*` split beside it.
-11. ``typesVacated`` counts stems actually vacated, measured from the output text, not
-    ``len(map)``.
+11. ``corpusTypesVacated`` counts types actually vacated, measured from the output text, not
+    ``len(map)``. Every count in §10 names its scope — corpus or domain — because an
+    unprefixed "types" is ambiguous between the two and cost the stacks two round trips.
 
 The properties that make a `p`-sweep interpretable are structural here rather than hoped
 for: `u` depends only on `(seed, stem)`, so vacated sets are **nested** in `p`; the map is
@@ -64,6 +65,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Sequence
 
 from ..errors import ComputeError, InvalidParamError
+from .dolch import dolch_budget
 from .vocab import WORD_RE
 
 # --- the closed class -------------------------------------------------------------------
@@ -200,13 +202,13 @@ _RUN_RE = re.compile(r"([bcdfghjklmnpqrstvwxz])\1{2,}")
 
 #: Contract §5.5 step 5: deterministic, order-independent relaxations, unlike the source's
 #: give-up counter. Reaching :data:`MINT_MAX_SALT` raises — it has never happened and if it
-#: does we want to know. The three are counted from the mint call's STARTING salt, not from
-#: zero: §5.5 writes the loop as `salt = 0, 1, 2, …`, but §5.8 starts a re-mint at
-#: `1000 * round + previousSalt + 1`, and absolute thresholds would then make round 1 begin
-#: with every quality check already relaxed and round 2 impossible (2001 > 1200), which
-#: contradicts §5.2's "raise after 8 rounds". Counting from the start salt is the only
-#: reading under which both sections are true; it is identical to the absolute reading for
-#: the base build, where the start salt is 0.
+#: does we want to know.
+#:
+#: **These thresholds are on the ATTEMPT COUNTER `a`, not on the absolute salt.** A mint call
+#: carries a base salt `S`; the byte stream is keyed on `S + a` for `a = 0, 1, 2, …`, and a
+#: re-mint restarts `a` at 0. So a re-mint is held to exactly the same quality bar as an
+#: original mint — which is why the seed-7 re-mint of `hang` comes back monosyllabic
+#: (`smeeg`) rather than falling out of a loop with every check already relaxed.
 MINT_RELAX_SYLLABLES_SALT = 400
 MINT_RELAX_LENGTH_SALT = 800
 MINT_MAX_SALT = 1200
@@ -432,8 +434,10 @@ def _mint(
     and `forbidden` depends only on the canonically-ordered prefix of stems before this one —
     so a stem's nonce is the same at every `p`. That is the stability property (§5.6).
 
-    The accepting salt is returned because §5.8 needs it: a re-mint restarts at
-    ``REMINT_SALT_STRIDE * round + previousSalt + 1``.
+    `start_salt` is the base salt `S`; the byte stream is keyed on ``S + a`` for the attempt
+    counter ``a = 0, 1, 2, …``, and the quality relaxations are thresholds on ``a``. The
+    ACCEPTING salt (``S + a``) is returned because §5.8 needs it: a re-mint restarts at
+    ``REMINT_SALT_STRIDE * round + previousSalt + 1``, with its own ``a`` back at 0.
 
     Three branches in step 2, in that order, exactly as §5.5 spells them out. There is no
     fourth: :data:`REDUCED_CODAS` is unreachable here, as it is in the source, where
@@ -442,10 +446,9 @@ def _mint(
     """
     pattern = stress(stem) if match_prosody else "1"
     n_syl = len(pattern)
-    salt = start_salt
-    while salt - start_salt < MINT_MAX_SALT:
+    for attempt in range(MINT_MAX_SALT):  # `a` of §5.5; the stream is keyed on `S + a`
+        salt = start_salt + attempt
         rnd = _ByteStream(seed, stem, salt)
-        tried = salt - start_salt
         parts: list[str] = []
         for i, mark in enumerate(pattern):
             if mark == "1":
@@ -455,11 +458,10 @@ def _mint(
             else:
                 parts.append(rnd.choice(UNSTRESSED_TAILS))
         w = _RUN_RE.sub(r"\1\1", "".join(parts))
-        long_enough = len(w) >= 3 or tried >= MINT_RELAX_LENGTH_SALT
-        right_length = syllables(w) == n_syl or tried >= MINT_RELAX_SYLLABLES_SALT
+        long_enough = len(w) >= 3 or attempt >= MINT_RELAX_LENGTH_SALT
+        right_length = syllables(w) == n_syl or attempt >= MINT_RELAX_SYLLABLES_SALT
         if long_enough and right_length and w not in forbidden:
             return w, pattern, salt
-        salt += 1
     raise ComputeError(
         f"could not mint a nonce for {stem!r} in {MINT_MAX_SALT} attempts",
         {"stem": stem, "seed": seed, "pattern": pattern, "start_salt": start_salt},
@@ -600,14 +602,22 @@ class VacancyMap:
     #: Lowercased forms a nonce may never take — the corpus type set, so a minted form can
     #: never silently merge with a real English word.
     avoid: frozenset[str]
-    #: ``|image|`` of the type set the map was built over, at full vacancy.
+    #: The lowercased domain this map was built over — :func:`vacancy_domain`, i.e. the
+    #: corpus's types plus the full Dolch list. Kept because §10's `domainTypes*` counts are
+    #: over it and it is NOT recoverable from the corpus text: budget-only words have images
+    #: but never appear.
+    domain: frozenset[str]
+    #: ``|image|`` of the domain, at full vacancy.
     image_size: int
-    #: ``|types|`` it was built over.
-    type_count: int
     #: ``image_size == type_count``. The relabelling theorem depends on it.
     bijective: bool
     #: How many collision-driven re-mint rounds were needed. Expected to be 0.
     remint_rounds: int
+
+    @property
+    def type_count(self) -> int:
+        """``|domain|`` — what `image_size` must equal for the map to be injective."""
+        return len(self.domain)
 
     def nonce_for(self, stem: str) -> str | None:
         """The nonce assigned to `stem`, or ``None`` if the stem is outside the domain."""
@@ -680,16 +690,33 @@ def _image_of(word: str, mapping: Mapping[str, str], keep: frozenset[str], seed:
     return surface_form(nonce, stem, suffix, seed)
 
 
+def vacancy_domain(types: Iterable[str]) -> list[str]:
+    """The map's domain: the corpus's types UNION the **full** Dolch list (contract §5.2).
+
+    Always the full list, **never the active budget**. A budget word absent from the corpus
+    still needs an image, or the mapped vocabulary of §7.2 has a hole in it — but if the
+    domain tracked the *active* budget, switching budgets in the UI would rebuild the map and
+    re-mint the corpus underneath a panel whose whole claim is that nonces are stable. Using
+    the full list makes the map a function of `(corpus, seed, match_prosody)` alone.
+
+    Measured: the resulting map is byte-identical across all five Dolch domains anyway,
+    because minting is keyed on `(seed, stem)` and the extra words provoke no new collisions
+    (`test_map_is_identical_across_every_dolch_domain`). That is a property of this corpus's
+    collision structure, not a guarantee — which is exactly why it is pinned and why the
+    domain is fixed here rather than left to each call site to remember.
+    """
+    return sorted({t.lower() for t in types} | {w.lower() for w in dolch_budget("full")})
+
+
 def build_vacancy_map(
     types: Iterable[str], params: VacancyParams, avoid: Iterable[str] = ()
 ) -> VacancyMap:
     """Assign every eligible stem a nonce, once, in canonical order (contract §5.2).
 
-    `types` must be the union of the corpus's type set AND the budget's word list: a budget
-    word absent from the corpus still needs an image, or the mapped vocabulary of §7.2 has a
-    hole in it. `avoid` is the lowercased corpus type set, so a nonce can never collide with
-    a real word — the source accepts an `avoid` parameter and then never passes one, which
-    lets a minted form silently merge with an English type.
+    `types` is the domain — pass :func:`vacancy_domain(corpus_types)`, which pins it to the
+    corpus's types plus the full Dolch list. `avoid` is the lowercased corpus type set, so a
+    nonce can never collide with a real word — the source accepts an `avoid` parameter and
+    then never passes one, which lets a minted form silently merge with an English type.
 
     `p` is deliberately unused: the map is built over ALL eligible stems and restricted to
     ``{u < p}`` at rewrite time. That is what makes nesting and stability structural.
@@ -777,8 +804,8 @@ def build_vacancy_map(
         seed=params.seed,
         match_prosody=params.match_prosody,
         avoid=avoid_set,
+        domain=frozenset(type_set),
         image_size=len(seen),
-        type_count=len(type_set),
         bijective=len(seen) == len(type_set),
         remint_rounds=rounds,
     )
@@ -867,10 +894,26 @@ def vacancy_stats(
 ) -> dict[str, float | int | bool]:
     """The statistics contract (§10), with exactly these field names.
 
-    ``typesVacated`` and ``tokensVacated`` are MEASURED from the two texts rather than read
-    off the map: the source reports ``len(self.map)``, which is the size of the assignment
-    and not the number of stems actually vacated, and which is wrong under ``reveal_after``
-    and under the inconsistent-assignment control.
+    **Every count names its scope; an unprefixed ``types*`` is forbidden.** "Types" is
+    ambiguous between the corpus (2 211 types of *Mother Goose*) and the domain of §5.2
+    (2 233 = corpus plus the full Dolch list), and the ambiguity cost two round trips between
+    the two stacks — which agreed on ``tokensVacated`` to the token and disagreed only on
+    what they were counting.
+
+    * ``domainTypes*`` — over :attr:`VacancyMap.domain`. This governs the map and the
+      vocabulary, so it is the diagnostic number, and it is a property of ``(map, p)``: the
+      22 domain-only Dolch words (`funny`, `squirrel`, `today`, …) have images but never
+      appear in the text, so they cannot be measured from it.
+    * ``corpusTypes*`` — over the corpus's own type set. **This is what the panel shows a
+      reader**: counting words the reader cannot see inflates the vacancy rate being shown.
+      ``corpusTypesVacated`` and ``tokensVacated`` are MEASURED from the two texts, so they
+      respect ``reveal_after`` and the inconsistent-assignment control — the source reports
+      ``len(self.map)``, which is the size of the assignment and not what was vacated.
+    * ``stemsTotal`` is ``|map|``; ``stemsVacated`` counts stems with ``u(stem) < p``.
+
+    At ``p = 1`` every eligible stem vacates, because ``u ∈ [0, 1)`` by construction, so
+    ``stemsVacated == stemsTotal`` and ``*TypesVacated == *TypesEligible``. The first of
+    those identities is what exposed the scope confusion.
 
     The prosody numbers ship with a THREE-WAY split of where each token's stress came from,
     token-weighted and summing to 1 on each side (§10). A single "table coverage" number was
@@ -902,6 +945,12 @@ def vacancy_stats(
     eligible = {t for t in types if is_eligible(stem_and_suffix(t)[0], keep)}
     changed = [b.lower() for b, a in zip(before_words, after_words) if b.lower() != a.lower()]
 
+    domain_eligible = {t for t in vmap.domain if is_eligible(stem_and_suffix(t)[0], keep)}
+    domain_vacated = {
+        t for t in domain_eligible if vacancy_u(stem_and_suffix(t)[0], params.seed) < params.p
+    }
+    stems_vacated = sum(1 for s in vmap.mapping if vacancy_u(s, params.seed) < params.p)
+
     # The original text is English, so it is scored WITHOUT the minted patterns; `avoid`
     # guarantees no English type is also a nonce, so `stressFromMintedBefore` is 0 by
     # construction rather than by omission.
@@ -909,9 +958,14 @@ def vacancy_stats(
     after = _prosody(vacated, vmap.minted_stress)
 
     return {
-        "typesTotal": len(types),
-        "typesEligible": len(eligible),
-        "typesVacated": len(set(changed)),
+        "domainTypesTotal": len(vmap.domain),
+        "domainTypesEligible": len(domain_eligible),
+        "domainTypesVacated": len(domain_vacated),
+        "corpusTypesTotal": len(types),
+        "corpusTypesEligible": len(eligible),
+        "corpusTypesVacated": len(set(changed)),
+        "stemsTotal": len(vmap.mapping),
+        "stemsVacated": stems_vacated,
         "tokensTotal": len(before_words),
         "tokensVacated": len(changed),
         "meanSyllablesBefore": before.mean_syllables,
