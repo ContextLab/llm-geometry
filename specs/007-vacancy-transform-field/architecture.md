@@ -439,7 +439,46 @@ with the input; a mismatch raises rather than mis-attributes.
 Do not tokenize word-by-word to force alignment. It suppresses cross-word merges and changes
 the NLL being reported.
 
-### 8.3 Confound, stated in the UI
+### 8.3 The swap control — what makes the number interpretable
+
+`ΔnllPreserved > 0` on its own is uninterpretable, because at least three things change at once
+when content words are vacated:
+
+1. the forms are unknown, so the model has no lexical entry to condition on;
+2. nonce forms fragment into many subword tokens, so the context is longer and stranger;
+3. the passage says something nonsensical.
+
+Only (1) is "location". A caveat cannot separate them; a control can.
+
+**Swap.** Mint by drawing a *real English word* instead of a nonce form — same eligibility, same
+`u(stem) < p` decision, same suffix handling, same map-injectivity guarantee. The replacement is
+drawn deterministically from the corpus's own open-class types by **frequency rank**: the stem's
+rank `r` among open-class types selects a replacement from a deterministic window around `r`,
+excluding the stem itself and anything already used. So the swapped passage is equally
+nonsensical, but every form is a known word with ordinary tokenization.
+
+This makes the minting strategy a parameter:
+
+```
+mint: "nonce" | "swap"          # default "nonce"
+```
+
+and decomposes the measurement:
+
+- `nll(swap) − nll(english)` — the cost of **wrong content** (3)
+- `nll(nonce) − nll(swap)` — the cost of **unknown form**, i.e. (1) together with (2)
+
+The second difference is the closest this instrument gets to "what location was worth", and the
+UI must report it as *that difference*, never `nll(nonce) − nll(english)` alone. Residual (2) is
+not separable without a tokenizer-level control and the UI must say so rather than pretend the
+remainder is pure location.
+
+`mint: "swap"` preserves every property of §7: the map is still injective (verified the same
+way), still nested in `p`, still stable in `(seed, stem)`. The invariance theorem of §7.3
+therefore holds for `swap` exactly as for `nonce` — the tiny model is equally blind to both,
+which is itself the check that the swap control is implemented correctly.
+
+### 8.4 Confound, stated in the UI
 
 The vacated passage has genuinely higher entropy, so *every* prediction in it gets worse —
 including the scaffolding. `ΔnllPreserved > 0` is therefore expected; its **magnitude** is the

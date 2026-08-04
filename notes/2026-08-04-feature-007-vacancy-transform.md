@@ -62,7 +62,7 @@ Contract §9 lists them all. Four are corrections to bugs that break properties 
 Plus one that only bites across our two stacks: `top64 / 2**64` is not exactly representable, so
 Python and JS can disagree at the boundary. Contract §4 uses `(top64 >> 11) / 2**53`, which is.
 
-## Pending decision — the swap control (NOT yet in the contract)
+## RESOLVED — the swap control is in (contract §8.3, FR-719a, SC-707a)
 
 The pretrained arm's `ΔnllPreserved` has a confound the contract states (§8.3): the vacated
 passage genuinely has higher entropy, so every prediction degrades, scaffolding included.
@@ -73,8 +73,19 @@ nonce form. Same machinery, different minting strategy — `mint: "nonce" | "swa
 is then equally wrong semantically but the forms are all known, so
 `nonce − swap` isolates *unknown form* from *wrong content*.
 
-Deliberately deferred to phase 2 so the contract stays stable while the two modules are being
-written against it. **Add as a contract addendum + FR before the pretrained arm is implemented.**
+Added to the contract as §8.3 while the two modules were still being written, since it does not
+change §§1-7 and the modules are implementing those. It only adds a minting strategy.
+
+The decomposition the UI must report:
+- `nll(swap) − nll(english)` — the cost of **wrong content**
+- `nll(nonce) − nll(swap)` — the cost of **unknown form**
+
+and never `nll(nonce) − nll(english)` alone, which conflates them. The residual — that nonce
+forms fragment into more subword tokens — is not separable without a tokenizer-level control,
+and the UI says so rather than pretending the remainder is pure location.
+
+The correctness check for the control is elegant: `swap` must satisfy the invariance theorem
+exactly as `nonce` does, because the tiny model is equally blind to both.
 
 ## Status
 

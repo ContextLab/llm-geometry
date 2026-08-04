@@ -91,7 +91,12 @@ separate instrument; none is needed for T4.
 - **FR-718** Token→word alignment is verified by reconstruction; a mismatch raises rather than
   mis-attributing (contract §8.2).
 - **FR-719** The entropy confound is stated in the UI, and the tiny arm's exact zero is shown
-  next to the pretrained delta so the number is interpretable (contract §8.3).
+  next to the pretrained delta so the number is interpretable (contract §8.4).
+- **FR-719a** A **swap control** exists (`mint: "nonce" | "swap"`, contract §8.3): the same
+  transform drawing a real, frequency-rank-matched English word instead of a nonce form. The
+  pretrained arm reports the decomposition `nll(swap) − nll(english)` (wrong content) and
+  `nll(nonce) − nll(swap)` (unknown form), and never reports `nll(nonce) − nll(english)` alone
+  as if it measured location. The residual tokenization component is stated, not hidden.
 - **FR-720** Both stacks produce the same numbers for the same model and passage.
 
 ### API and static build
@@ -134,6 +139,10 @@ separate instrument; none is needed for T4.
   exactly for strings and id streams.
 - **SC-707** The pretrained arm produces a `ΔnllPreserved` whose sign and magnitude are
   reported from a real model run, next to the tiny arm's exact zero.
+- **SC-707a** The swap control satisfies the invariance theorem exactly as the nonce strategy
+  does (contract §8.3) — the tiny model is equally blind to both. This is the check that the
+  control is implemented correctly, and it is asserted, not assumed. The decomposition
+  `nll(swap) − nll(english)` and `nll(nonce) − nll(swap)` is reported from a real model run.
 - **SC-708** Every prosody statistic displayed is accompanied by `stressTableCoverage`, and no
   number from the source document appears as if it were ours.
 - **SC-709** The full suite is green locally and in CI: backend `pytest` + `ruff` + `black`,
