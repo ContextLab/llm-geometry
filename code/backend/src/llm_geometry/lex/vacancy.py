@@ -1,0 +1,930 @@
+"""The vacancy transform — field without location, at a controlled rate `p`.
+
+Carroll's trick, stated operationally: the closed-class scaffolding is left character-for-
+character intact — function words, inflectional morphology, punctuation, syntax, line
+structure — while open-class stems are replaced by phonotactically legal nonce forms that
+carry the same syllable count and stress. A reader parses *the slithy toves did gyre and
+gimble* because every grammatical signal survives and only lexical content is vacant. Such
+a token has a FIELD (its neighbourhood is fully specified by context) and no LOCATION (no
+prior embedding).
+
+Normative source: `specs/007-vacancy-transform-field/architecture.md`. That document — not
+the Python or the TypeScript — is what both stacks implement, so **every departure from the
+original `tiny-seuss/synth/jabberwockify.py` here is one the contract lists in its §9**:
+
+1. Words are found with the tokenizer's own :data:`~llm_geometry.lex.vocab.WORD_RE`, not the
+   source's `[A-Za-z][A-Za-z']*`. Otherwise the transform and the trainer disagree about
+   `good-bye` and the relabelling theorem (contract §7.3) is simply false.
+2. ``u = (top64 >> 11) / 2**53``, not ``top64 / 2**64``. A 64-bit integer over 2**64 is not
+   exactly representable as a float64, so Python and JavaScript can land on different
+   doubles for the same digest and disagree about a word at the boundary.
+3. `random.Random` is replaced by a sha256 counter stream: MT19937 seeded from a string is
+   not reproducible in TypeScript.
+4. The map is built **once over the whole type set in canonical order**, never lazily while
+   rewriting. The source's `used` set and give-up counter make a word's nonce depend on `p`
+   and on document order, which breaks the stability property the source claims for itself.
+5. `avoid` is actually passed (the corpus type set), so a minted form can never merge with a
+   real English type.
+6. The give-up path is a deterministic salt relaxation, not `syllable + str(len(used))`.
+7. Seams (`wee` + `er`) are repaired from a hash of `(stem, suffix)`, not a shared RNG.
+8. Injectivity is **verified** over assembled surface forms, at every `p`, and re-minted on
+   collision — the theorem depends on it, so it is checked on every build and reported as
+   ``bijective`` / ``remintRounds``.
+9. `split_suffix` carries the audited copy's ``SPLIT_EXCEPTIONS`` (`brother`, not
+   `broth`+`er`).
+10. No claim of exact prosody: :data:`STRESS_TABLE` is 61 hand entries over the Dolch list,
+    described by its own author as "seeded by rule; wants roughly an hour of human
+    checking", so every prosody number ships with the three-way `stressFrom*` split beside it.
+11. ``typesVacated`` counts stems actually vacated, measured from the output text, not
+    ``len(map)``.
+
+The properties that make a `p`-sweep interpretable are structural here rather than hoped
+for: `u` depends only on `(seed, stem)`, so vacated sets are **nested** in `p`; the map is
+built independently of `p`, so a stem's nonce is **stable** across the whole sweep.
+
+Two defects that the first implementation of this contract exposed are now fixed in the
+contract itself, and each is covered by a named test here:
+
+* **The transform commutes with lowercasing** (§5.7): everything — the seam test, the seam
+  hash, the assembly — happens on the lowercased word, and `match_case` is applied to the
+  WHOLE assembled surface with the original whole word as the case source. Slicing the suffix
+  case-preserved made `gums` -> `flels` but `GUMS` -> `FLESS`, giving one type two surfaces.
+* **Injectivity is checked over surface forms and holds at every `p`** (§5.2 conditions A and
+  B). A bare-nonce check at `p = 1` missed `hang` -> `wak`, whose surface `wak` + `ed` is the
+  real English word `waked`; the two collided at `p = 0.25` and `p = 0.5`, where `waked`
+  itself was not vacated.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import math
+import re
+from dataclasses import dataclass, field
+from typing import Iterable, Mapping, Sequence
+
+from ..errors import ComputeError, InvalidParamError
+from .vocab import WORD_RE
+
+# --- the closed class -------------------------------------------------------------------
+
+#: Contract §2.1, ported verbatim from the source and whitespace-split. The source carries a
+#: warning we keep: an earlier version unioned this with the short Dolch service words, which
+#: silently protected content verbs (`run`, `eat`, `see`, `get`, `let`, `put`) and understated
+#: the vacancy rate. The closed class is THIS CURATED LIST ONLY.
+FUNCTION_WORDS: frozenset[str] = frozenset("""a an the this that these those my your his her its our
+their some any all both each every no none i me you he she it we they him them
+us who whom whose which what where when why how is am are was were be been being
+do does did done have has had having will would shall should can could may might
+must not and or but so if then than as of to in on at by for with from into onto
+up down out off over under again once here there very too also only just even
+still yet ever never always about after before while because though although
+unless until since during between among against through above below near far
+one two three four five six seven eight nine ten""".lower().split())
+
+# --- suffix splitting -------------------------------------------------------------------
+
+#: Contract §3, order significant — the first match wins.
+SUFFIXES: tuple[str, ...] = ("ing", "edly", "est", "ies", "'s", "n't", "ed", "es", "er", "ly", "s")
+
+#: Words that are never split. From the AUDITED copy of the source (contract §3, departure 9);
+#: without it `brother -> broth+er` and `morning -> morn+ing`, which the source itself flags as
+#: a known artifact. This is a spelling heuristic, not a morphological analyser, and it stays
+#: wrong outside the list (`ladder -> ladd+er`) — acceptable, because the nonce still carries a
+#: consistent identity and an inflected-looking surface, but it must be stated in the UI rather
+#: than quietly tolerated.
+SPLIT_EXCEPTIONS: frozenset[str] = frozenset(
+    {
+        "brother",
+        "father",
+        "mother",
+        "sister",
+        "never",
+        "over",
+        "under",
+        "morning",
+        "giving",
+        "thing",
+    }
+)
+
+#: The stem must be ASCII letters only. `str.isalpha()` is Unicode-aware and would accept
+#: letters JavaScript's `^[A-Za-z]+$` rejects; nothing in the shipped corpus exercises the
+#: difference, a pasted corpus would (contract §2.2).
+_STEM_RE = re.compile(r"[A-Za-z]+")
+
+#: A vacated word must itself be a single complete `WORD_RE` match — checked, not assumed.
+_WHOLE_WORD_RE = re.compile(WORD_RE.pattern + r"\Z")
+
+# --- the phonotactic tables -------------------------------------------------------------
+# Contract §5.4, ported verbatim, ORDER SIGNIFICANT: the index into each list is what the
+# byte stream selects, so reordering silently changes every nonce in both stacks.
+
+ONSETS: tuple[str, ...] = (
+    "b", "br", "bl", "d", "dr", "f", "fl", "fr", "g", "gl", "gr", "h",
+    "j", "k", "kl", "kr", "l", "m", "n", "p", "pl", "pr", "r", "s", "sk",
+    "sl", "sm", "sn", "sp", "st", "str", "sw", "t", "tr", "th", "thr",
+    "v", "w", "wr", "y", "z", "sh", "shr", "ch", "gn", "sc", "sq",
+)  # fmt: skip
+
+NUCLEI: tuple[str, ...] = (
+    "a", "e", "i", "o", "u", "ai", "ee", "ea", "oo", "ou", "oa", "ie",
+    "y", "au", "ur", "ir", "or", "ar", "er",
+)  # fmt: skip
+
+CODAS: tuple[str, ...] = (
+    "", "b", "d", "f", "g", "k", "l", "m", "n", "p", "r", "s", "t", "v",
+    "z", "sh", "ch", "th", "ck", "ff", "ll", "mp", "nd", "ng", "nk", "nt",
+    "sk", "sp", "st", "ft", "lt", "lk", "rd", "rk", "rm", "rn", "rt", "ble",
+    "dle", "gle", "kle", "tle", "mble", "ndle", "ffle", "zzle",
+)  # fmt: skip
+
+UNSTRESSED_TAILS: tuple[str, ...] = (
+    "y", "le", "er", "ow", "en", "el", "ish", "ous", "id",
+    "ic", "um", "ent", "ing",
+)  # fmt: skip
+
+#: Prefixes for an unstressed FIRST syllable.
+UNSTRESSED_ONSETS: tuple[str, ...] = ("a", "be", "re", "de", "un", "en")
+
+#: The reduced coda set for an unstressed syllable. The duplicated empty string doubles its
+#: weight; keep it (contract §5.4).
+#:
+#: **This table is UNREACHABLE and that is correct.** §5.5 step 2 has exactly three branches
+#: and none of them draws from here, exactly as in the source, where `_syl(stressed=False)`
+#: is never called. An earlier draft of the contract implied a fourth branch; it was
+#: self-contradictory and has been removed. It is retained here for fidelity to the source's
+#: tables and because **adding a use would shift the list indices the byte stream selects and
+#: change every multi-syllable nonce in both stacks**. Do not "fix" it.
+REDUCED_CODAS: tuple[str, ...] = ("", "", "l", "n", "r", "s")
+
+# --- prosody ----------------------------------------------------------------------------
+
+#: Contract §6.1, ported verbatim from `tiny-seuss/synth/lexicon.py`: 61 polysyllables of the
+#: Dolch list, "seeded by rule and then overridden by a hand table", and listed by the source
+#: itself under *not yet exercised*. So we do not claim exact prosody and no UI string may:
+#: the shipped corpus is *The Real Mother Goose*, most of whose types are not in this table
+#: and therefore fall through to :func:`rule_syllables`. Every prosody statistic must be shown
+#: with ``stressFromTable``, which is the honesty of every other prosody number.
+#: `Santa Claus` is retained verbatim even though a word tokenizer can never match it.
+STRESS_TABLE: dict[str, str] = {
+    "away": "01", "funny": "10", "little": "100", "yellow": "10",
+    "into": "10", "over": "10", "pretty": "10", "under": "10",
+    "after": "10", "again": "01", "any": "10", "every": "100",
+    "giving": "10", "once": "1", "open": "10",
+    "always": "100", "around": "01", "because": "01", "before": "01",
+    "seven": "10", "eight": "1", "myself": "01", "never": "10",
+    "only": "10", "today": "01", "together": "0100", "better": "10",
+    "carry": "10", "many": "10", "upon": "01", "very": "100",
+    "apple": "10", "baby": "10", "birthday": "100", "brother": "10",
+    "chicken": "10", "children": "100", "Christmas": "10",
+    "farmer": "10", "flower": "10", "garden": "10", "good-bye": "01",
+    "horse": "1", "kitty": "10", "letter": "10", "money": "10",
+    "morning": "10", "mother": "10", "paper": "100", "party": "10",
+    "picture": "10", "rabbit": "10", "robin": "10", "squirrel": "1",
+    "table": "10", "water": "10", "window": "10", "Santa Claus": "101",
+    "father": "10", "sister": "10", "summer": "10",
+}  # fmt: skip
+
+#: Contract §6.4. `anapest` is the Seuss engine (and Byron's *The Destruction of
+#: Sennacherib*, which is where he got it).
+FEET: dict[str, str] = {"anapest": "001", "iamb": "01", "trochee": "10", "dactyl": "100"}
+
+_VOWEL_GROUP_RE = re.compile(r"[aeiouy]+")
+_NON_LOWER_RE = re.compile(r"[^a-z]")
+
+# --- minting ----------------------------------------------------------------------------
+
+#: Collapse a run of three or more identical consonants to two (contract §5.5 step 3).
+_RUN_RE = re.compile(r"([bcdfghjklmnpqrstvwxz])\1{2,}")
+
+#: Contract §5.5 step 5: deterministic, order-independent relaxations, unlike the source's
+#: give-up counter. Reaching :data:`MINT_MAX_SALT` raises — it has never happened and if it
+#: does we want to know. The three are counted from the mint call's STARTING salt, not from
+#: zero: §5.5 writes the loop as `salt = 0, 1, 2, …`, but §5.8 starts a re-mint at
+#: `1000 * round + previousSalt + 1`, and absolute thresholds would then make round 1 begin
+#: with every quality check already relaxed and round 2 impossible (2001 > 1200), which
+#: contradicts §5.2's "raise after 8 rounds". Counting from the start salt is the only
+#: reading under which both sections are true; it is identical to the absolute reading for
+#: the base build, where the start salt is 0.
+MINT_RELAX_SYLLABLES_SALT = 400
+MINT_RELAX_LENGTH_SALT = 800
+MINT_MAX_SALT = 1200
+
+#: Contract §5.2/§7.3: injectivity is verified, not assumed, and re-minted on collision.
+MAX_REMINT_ROUNDS = 8
+
+#: Contract §5.8: a re-mint jumps to a fresh region of the byte stream deterministically.
+REMINT_SALT_STRIDE = 1000
+
+#: Characters a seam repair may substitute (contract §5.7).
+_SEAM_CHARS = "lnrtk"
+
+
+# --- word segmentation ------------------------------------------------------------------
+
+
+def stem_and_suffix(word: str) -> tuple[str, str]:
+    """Split an inflectional suffix off `word` (contract §3).
+
+    The suffixes are tried in :data:`SUFFIXES` order and the first match wins. A suffix `s`
+    matches iff ``lower(word).endswith(s)`` and ``len(word) - len(s) >= 3``. The split slices
+    the ORIGINAL word, so case is preserved. Words in :data:`SPLIT_EXCEPTIONS` are never
+    split.
+
+    Preserving the suffix is what keeps the syntax parseable: the stem is vacated and the
+    suffix re-attached, so the nonce still looks inflected.
+    """
+    lower = word.lower()
+    if lower in SPLIT_EXCEPTIONS:
+        return word, ""
+    for suffix in SUFFIXES:
+        if lower.endswith(suffix) and len(word) - len(suffix) >= 3:
+            cut = len(word) - len(suffix)
+            return word[:cut], word[cut:]
+    return word, ""
+
+
+def is_eligible(stem: str, keep: frozenset[str] = FUNCTION_WORDS) -> bool:
+    """Is this stem open-class, i.e. may it be vacated at all? (Contract §2.2.)
+
+    `keep` is the EFFECTIVE closed class — :data:`FUNCTION_WORDS` unioned with any caller
+    extras. Pass :attr:`VacancyParams.keep_set`, never :attr:`VacancyParams.keep`, or the
+    function words lose their protection.
+
+    Test 2 is what makes hyphenated and apostrophised words behave as they do, and both
+    stacks must agree on it exactly: `good-bye` matches no suffix, so its stem contains a
+    hyphen and it is **never** vacated; `dog's` splits to `dog`, which passes, giving
+    ``<nonce>'s``.
+    """
+    return stem.lower() not in keep and _STEM_RE.fullmatch(stem) is not None and len(stem) > 2
+
+
+def match_case(src: str, new: str) -> str:
+    """Carry `src`'s capitalisation onto `new`, so `Jack` becomes `Flim`, not `flim`.
+
+    Applied to the WHOLE assembled surface form with the ORIGINAL WHOLE WORD as `src`
+    (contract §5.7), never to the nonce alone with a case-preserved suffix appended after —
+    that is what broke `GUMS`.
+    """
+    if src.isupper() and len(src) > 1:
+        return new.upper()
+    if src[:1].isupper():
+        return new[:1].upper() + new[1:]
+    return new
+
+
+# --- the vacancy decision ---------------------------------------------------------------
+
+
+def vacancy_u(stem: str, seed: int) -> float:
+    """The stem's position in [0, 1) — vacate iff ``u(stem) < p`` (contract §4).
+
+    ``u`` is a function of ``(seed, stem)`` alone: not of `p`, not of traversal order, not of
+    which other words exist. That is what makes the vacated sets NESTED as `p` grows, which is
+    the first of the two properties a `p`-sweep needs to be interpretable.
+
+    The ``>> 11`` is mandatory and is a departure from the source (which used
+    ``top64 / 2**64``). A 64-bit integer divided by 2**64 is not exactly representable as a
+    float64, so Python and JavaScript can round to different doubles for the same digest and
+    disagree about a word at the boundary. Shifting to 53 bits makes the numerator exactly
+    representable, so ``u`` is *the same double* in both languages.
+    """
+    digest = hashlib.sha256(f"{seed}:{stem.lower()}".encode("utf-8")).digest()
+    return (int.from_bytes(digest[:8], "big") >> 11) / 2**53
+
+
+# --- prosody ----------------------------------------------------------------------------
+
+
+def rule_syllables(word: str) -> int:
+    """The spelling fallback for syllable counting (contract §6.2).
+
+    The source has a further ``if w.endswith("le") ...: pass`` branch; it is dead code and is
+    not ported, so this is byte-identical to the source's behaviour.
+    """
+    w = _NON_LOWER_RE.sub("", word.lower().strip("'-"))
+    if not w:
+        return 1
+    n = len(_VOWEL_GROUP_RE.findall(w))
+    if w.endswith("e") and n > 1 and not w.endswith(("le", "ee", "ye")):
+        n -= 1
+    return max(1, n)
+
+
+def stress_source(word: str, minted_stress: Mapping[str, str] | None = None) -> str:
+    """Where :func:`stress` got its answer: ``"minted"``, ``"table"``, or ``"rule"``.
+
+    ``"table"`` is the fraction the UI must publish next to every prosody number — it is the
+    part that a human has (nominally) checked. ``"minted"`` is exact by construction but is a
+    form we invented, and ``"rule"`` is a spelling guess.
+    """
+    lower = word.lower()
+    if minted_stress and lower in minted_stress:
+        return "minted"
+    if word in STRESS_TABLE or lower in STRESS_TABLE:
+        return "table"
+    return "rule"
+
+
+def stress(word: str, minted_stress: Mapping[str, str] | None = None) -> str:
+    """The stress pattern of `word` as a string of ``0``/``1`` (contract §6.3).
+
+    Lookup order, exactly: the minted patterns (so prosody scoring on a vacated corpus is
+    exact *for the forms we minted*), then :data:`STRESS_TABLE` case-sensitively (for
+    `Christmas`), then case-insensitively, then the spelling rule.
+
+    `minted_stress` is a parameter rather than the source's module-level global: a global
+    would make the answer depend on which corpora had been transformed earlier in the process.
+    """
+    lower = word.lower()
+    if minted_stress and lower in minted_stress:
+        return minted_stress[lower]
+    if word in STRESS_TABLE:
+        return STRESS_TABLE[word]
+    if lower in STRESS_TABLE:
+        return STRESS_TABLE[lower]
+    n = rule_syllables(lower)
+    return "1" if n == 1 else "1" + "0" * (n - 1)
+
+
+def syllables(word: str, minted_stress: Mapping[str, str] | None = None) -> int:
+    """``len(stress(word))`` — the syllable count implied by the stress pattern."""
+    return len(stress(word, minted_stress))
+
+
+def scan(line: str, minted_stress: Mapping[str, str] | None = None) -> str:
+    """The line's concatenated stress string, e.g. ``0100100100``.
+
+    Words are found with the tokenizer's regex but NOT lowercased, so the case-sensitive
+    :data:`STRESS_TABLE` lookup can still fire.
+    """
+    return "".join(stress(t, minted_stress) for t in WORD_RE.findall(line))
+
+
+def meter_score(
+    line: str, foot: str = "anapest", minted_stress: Mapping[str, str] | None = None
+) -> float:
+    """Fraction of syllable positions in `line` that match the repeating `foot`.
+
+    ``0.0`` for a line with no syllables (contract §6.4).
+    """
+    if foot not in FEET:
+        raise InvalidParamError(
+            f"unknown foot {foot!r}; expected one of {sorted(FEET)}",
+            {"foot": foot},
+        )
+    s = scan(line, minted_stress)
+    if not s:
+        return 0.0
+    pattern = FEET[foot]
+    target = (pattern * (len(s) // len(pattern) + 1))[: len(s)]
+    return sum(a == b for a, b in zip(s, target)) / len(s)
+
+
+# --- the deterministic byte stream ------------------------------------------------------
+
+
+class _ByteStream:
+    """A sha256 counter stream (contract §5.3), trivially identical in both languages.
+
+    ``random.Random`` cannot be ported: MT19937 seeded from a string is not reproducible in
+    TypeScript without reimplementing the generator *and* `Random.choice`'s masking.
+    """
+
+    __slots__ = ("_prefix", "_counter", "_block", "_offset")
+
+    def __init__(self, seed: int, stem: str, salt: int) -> None:
+        self._prefix = f"{seed}:mint:{stem}:{salt}:"
+        self._counter = 0
+        self._block = hashlib.sha256(f"{self._prefix}0".encode("utf-8")).digest()
+        self._offset = 0
+
+    def u32(self) -> int:
+        """The next big-endian unsigned 32-bit word, refilling from the next counter."""
+        if self._offset + 4 > len(self._block):
+            self._counter += 1
+            self._block = hashlib.sha256(f"{self._prefix}{self._counter}".encode("utf-8")).digest()
+            self._offset = 0
+        value = int.from_bytes(self._block[self._offset : self._offset + 4], "big")
+        self._offset += 4
+        return value
+
+    def choice(self, options: Sequence[str]) -> str:
+        """``options[u32() % len(options)]``.
+
+        Every list here is shorter than 256, so the modulo bias is aesthetic rather than
+        statistical — but both stacks must bias IDENTICALLY, which this does.
+        """
+        return options[self.u32() % len(options)]
+
+
+def _mint(
+    stem: str,
+    seed: int,
+    match_prosody: bool,
+    forbidden: frozenset[str] | set[str],
+    start_salt: int = 0,
+) -> tuple[str, str, int]:
+    """Mint one nonce for `stem`, returning ``(nonce, intended stress pattern, salt)``.
+
+    Contract §5.5. Depends only on ``(seed, stem, match_prosody, forbidden, start_salt)`` —
+    and `forbidden` depends only on the canonically-ordered prefix of stems before this one —
+    so a stem's nonce is the same at every `p`. That is the stability property (§5.6).
+
+    The accepting salt is returned because §5.8 needs it: a re-mint restarts at
+    ``REMINT_SALT_STRIDE * round + previousSalt + 1``.
+
+    Three branches in step 2, in that order, exactly as §5.5 spells them out. There is no
+    fourth: :data:`REDUCED_CODAS` is unreachable here, as it is in the source, where
+    ``_syl(stressed=False)`` is never called. **Do not "fix" this** — a fourth branch would
+    shift every list index the byte stream selects and change every multi-syllable nonce.
+    """
+    pattern = stress(stem) if match_prosody else "1"
+    n_syl = len(pattern)
+    salt = start_salt
+    while salt - start_salt < MINT_MAX_SALT:
+        rnd = _ByteStream(seed, stem, salt)
+        tried = salt - start_salt
+        parts: list[str] = []
+        for i, mark in enumerate(pattern):
+            if mark == "1":
+                parts.append(rnd.choice(ONSETS) + rnd.choice(NUCLEI) + rnd.choice(CODAS))
+            elif i == 0:
+                parts.append(rnd.choice(UNSTRESSED_ONSETS))
+            else:
+                parts.append(rnd.choice(UNSTRESSED_TAILS))
+        w = _RUN_RE.sub(r"\1\1", "".join(parts))
+        long_enough = len(w) >= 3 or tried >= MINT_RELAX_LENGTH_SALT
+        right_length = syllables(w) == n_syl or tried >= MINT_RELAX_SYLLABLES_SALT
+        if long_enough and right_length and w not in forbidden:
+            return w, pattern, salt
+        salt += 1
+    raise ComputeError(
+        f"could not mint a nonce for {stem!r} in {MINT_MAX_SALT} attempts",
+        {"stem": stem, "seed": seed, "pattern": pattern, "start_salt": start_salt},
+    )
+
+
+def _seam_fix(nonce: str, suffix: str, stem: str, seed: int) -> str:
+    """Repair a seam like ``wee`` + ``er`` -> ``weeer`` (contract §5.7).
+
+    Deterministic in `(stem, suffix)`, so it is order-independent — the source used a shared
+    RNG here, which is not. The substitution is applied once, not looped: the hash is fixed,
+    so a loop would never terminate on a repeat.
+
+    `stem` and `suffix` must already be LOWERCASED; see :func:`surface_form`.
+    """
+    if not suffix or not nonce or nonce[-1] != suffix[0]:
+        return nonce
+    digest = hashlib.sha256(f"{seed}:seam:{stem}:{suffix}".encode("utf-8")).digest()
+    return nonce[:-1] + _SEAM_CHARS[int.from_bytes(digest[:4], "big") % len(_SEAM_CHARS)]
+
+
+def surface_form(nonce: str, stem: str, suffix: str, seed: int) -> str:
+    """The assembled, LOWERCASED output of §5.7 — seam repaired, suffix re-attached.
+
+    This is the unit the injectivity conditions of §5.2 are stated over, and the only place
+    the transform assembles anything, so the case-commuting invariant
+
+        ``lower(transform_word(w)) == transform_word(lower(w))``
+
+    holds by construction: nothing downstream of here branches on case.
+    """
+    key, tail = stem.lower(), suffix.lower()
+    return _seam_fix(nonce, tail, key, seed) + tail
+
+
+# --- parameters -------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class VacancyParams:
+    """The knobs of contract §7.1.
+
+    Three of them — `p`, `seed`, `match_prosody` — are INVISIBLE to a word-level model
+    trained from scratch, because such a model never sees the letters: with
+    ``consistent=True`` and ``reveal_after=0`` the transform is a pure relabelling of the
+    vocabulary and training is bit-identical. Only the knobs that break type identity
+    (``consistent=False``, ``reveal_after>0``) can move a loss. That is the honest tiny-arm
+    result and it is worth stating plainly rather than dressing a null up as a curve.
+    """
+
+    #: Fraction of eligible TYPES vacated. Compared as given; the UI emits two decimal
+    #: places and both stacks parse it as a float64.
+    p: float = 0.0
+    #: Selects both `u` and the nonce assignment.
+    seed: int = 0
+    #: One nonce per source type, corpus-wide. ``False`` is the source's "inconsistent
+    #: assignment" control: same vacancy rate, no learnable identity, and DELIBERATELY no
+    #: stability property.
+    consistent: bool = True
+    #: The nonce carries the stem's syllable count and stress.
+    match_prosody: bool = True
+    #: The first N occurrences of a vacated stem keep their English form, seeding a partial
+    #: location. ``0`` is the pure case.
+    reveal_after: int = 0
+    #: Extra words added to the closed class. The effective set is
+    #: ``FUNCTION_WORDS | lower(keep)`` — see :attr:`keep_set`.
+    keep: frozenset[str] = frozenset()
+
+    _keep_set: frozenset[str] = field(default=frozenset(), repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.p, bool) or not isinstance(self.p, (int, float)):
+            raise InvalidParamError(f"p must be a number, got {self.p!r}", {"p": self.p})
+        if not math.isfinite(self.p) or not 0.0 <= self.p <= 1.0:
+            raise InvalidParamError(f"p must lie in [0, 1], got {self.p!r}", {"p": self.p})
+        if isinstance(self.seed, bool) or not isinstance(self.seed, int):
+            raise InvalidParamError(f"seed must be an int, got {self.seed!r}", {"seed": self.seed})
+        if isinstance(self.reveal_after, bool) or not isinstance(self.reveal_after, int):
+            raise InvalidParamError(
+                f"reveal_after must be an int, got {self.reveal_after!r}",
+                {"reveal_after": self.reveal_after},
+            )
+        if self.reveal_after < 0:
+            raise InvalidParamError(
+                f"reveal_after must be >= 0, got {self.reveal_after}",
+                {"reveal_after": self.reveal_after},
+            )
+        for w in self.keep:
+            if not isinstance(w, str):
+                raise InvalidParamError(
+                    f"keep must contain strings, got {w!r}", {"keep": sorted(map(str, self.keep))}
+                )
+        object.__setattr__(self, "keep", frozenset(self.keep))
+        object.__setattr__(self, "_keep_set", FUNCTION_WORDS | {w.lower() for w in self.keep})
+
+    @property
+    def keep_set(self) -> frozenset[str]:
+        """The EFFECTIVE closed class: :data:`FUNCTION_WORDS` plus the caller's extras."""
+        return self._keep_set
+
+
+# --- the map ----------------------------------------------------------------------------
+
+
+class _RewriteState:
+    """Per-rewrite bookkeeping for the order-DEPENDENT conditions only.
+
+    ``consistent=True, reveal_after=0`` — the condition the invariance theorem is stated for —
+    touches nothing here except the counter, and the counter never changes an output.
+    """
+
+    __slots__ = ("counts", "used")
+
+    def __init__(self, used: set[str]) -> None:
+        self.counts: dict[str, int] = {}
+        self.used = used
+
+
+@dataclass(frozen=True)
+class VacancyMap:
+    """A `p`-independent stem -> nonce assignment, plus the evidence that it is injective.
+
+    Built once over the whole type set in canonical order (contract §5.2), so the map at any
+    `p` is just the restriction of this one map to ``{stem : u(stem) < p}``. Nesting and
+    stability are therefore structural facts rather than properties to be hoped for.
+
+    The two mappings are plain dicts for cheap lookup and must not be mutated by callers; the
+    only writer is the inconsistent-assignment control, which registers the patterns of the
+    forms it mints so that prosody scoring stays exact.
+    """
+
+    #: ``lower(stem) -> nonce``.
+    mapping: dict[str, str]
+    #: ``nonce -> intended stress pattern``, for :func:`stress`'s first lookup.
+    minted_stress: dict[str, str]
+    seed: int
+    match_prosody: bool
+    #: Lowercased forms a nonce may never take — the corpus type set, so a minted form can
+    #: never silently merge with a real English word.
+    avoid: frozenset[str]
+    #: ``|image|`` of the type set the map was built over, at full vacancy.
+    image_size: int
+    #: ``|types|`` it was built over.
+    type_count: int
+    #: ``image_size == type_count``. The relabelling theorem depends on it.
+    bijective: bool
+    #: How many collision-driven re-mint rounds were needed. Expected to be 0.
+    remint_rounds: int
+
+    def nonce_for(self, stem: str) -> str | None:
+        """The nonce assigned to `stem`, or ``None`` if the stem is outside the domain."""
+        return self.mapping.get(stem.lower())
+
+    def apply_word(self, word: str, params: VacancyParams) -> str:
+        """Transform a single word in isolation.
+
+        Convenience for one-off queries and for the order-INDEPENDENT conditions. Rewriting a
+        text goes through :func:`vacate_text`, which threads the occurrence counters that
+        ``reveal_after`` and ``consistent=False`` need.
+        """
+        return self._transform(word, params, _RewriteState(set(self.mapping.values())))
+
+    def _transform(self, word: str, params: VacancyParams, state: _RewriteState) -> str:
+        stem, suffix = stem_and_suffix(word)
+        if not is_eligible(stem, params.keep_set):
+            return word
+        key = stem.lower()
+        if vacancy_u(key, params.seed) >= params.p:
+            return word
+        seen = state.counts.get(key, 0) + 1
+        state.counts[key] = seen
+        if seen <= params.reveal_after:
+            return word
+
+        if params.consistent:
+            nonce = self.mapping.get(key)
+            if nonce is None:
+                raise ComputeError(
+                    f"stem {key!r} is outside the vacancy map's domain — the map must be "
+                    "built over the union of the corpus types and the budget's words",
+                    {"stem": key},
+                )
+        else:
+            # The inconsistent-assignment control: the nonce is derived from
+            # (stem, occurrence index) in document order, so every occurrence is a fresh
+            # type. This condition has NO stability property; destroying the field while
+            # holding the vacancy rate fixed is its entire purpose.
+            # §5.8 pins the key: `f"{stem}#{idx}"` with `idx` the 0-based occurrence index
+            # of the STEM in document order. `#` is not a legal `WORD_RE` character, so the
+            # key can never collide with a real stem.
+            nonce, pattern, _salt = _mint(
+                f"{key}#{seen - 1}",
+                params.seed,
+                params.match_prosody,
+                self.avoid | state.used,
+            )
+            state.used.add(nonce)
+            self.minted_stress.setdefault(nonce, pattern)
+
+        out = match_case(word, surface_form(nonce, key, suffix, params.seed))
+        if _WHOLE_WORD_RE.fullmatch(out) is None:
+            raise ComputeError(
+                f"vacating {word!r} produced {out!r}, which is not a single complete word "
+                "token — the token stream would no longer align with the original",
+                {"word": word, "output": out},
+            )
+        return out
+
+
+def _image_of(word: str, mapping: Mapping[str, str], keep: frozenset[str], seed: int) -> str:
+    """A lowercased type at full vacancy, used only by the injectivity check."""
+    stem, suffix = stem_and_suffix(word)
+    if not is_eligible(stem, keep):
+        return word
+    nonce = mapping.get(stem.lower())
+    if nonce is None:
+        return word
+    return surface_form(nonce, stem, suffix, seed)
+
+
+def build_vacancy_map(
+    types: Iterable[str], params: VacancyParams, avoid: Iterable[str] = ()
+) -> VacancyMap:
+    """Assign every eligible stem a nonce, once, in canonical order (contract §5.2).
+
+    `types` must be the union of the corpus's type set AND the budget's word list: a budget
+    word absent from the corpus still needs an image, or the mapped vocabulary of §7.2 has a
+    hole in it. `avoid` is the lowercased corpus type set, so a nonce can never collide with
+    a real word — the source accepts an `avoid` parameter and then never passes one, which
+    lets a minted form silently merge with an English type.
+
+    `p` is deliberately unused: the map is built over ALL eligible stems and restricted to
+    ``{u < p}`` at rewrite time. That is what makes nesting and stability structural.
+
+    **Injectivity is verified over assembled SURFACE FORMS, and the condition is
+    `p`-independent** (§5.2). Both must hold over the domain:
+
+    * **A.** the surface forms are pairwise distinct
+    * **B.** no surface form equals any lowercased domain type, eligible or not
+
+    A bare-nonce check is not enough — the collision arrives through the suffix — and a check
+    performed at `p = 1` only is not enough either, because at full vacancy every eligible
+    type has moved and nothing is left for a minted form to collide with. B is deliberately
+    conservative: it forbids a minted form from equalling a word that would always have been
+    vacated alongside it, and that costs a re-mint but buys a condition independent of `p`,
+    which is what the theorem needs. Measured cost on the shipped corpus: one re-mint at
+    seed 7, where `hang` first minted `wak` and `hanged` surfaced as the real word `waked`.
+
+    On violation only the LOSING stem is re-minted — the one later in ASCII-ascending order
+    among those involved — at salt ``1000 * round + previousSalt + 1``, so a re-mint never
+    cascades (§5.8).
+    """
+    keep = params.keep_set
+    type_set = {t.lower() for t in types}
+    avoid_set = frozenset(w.lower() for w in avoid)
+
+    pairs: list[tuple[str, str]] = []
+    stem_set: set[str] = set()
+    for t in sorted(type_set):
+        stem, suffix = stem_and_suffix(t)
+        if not is_eligible(stem, keep):
+            continue
+        pairs.append((stem.lower(), suffix.lower()))
+        stem_set.add(stem.lower())
+
+    mapping: dict[str, str] = {}
+    minted_stress: dict[str, str] = {}
+    salts: dict[str, int] = {}
+    forbidden: set[str] = set(avoid_set)
+    for stem in sorted(stem_set):
+        nonce, pattern, salt = _mint(stem, params.seed, params.match_prosody, forbidden)
+        forbidden.add(nonce)
+        mapping[stem] = nonce
+        minted_stress[nonce] = pattern
+        salts[stem] = salt
+
+    rounds = 0
+    while True:
+        claimed: dict[str, str] = {}  # surface -> the stem that owns it
+        losers: set[str] = set()
+        for stem, suffix in pairs:
+            form = surface_form(mapping[stem], stem, suffix, params.seed)
+            if form in type_set:  # condition B
+                losers.add(stem)
+            if form in claimed:  # condition A
+                losers.add(max(stem, claimed[form]))
+            else:
+                claimed[form] = stem
+        if not losers:
+            break
+        if rounds >= MAX_REMINT_ROUNDS:
+            raise ComputeError(
+                f"vacancy map still collides after {MAX_REMINT_ROUNDS} re-mint rounds",
+                {"stems": sorted(losers)[:20], "rounds": rounds},
+            )
+        rounds += 1
+        for stem in sorted(losers):
+            others = {n for s, n in mapping.items() if s != stem}
+            nonce, pattern, salt = _mint(
+                stem,
+                params.seed,
+                params.match_prosody,
+                avoid_set | others,
+                start_salt=REMINT_SALT_STRIDE * rounds + salts[stem] + 1,
+            )
+            minted_stress.pop(mapping[stem], None)
+            mapping[stem] = nonce
+            minted_stress[nonce] = pattern
+            salts[stem] = salt
+
+    seen = {_image_of(t, mapping, keep, params.seed) for t in type_set}
+    return VacancyMap(
+        mapping=mapping,
+        minted_stress=minted_stress,
+        seed=params.seed,
+        match_prosody=params.match_prosody,
+        avoid=avoid_set,
+        image_size=len(seen),
+        type_count=len(type_set),
+        bijective=len(seen) == len(type_set),
+        remint_rounds=rounds,
+    )
+
+
+# --- rewriting --------------------------------------------------------------------------
+
+
+def vacate_text(text: str, vmap: VacancyMap, params: VacancyParams) -> str:
+    """Rewrite `text` in place, vacating every eligible stem with ``u(stem) < p``.
+
+    Words are found with **exactly the tokenizer's regex** and everything else — whitespace,
+    punctuation, digits, line breaks — passes through unchanged, byte for byte. Every output
+    is itself a single complete `WORD_RE` match (checked in :meth:`VacancyMap._transform`),
+    so ``tokenize(vacate(text))`` has the same length and ordering as ``tokenize(text)``, and
+    because line breaks are untouched the ``<eos>``-per-line rule produces the same number of
+    ``<eos>`` in the same places.
+    """
+    state = _RewriteState(set(vmap.mapping.values()))
+    return WORD_RE.sub(lambda m: vmap._transform(m.group(0), params, state), text)
+
+
+def map_vocab_words(words: Sequence[str], vmap: VacancyMap, params: VacancyParams) -> list[str]:
+    """Push a budget's word list through the same transform, PRESERVING ORDER (§7.2).
+
+    Since the map is injective, ``itos_p = SPECIALS ++ map_vocab_words(words, ...)`` assigns
+    every word the id its pre-image had, which is why the token id stream is unchanged and
+    training is bit-identical.
+
+    This rule is only valid in the condition it is stated for. Under ``consistent=False`` or
+    ``reveal_after > 0`` a source type no longer has a single image, so the budget must be
+    REBUILT from the vacated corpus instead — the collapse in coverage is the measurement.
+    Calling this there would quietly manufacture a vocabulary that matches no corpus.
+    """
+    if not params.consistent or params.reveal_after:
+        raise InvalidParamError(
+            "the mapped vocabulary is only defined for consistent=True, reveal_after=0; "
+            "every other condition rebuilds the budget from the vacated corpus",
+            {"consistent": params.consistent, "reveal_after": params.reveal_after},
+        )
+    state = _RewriteState(set(vmap.mapping.values()))
+    return [vmap._transform(w, params, state) for w in words]
+
+
+# --- statistics -------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Prosody:
+    """One side of the prosody statistics, token-weighted.
+
+    ``from_table + from_minted + from_rule == 1`` by construction: :func:`stress_source`
+    partitions the tokens.
+    """
+
+    mean_syllables: float
+    mean_anapest: float
+    from_table: float
+    from_minted: float
+    from_rule: float
+
+
+def _prosody(text: str, minted_stress: Mapping[str, str] | None) -> _Prosody:
+    words = WORD_RE.findall(text)
+    if not words:
+        return _Prosody(0.0, 0.0, 0.0, 0.0, 0.0)
+    total_syllables = sum(syllables(w, minted_stress) for w in words)
+    sources = [stress_source(w, minted_stress) for w in words]
+    lines = [ln for ln in text.splitlines() if WORD_RE.search(ln)]
+    anapest = (
+        sum(meter_score(ln, "anapest", minted_stress) for ln in lines) / len(lines)
+        if lines
+        else 0.0
+    )
+    return _Prosody(
+        mean_syllables=total_syllables / len(words),
+        mean_anapest=anapest,
+        from_table=sources.count("table") / len(words),
+        from_minted=sources.count("minted") / len(words),
+        from_rule=sources.count("rule") / len(words),
+    )
+
+
+def vacancy_stats(
+    original: str, vacated: str, vmap: VacancyMap, params: VacancyParams
+) -> dict[str, float | int | bool]:
+    """The statistics contract (§10), with exactly these field names.
+
+    ``typesVacated`` and ``tokensVacated`` are MEASURED from the two texts rather than read
+    off the map: the source reports ``len(self.map)``, which is the size of the assignment
+    and not the number of stems actually vacated, and which is wrong under ``reveal_after``
+    and under the inconsistent-assignment control.
+
+    The prosody numbers ship with a THREE-WAY split of where each token's stress came from,
+    token-weighted and summing to 1 on each side (§10). A single "table coverage" number was
+    ambiguous the moment minted forms existed — read literally it counts only the hand table,
+    read as "stress we actually know" it also counts forms we minted, and the two readings
+    differ by a factor of thirty. So:
+
+    * ``stressFromTable*`` — the 61-entry hand table of §6.1, the honesty number for English
+      words;
+    * ``stressFromMinted*`` — forms we minted and registered a pattern for. Known by
+      construction but ASSERTED rather than verified: §5.5 accepts a candidate on syllable
+      COUNT, so the count is checked and the pattern is not;
+    * ``stressFromRule*`` — the spelling heuristic of §6.2, i.e. a guess.
+
+    The source's own numbers (mean anapest 0.351 -> 0.345, mean syllables 1.224 -> 1.211) are
+    its numbers on a corpus we do not have. They are not transcribed anywhere.
+    """
+    before_words = WORD_RE.findall(original)
+    after_words = WORD_RE.findall(vacated)
+    if len(before_words) != len(after_words):
+        raise ComputeError(
+            f"vacating changed the token count ({len(before_words)} -> {len(after_words)}); "
+            "the token streams no longer align",
+            {"tokens_before": len(before_words), "tokens_after": len(after_words)},
+        )
+
+    keep = params.keep_set
+    types = {w.lower() for w in before_words}
+    eligible = {t for t in types if is_eligible(stem_and_suffix(t)[0], keep)}
+    changed = [b.lower() for b, a in zip(before_words, after_words) if b.lower() != a.lower()]
+
+    # The original text is English, so it is scored WITHOUT the minted patterns; `avoid`
+    # guarantees no English type is also a nonce, so `stressFromMintedBefore` is 0 by
+    # construction rather than by omission.
+    before = _prosody(original, None)
+    after = _prosody(vacated, vmap.minted_stress)
+
+    return {
+        "typesTotal": len(types),
+        "typesEligible": len(eligible),
+        "typesVacated": len(set(changed)),
+        "tokensTotal": len(before_words),
+        "tokensVacated": len(changed),
+        "meanSyllablesBefore": before.mean_syllables,
+        "meanSyllablesAfter": after.mean_syllables,
+        "meanAnapestBefore": before.mean_anapest,
+        "meanAnapestAfter": after.mean_anapest,
+        "stressFromTableBefore": before.from_table,
+        "stressFromTableAfter": after.from_table,
+        "stressFromMintedBefore": before.from_minted,
+        "stressFromMintedAfter": after.from_minted,
+        "stressFromRuleBefore": before.from_rule,
+        "stressFromRuleAfter": after.from_rule,
+        "bijective": vmap.bijective,
+        "imageSize": vmap.image_size,
+        "remintRounds": vmap.remint_rounds,
+    }
