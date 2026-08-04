@@ -402,7 +402,9 @@ test("the vacancy panel reports only what q8 has a measured bound for", async ({
   const wrong = page.getByTestId("arch-vac-wrong_content");
   await expect(wrong).toContainText(/\d\.\d{3}/);
   await expect(page.getByTestId("arch-vac-wrong_content-err")).toContainText(QUANT);
-  await expect(page.getByTestId("arch-vac-total-err")).toContainText("(sampling,");
+  // The secondary row carries no token count, so its sampling term is a bare "(sampling)"
+  // while the headline card's is "(sampling, N paired tokens)". Assert each as it renders.
+  await expect(page.getByTestId("arch-vac-total-err")).toContainText("(sampling)");
   await expect(page.getByTestId("arch-vac-total-err")).toContainText(QUANT);
   // The word the contract forbids, on every surface that carries the bound. The lookbehind
   // is what makes this assertion do any work: "retained bound — not re-measured" contains
