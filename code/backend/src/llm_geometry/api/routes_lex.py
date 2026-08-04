@@ -28,6 +28,7 @@ spectrum is computed from real weights, and generation runs a real forward pass.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
 import threading
 from functools import lru_cache
@@ -551,6 +552,225 @@ async def coverage(request: Request) -> dict[str, Any]:
     )
 
 
+# -- POST /api/lex/vacancy -----------------------------------------------------------------
+
+#: Characters of vacated text returned inline by default, and the ceiling a caller may ask
+#: for. See :func:`vacancy` for why this endpoint returns an excerpt plus a digest rather
+#: than the whole corpus. Both numbers are mirrored in
+#: `code/frontend/src/lib/staticClient/lex.ts`; the API-parity fixture pins them together.
+VACANCY_PREVIEW_CHARS = 2000
+VACANCY_PREVIEW_MAX = 20000
+
+
+def _vacancy_params(payload: dict[str, Any]) -> Any:
+    """Coerce contract §7.1's knobs out of a raw JSON object.
+
+    Every value goes through the same coercers the rest of this module uses, and the
+    range checks live in ``VacancyParams.__post_init__`` — which raises
+    ``InvalidParamError`` itself, so a bad `p` is a 422 in the shared envelope rather than
+    a 500 out of the dataclass.
+
+    Passed by keyword on purpose: the transform's parameter set is still growing (the
+    swap-mint control of §8.3), and a keyword call keeps a new optional field from
+    landing in the wrong slot here.
+    """
+    from ..lex.vacancy import VacancyParams
+
+    keep = payload.get("keep", ())
+    if keep is None:
+        keep = ()
+    if isinstance(keep, str):
+        # Same trap `vacancy_domain` guards: a bare string iterates character by
+        # character, so `keep: "little"` would quietly protect six single letters.
+        raise InvalidParamError(
+            f"keep must be a list of words, not a string (got {keep!r}); a string would "
+            "be read letter by letter"
+        )
+    if not isinstance(keep, (list, tuple, set, frozenset)):
+        raise InvalidParamError(f"keep must be a list of words, got {keep!r}")
+    for word in keep:
+        if not isinstance(word, str):
+            raise InvalidParamError(f"keep must contain strings, got {word!r}")
+    return VacancyParams(
+        p=_as_float(payload.get("p", 0.0), "p"),
+        seed=_as_int(payload.get("seed", 0), "seed"),
+        consistent=_as_bool(payload.get("consistent", True), "consistent"),
+        match_prosody=_as_bool(payload.get("match_prosody", True), "match_prosody"),
+        reveal_after=_as_int(payload.get("reveal_after", 0), "reveal_after"),
+        keep=frozenset(str(w) for w in keep),
+    )
+
+
+def _vacancy_key(params: Any) -> dict[str, Any] | None:
+    """A canonical cache-key fragment for the transform's parameters, or ``None``.
+
+    Read off the dataclass's OWN fields rather than an enumerated list, so a knob added to
+    the transform is in the cache key the day it is added rather than the day someone
+    remembers to add it here — the failure mode of the enumerated version being a cache
+    hit that serves a run made under a setting that did not exist. Leading-underscore
+    fields are derived state, never inputs.
+    """
+    if params is None:
+        return None
+    out: dict[str, Any] = {}
+    for spec in dataclasses.fields(params):
+        if spec.name.startswith("_"):
+            continue
+        value = getattr(params, spec.name)
+        out[spec.name] = sorted(value) if isinstance(value, (set, frozenset)) else value
+    return out
+
+
+def _vacate(text: str, params: Any) -> tuple[Any, str]:
+    """Build the `p`-independent map over this corpus and rewrite the text with it.
+
+    The domain is :func:`vacancy_domain` — the corpus's own types UNION the full Dolch
+    list — never the active budget, so the map is a function of `(corpus, seed,
+    match_prosody)` alone and switching budgets in the UI cannot re-mint the corpus
+    underneath a panel whose whole claim is that nonces are stable (§5.2).
+
+    Deliberately not cached. The whole thing is ~70 ms on the shipped corpus, and a cache
+    keyed on the parameters that exist today would silently serve the wrong map the day
+    the transform grows another one.
+    """
+    from ..lex.vacancy import build_vacancy_map, vacancy_domain, vacate_text
+
+    vmap = build_vacancy_map(vacancy_domain(tokenize(text)), params)
+    return vmap, vacate_text(text, vmap, params)
+
+
+def _is_mapped(params: Any) -> bool:
+    """Contract §7.2: the mapped vocabulary is defined only in the theorem's condition."""
+    return bool(params.consistent) and params.reveal_after == 0
+
+
+def _vacancy_vocab(
+    *,
+    params: Any,
+    vmap: Any,
+    original_text: str,
+    vacated_text: str,
+    source: str,
+    budget: str,
+    size: int | None,
+) -> tuple[LexVocab, str]:
+    """The vocabulary a vacated corpus is read with, and which of §7.2's two rules gave it.
+
+    **Mapped** (`consistent`, `reveal_after = 0`): the budget is resolved against the
+    ENGLISH corpus and then pushed through the same `transformWord`, preserving order. The
+    map is injective, so every word keeps the id its pre-image had and the token id stream
+    is unchanged — which is the whole invariance theorem of §7.3.
+
+    **Rebuilt** (every other condition): a source type no longer has a single image, so
+    the budget is rebuilt from the vacated corpus by the tab's normal rule. Coverage then
+    collapses, and the collapse IS the measurement (FR-715).
+    """
+    from ..lex.vacancy import map_vocab_words
+
+    if _is_mapped(params):
+        english = _resolve_budget(source, budget, size, original_text)
+        return (
+            LexVocab(
+                words=tuple(map_vocab_words(english.words, vmap, params)),
+                source=english.source,
+                budget_name=english.budget_name,
+            ),
+            "mapped",
+        )
+    return _resolve_budget(source, budget, size, vacated_text), "rebuilt"
+
+
+@router.post("/vacancy")
+async def vacancy(request: Request) -> dict[str, Any]:
+    """The vacancy transform applied to a corpus, with the statistics of contract §10.
+
+    Same corpus-source rule as `/api/lex/coverage` — `text`, `hf_dataset`, or (with
+    neither) the shipped corpus — and the same budget triple, because the interesting
+    question about a vacated corpus is always "under which vocabulary?".
+
+    **Why an excerpt and a digest rather than the whole vacated text.** The shipped corpus
+    is ~86 kB of body text and the panel re-runs this on every tick of the `p` slider, so
+    returning it whole would put megabytes on the wire across one sweep to show a reader a
+    screenful. Nothing needs it whole: the panel shows an excerpt (the source's own figure
+    is its first 400 characters), and a caller that wants to *train* on the vacated corpus
+    sends the same parameters to `/api/lex/train`, which vacates server-side rather than
+    round-tripping the text. What the excerpt cannot do by itself is prove which text it
+    came from, so `vacated_sha256` covers all of it in 64 bytes — that digest is also the
+    single value the static build's in-browser transform is checked against, which is the
+    parity this feature rests on. `preview_chars` raises the excerpt up to
+    ``VACANCY_PREVIEW_MAX``.
+
+    Every number here is measured on the corpus in the request. The source document's own
+    prosody figures are its numbers on a corpus we do not have and are transcribed
+    nowhere (§10).
+    """
+    from ..lex.vacancy import vacancy_stats
+
+    payload = await _json_body(request)
+    original = await _text_source(payload)
+    params = _vacancy_params(payload)
+
+    preview_chars = _as_int(payload.get("preview_chars", VACANCY_PREVIEW_CHARS), "preview_chars")
+    if not 0 <= preview_chars <= VACANCY_PREVIEW_MAX:
+        raise InvalidParamError(
+            f"preview_chars must be in 0..{VACANCY_PREVIEW_MAX}, got {preview_chars}. "
+            "The whole vacated corpus is never returned; `vacated_sha256` identifies it, "
+            "and /api/lex/train vacates server-side so the text never needs a round trip."
+        )
+
+    source = str(payload.get("source", DEFAULT_BUDGET_SOURCE))
+    budget = str(payload.get("budget", DEFAULT_BUDGET))
+    raw_size = payload.get("size")
+    size = _as_int(raw_size, "size") if raw_size is not None else None
+
+    vmap, vacated = _vacate(original, params)
+    vocab, rule = _vacancy_vocab(
+        params=params,
+        vmap=vmap,
+        original_text=original,
+        vacated_text=vacated,
+        source=source,
+        budget=budget,
+        size=size,
+    )
+    stats = vacancy_stats(original, vacated, vmap, params)
+
+    return _jsonable(
+        {
+            "p": params.p,
+            "seed": params.seed,
+            "consistent": params.consistent,
+            "match_prosody": params.match_prosody,
+            "reveal_after": params.reveal_after,
+            "keep": sorted(params.keep),
+            # Which of §7.2's two rules produced `words`. A client must not have to infer
+            # it from the parameters: "mapped" is the only condition under which the ids
+            # are the English ids, and that is the difference between an invariance result
+            # and a coverage collapse.
+            "vocabulary_rule": rule,
+            "words": list(vocab.words),
+            "budget": _budget_payload(vocab, vacated),
+            "corpus": _corpus_stats(vacated),
+            # §10's field names verbatim, camelCase inside a snake_case envelope on
+            # purpose: they are a cross-language contract, not this API's naming.
+            "vacancy_stats": stats,
+            # Also inside `vacancy_stats`; surfaced here because injectivity is the
+            # guarantee the mapped vocabulary rests on, and a caller checking it should
+            # not have to reach into a statistics block to do so.
+            "bijective": stats["bijective"],
+            "remint_rounds": stats["remintRounds"],
+            "preview": vacated[:preview_chars],
+            "original_preview": original[:preview_chars],
+            "preview_chars": preview_chars,
+            "truncated": len(vacated) > preview_chars,
+            "vacated_chars": len(vacated),
+            "vacated_sha256": hashlib.sha256(vacated.encode("utf-8")).hexdigest(),
+            "original_chars": len(original),
+            "original_sha256": hashlib.sha256(original.encode("utf-8")).hexdigest(),
+        }
+    )
+
+
 # -- POST /api/lex/train -------------------------------------------------------------------
 
 
@@ -577,9 +797,36 @@ async def train(request: Request, response: Response) -> dict[str, Any]:
     With `base` set, the *existing model's* vocabulary is used and travels with the
     result — feature 004's issue #6 was exactly the opposite mistake, and repeating it
     would silently re-tokenize a fine-tune against a vocabulary the weights never saw.
+
+    **`vacancy` (feature 007, optional, additive).** An object of contract §7.1's knobs.
+    Absent, everything below behaves exactly as it did before it existed. Present, the
+    resolved corpus is vacated first and the model trains on the vacated text under the
+    vocabulary §7.2 assigns it — mapped when the theorem's conditions hold, rebuilt from
+    the vacated corpus otherwise. The transform happens here rather than in the client so
+    the corpus never round-trips: `/api/lex/vacancy` deliberately returns an excerpt.
+
+    Under the mapped condition this is a *pure relabelling*: same token id stream, same
+    losses, bit for bit (§7.3). That is not a caveat, it is the result — and it is why
+    `p = 0` and a `p = 0.5` mapped run land on the *same* cache entry only when their
+    (text, vocabulary) pairs really coincide, which at `p = 0` they do, the transform
+    being the identity there (`u ∈ [0, 1)`).
     """
     payload = await _json_body(request)
     text = await _text_source(payload)
+
+    vacancy_payload = payload.get("vacancy")
+    vac_params = None
+    vmap = None
+    original_text = text
+    if vacancy_payload is not None:
+        if not isinstance(vacancy_payload, dict):
+            raise InvalidParamError(
+                "vacancy must be an object of the transform's parameters "
+                "(p, seed, consistent, match_prosody, reveal_after, keep), "
+                f"got {vacancy_payload!r}"
+            )
+        vac_params = _vacancy_params(vacancy_payload)
+        vmap, text = _vacate(original_text, vac_params)
 
     steps = _as_int(payload.get("steps", DEFAULT_STEPS), "steps")
     if not 1 <= steps <= MAX_STEPS:
@@ -623,9 +870,19 @@ async def train(request: Request, response: Response) -> dict[str, Any]:
         source = str(payload.get("source", DEFAULT_BUDGET_SOURCE))
         budget = str(payload.get("budget", DEFAULT_BUDGET))
         size = payload.get("size")
-        vocab = _resolve_budget(
-            source, budget, _as_int(size, "size") if size is not None else None, text
-        )
+        size_int = _as_int(size, "size") if size is not None else None
+        if vac_params is None:
+            vocab = _resolve_budget(source, budget, size_int, text)
+        else:
+            vocab, _rule = _vacancy_vocab(
+                params=vac_params,
+                vmap=vmap,
+                original_text=original_text,
+                vacated_text=text,
+                source=source,
+                budget=budget,
+                size=size_int,
+            )
         config = _model_config_from(payload, vocab_rows=vocab.rows)
 
     key, _ = _train_cache_key(
@@ -634,6 +891,11 @@ async def train(request: Request, response: Response) -> dict[str, Any]:
             "config": config,
             "vocab": list(vocab.words),
             "vocab_source": vocab.source,
+            # Redundant with (corpus, vocabulary) today — every knob that can change a
+            # training run changes one of those two — and in the key anyway, so that a
+            # knob added to the transform later cannot silently collide with a run made
+            # before it existed.
+            "vacancy": _vacancy_key(vac_params),
             "base": base,
             "steps": steps,
             "lr": lr,

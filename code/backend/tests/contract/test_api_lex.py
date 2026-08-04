@@ -12,9 +12,11 @@ pins that claim rather than leaving it as an assertion in prose.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import time
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -35,6 +37,11 @@ from llm_geometry.lex.dolch import DOLCH_ORDER, dolch_sizes
 from llm_geometry.lex.vocab import build_vocab
 
 client = TestClient(app)
+
+#: `<repo>/code/backend/tests/contract/test_api_lex.py` -> `<repo>`. The vacancy parity
+#: fixture lives beside the frontend tests that consume it, and this file asserts against
+#: the same copy so the two stacks cannot be pinned to two different documents.
+REPO_ROOT = Path(__file__).resolve().parents[4]
 
 #: A real but deliberately cheap model: a full run of this is a fraction of a second.
 TINY_TRAIN: dict[str, Any] = {
@@ -670,6 +677,264 @@ def test_bundle_rejects_a_foreign_format_and_a_future_version() -> None:
 def test_model_export_rejects_an_unknown_token() -> None:
     _assert_error_envelope(
         client.get("/api/lex/model?model_token=" + "0" * 32), 404, "NotFoundError"
+    )
+
+
+# -- POST /api/lex/vacancy (feature 007) -----------------------------------------------
+
+
+def _vacancy(**body: Any) -> dict[str, Any]:
+    resp = client.post("/api/lex/vacancy", json=body)
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    _assert_rounded6(payload)
+    return payload
+
+
+def test_vacancy_reports_every_statistic_the_contract_names() -> None:
+    """§10's field list, verbatim and complete — an unprefixed `types*` is forbidden."""
+    payload = _vacancy(p=1.0, seed=0)
+    stats = payload["vacancy_stats"]
+    assert set(stats) == {
+        "domainTypesTotal",
+        "domainTypesEligible",
+        "domainTypesVacated",
+        "corpusTypesTotal",
+        "corpusTypesEligible",
+        "corpusTypesVacated",
+        "stemsTotal",
+        "stemsVacated",
+        "tokensTotal",
+        "tokensVacated",
+        "meanSyllablesBefore",
+        "meanSyllablesAfter",
+        "meanAnapestBefore",
+        "meanAnapestAfter",
+        "stressFromTableBefore",
+        "stressFromTableAfter",
+        "stressFromMintedBefore",
+        "stressFromMintedAfter",
+        "stressFromRuleBefore",
+        "stressFromRuleAfter",
+        "bijective",
+        "imageSize",
+        "remintRounds",
+    }
+    # The measured numbers of §10 on the shipped corpus, at full vacancy.
+    assert stats["domainTypesTotal"] == 2233
+    assert stats["domainTypesEligible"] == 1944
+    assert stats["corpusTypesTotal"] == 2211
+    assert stats["corpusTypesEligible"] == 1922
+    assert stats["corpusTypesVacated"] == 1922
+    assert stats["tokensVacated"] == 8202
+    assert stats["stemsTotal"] == 1680
+    # Identities, not observations: `u ∈ [0, 1)`, so p = 1 vacates everything eligible.
+    assert stats["stemsVacated"] == stats["stemsTotal"]
+    assert stats["domainTypesVacated"] == stats["domainTypesEligible"]
+    assert stats["corpusTypesVacated"] == stats["corpusTypesEligible"]
+    # The three-way stress split is token-weighted and sums to 1 on each side.
+    for side in ("Before", "After"):
+        total = sum(stats[f"stressFrom{k}{side}"] for k in ("Table", "Minted", "Rule"))
+        assert abs(total - 1.0) < 1e-6, (side, total)
+    # Injectivity is REPORTED, not assumed, and is surfaced beside the statistics block.
+    assert payload["bijective"] is True
+    assert stats["bijective"] is True
+    assert payload["remint_rounds"] == stats["remintRounds"] == 0
+
+
+def test_vacancy_reports_the_measured_remint_at_seed_7() -> None:
+    """Seed 7 needs exactly one re-mint: `hang` first minted `wak`, and `hanged` would
+    have surfaced as the real English word `waked` (§5.2 condition B)."""
+    payload = _vacancy(p=1.0, seed=7)
+    assert payload["remint_rounds"] == 1
+    assert payload["bijective"] is True
+    # The transform is unharmed by it: the same 1 922 types and 8 202 tokens move.
+    assert payload["vacancy_stats"]["corpusTypesVacated"] == 1922
+    assert payload["vacancy_stats"]["tokensVacated"] == 8202
+
+
+def test_vacancy_returns_an_excerpt_and_a_digest_rather_than_the_corpus() -> None:
+    payload = _vacancy(p=1.0, seed=0)
+    assert payload["preview_chars"] == 2000
+    assert len(payload["preview"]) == 2000
+    assert payload["truncated"] is True
+    # ~86 kB of corpus behind a 2 kB excerpt, pinned by 64 hex characters.
+    assert payload["vacated_chars"] > 20 * payload["preview_chars"]
+    assert len(payload["vacated_sha256"]) == 64
+    assert payload["vacated_sha256"] != payload["original_sha256"]
+    assert (
+        payload["original_sha256"] == hashlib.sha256(load_corpus_text().encode("utf-8")).hexdigest()
+    )
+
+    short = _vacancy(p=1.0, seed=0, preview_chars=10)
+    assert short["preview"] == payload["preview"][:10]
+    assert short["vacated_sha256"] == payload["vacated_sha256"]
+
+
+def test_vacancy_is_the_identity_at_p_zero() -> None:
+    payload = _vacancy(p=0.0, seed=0)
+    assert payload["vacated_sha256"] == payload["original_sha256"]
+    assert payload["preview"] == payload["original_preview"]
+    for field in ("corpusTypesVacated", "domainTypesVacated", "tokensVacated", "stemsVacated"):
+        assert payload["vacancy_stats"][field] == 0, field
+
+
+def test_vacancy_maps_the_vocabulary_and_leaves_coverage_untouched() -> None:
+    """SC-703 in the units the panel shows.
+
+    Under `consistent=true, reveal_after=0` the transform is a pure relabelling, so the
+    budget's measured coverage of the VACATED corpus is bit-identical to its coverage of
+    the English one — the same tokens in budget, `<unk>` in exactly the same places.
+    """
+    english = client.post("/api/lex/coverage", json={"source": "dolch", "budget": "primer"}).json()
+    for p in (0.0, 0.25, 0.5, 0.75, 1.0):
+        for seed in (0, 7):
+            payload = _vacancy(p=p, seed=seed, source="dolch", budget="primer")
+            assert payload["vocabulary_rule"] == "mapped"
+            assert payload["budget"]["coverage"] == english["coverage"], (p, seed)
+            assert payload["budget"]["rows"] == english["rows"]
+            assert len(payload["words"]) == len(english["words"])
+            assert payload["corpus"]["n_tokens"] == english["corpus"]["n_tokens"]
+            assert payload["corpus"]["n_lines"] == english["corpus"]["n_lines"]
+            if p > 0:
+                assert payload["words"] != english["words"]
+
+
+def test_vacancy_controls_rebuild_the_budget_and_collapse_coverage() -> None:
+    """SC-705: the conditions that break type identity break the invariance, measurably."""
+    mapped = _vacancy(p=0.5, seed=0, source="dolch", budget="primer")
+    inconsistent = _vacancy(p=0.5, seed=0, consistent=False, source="dolch", budget="primer")
+    revealed = _vacancy(p=0.5, seed=0, reveal_after=2, source="dolch", budget="primer")
+    assert mapped["vocabulary_rule"] == "mapped"
+    assert inconsistent["vocabulary_rule"] == "rebuilt"
+    assert revealed["vocabulary_rule"] == "rebuilt"
+    for control in (inconsistent, revealed):
+        assert control["budget"]["coverage"]["unk_rate"] > mapped["budget"]["coverage"]["unk_rate"]
+    # §10: `corpusTypesVacated` is measured from the two TEXTS, so a type whose every
+    # occurrence falls inside the reveal window does not count — the reading that matches
+    # what the number claims to a reader.
+    assert (
+        revealed["vacancy_stats"]["corpusTypesVacated"]
+        < mapped["vacancy_stats"]["corpusTypesVacated"]
+    )
+
+
+def test_vacancy_nests_and_stays_stable_as_p_rises() -> None:
+    """SC-701 / SC-702 through the API: a word rewritten at a low `p` is byte-identical at
+    every higher one, and the vacated set only grows."""
+    seen: list[tuple[float, int, list[str]]] = []
+    for p in (0.0, 0.25, 0.5, 0.75, 1.0):
+        payload = _vacancy(p=p, seed=0, source="dolch", budget="primer")
+        seen.append((p, payload["vacancy_stats"]["stemsVacated"], payload["words"]))
+    for (_, lower_n, lower_words), (_, higher_n, higher_words) in zip(seen, seen[1:]):
+        assert higher_n >= lower_n
+        for english, low, high in zip(seen[0][2], lower_words, higher_words):
+            if low != english:
+                assert high == low, (english, low, high)
+
+
+def test_vacancy_transforms_a_users_own_text() -> None:
+    text = "The little brown squirrel ate the pretty acorn.\nThe squirrel ran away.\n"
+    payload = _vacancy(text=text, p=1.0, seed=0, preview_chars=200)
+    assert payload["original_preview"] == text
+    assert payload["preview"] != text
+    # §1: only WORD_RE matches move; punctuation and line breaks pass through byte for byte.
+    assert payload["preview"].count("\n") == text.count("\n")
+    assert payload["preview"].count(".") == 2
+    assert payload["vacancy_stats"]["tokensTotal"] == 12
+    assert payload["vacancy_stats"]["tokensVacated"] == 9  # the three `the`s are preserved
+
+
+def test_vacancy_rejects_parameters_outside_the_contract() -> None:
+    for body in (
+        {"p": 1.5},
+        {"p": -0.1},
+        {"p": "half"},
+        {"seed": "zero"},
+        {"reveal_after": -1},
+        {"preview_chars": 20001},
+        {"preview_chars": -1},
+        {"keep": "little"},  # a bare string would protect six single letters
+        {"keep": [3]},
+        {"source": "dolch", "size": 50},
+        {"budget": "not-a-budget"},
+        {"text": "!!! ???"},
+    ):
+        _assert_error_envelope(client.post("/api/lex/vacancy", json=body), 400, "InvalidParamError")
+
+
+def test_vacancy_matches_the_static_client_fixture() -> None:
+    """**The parity assertion this feature rests on.**
+
+    `code/frontend/tests/fixtures/vacancy-api-golden.json` is a transcript of this route,
+    written by `scripts/export_vacancy_api_golden.py`. `staticVacancy.test.ts` asserts the
+    browser's in-page implementation reproduces it field for field; this asserts the live
+    route still does. One document, two stacks, and no way for either to drift alone.
+    """
+    fixture = json.loads(
+        (
+            REPO_ROOT / "code" / "frontend" / "tests" / "fixtures" / "vacancy-api-golden.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert fixture["format"] == "vacancy-api-golden-v1"
+    assert fixture["endpoint"] == "/api/lex/vacancy"
+    assert fixture["defaults"]["preview_chars"] == 2000
+    assert fixture["defaults"]["preview_max"] == 20000
+    assert len(fixture["cases"]) >= 6
+    for case in fixture["cases"]:
+        resp = client.post("/api/lex/vacancy", json=case["request"])
+        assert resp.status_code == 200, (case["label"], resp.text)
+        assert resp.json() == case["response"], (
+            f"{case['label']}: the route no longer returns what the parity fixture "
+            "records. Regenerate it with `python scripts/export_vacancy_api_golden.py` "
+            "ONLY after confirming the change was intended — the browser asserts against "
+            "the same file."
+        )
+
+
+# -- POST /api/lex/train with vacancy (feature 007) -------------------------------------
+
+
+def test_train_on_a_vacated_corpus_is_bit_identical_under_the_mapped_vocabulary() -> None:
+    """SC-703's corollary, run for real: `p` is invisible to a word-level model.
+
+    The mapped vocabulary gives every word the id its pre-image had, so the token id
+    stream is unchanged and the losses are IDENTICAL — not close. That is the tiny arm's
+    headline result, and it is asserted here rather than described.
+    """
+    english = _train(seed=11)
+    vacated = _train(seed=11, vacancy={"p": 0.5, "seed": 0})
+    for field in ("first_loss", "final_loss", "val_loss", "n_tokens", "vocab_rows"):
+        assert vacated[field] == english[field], field
+    # Same numbers, different words: the relabelling is real, the model is blind to it.
+    assert vacated["model_token"] != english["model_token"]
+    assert vacated["sample"] != english["sample"]
+
+
+def test_train_without_vacancy_is_untouched_by_the_new_parameter() -> None:
+    """Additive means additive: the same request keeps hitting the same cache entry."""
+    first = _train(seed=12)
+    again = _train(seed=12)
+    assert again["model_token"] == first["model_token"]
+    # `vacancy: null` is "no vacancy", not "vacancy with defaults".
+    explicit = _train(seed=12, vacancy=None)
+    assert explicit["model_token"] == first["model_token"]
+    # …and `p = 0` really is the identity, so it lands on that entry too.
+    identity = _train(seed=12, vacancy={"p": 0.0, "seed": 0})
+    assert identity["model_token"] == first["model_token"]
+
+
+def test_train_rejects_a_vacancy_block_that_is_not_an_object() -> None:
+    for bad in (0.5, "p=0.5", [0.5]):
+        _assert_error_envelope(
+            client.post("/api/lex/train", json={**TINY_TRAIN, "vacancy": bad}),
+            400,
+            "InvalidParamError",
+        )
+    _assert_error_envelope(
+        client.post("/api/lex/train", json={**TINY_TRAIN, "vacancy": {"p": 2}}),
+        400,
+        "InvalidParamError",
     )
 
 

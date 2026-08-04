@@ -87,6 +87,17 @@ import {
   type SpectrumResult,
   type WeightSet,
 } from "../lexEngine";
+import {
+  buildVacancyMap,
+  mapVocabWords,
+  vacancyDomain,
+  vacancyParams as vacancyParamsWithDefaults,
+  vacancyStats,
+  vacateText,
+  type VacancyMap,
+  type VacancyParams,
+  type VacancyStats,
+} from "../lexEngine/vacancy";
 import { sha256Hex, utf8Bytes } from "../geoEngine/hash";
 import type { StaticAssets } from "./assets";
 import { computeError, invalidParamError, notFoundError, staticModeError, toApiError } from "./errors";
@@ -217,6 +228,76 @@ export interface LexCoverageResult {
   words: string[];
 }
 
+/**
+ * Contract §7.1's knobs, on the wire. `snake_case` because that is this API's convention;
+ * the transform's own TypeScript surface is camelCase in both stacks (§5.8), and
+ * `vacancyParamsFrom` is the single place the two spellings meet.
+ */
+export interface LexVacancyParamsBody {
+  p?: number;
+  seed?: number;
+  consistent?: boolean;
+  match_prosody?: boolean;
+  reveal_after?: number;
+  keep?: readonly string[];
+}
+
+export interface LexVacancyBody extends LexCoverageBody, LexVacancyParamsBody {
+  preview_chars?: number;
+}
+
+/** §10's statistics, camelCase in both stacks because §10 names them that way. */
+export interface LexVacancyStats {
+  domainTypesTotal: number;
+  domainTypesEligible: number;
+  domainTypesVacated: number;
+  corpusTypesTotal: number;
+  corpusTypesEligible: number;
+  corpusTypesVacated: number;
+  stemsTotal: number;
+  stemsVacated: number;
+  tokensTotal: number;
+  tokensVacated: number;
+  meanSyllablesBefore: number;
+  meanSyllablesAfter: number;
+  meanAnapestBefore: number;
+  meanAnapestAfter: number;
+  stressFromTableBefore: number;
+  stressFromTableAfter: number;
+  stressFromMintedBefore: number;
+  stressFromMintedAfter: number;
+  stressFromRuleBefore: number;
+  stressFromRuleAfter: number;
+  bijective: boolean;
+  imageSize: number;
+  remintRounds: number;
+}
+
+export interface LexVacancyResult {
+  p: number;
+  seed: number;
+  consistent: boolean;
+  match_prosody: boolean;
+  reveal_after: number;
+  keep: string[];
+  /** Which of §7.2's two rules produced `words`. */
+  vocabulary_rule: "mapped" | "rebuilt";
+  words: string[];
+  budget: { source: string; budget: string; size: number; rows: number; coverage: Coverage };
+  corpus: { n_tokens: number; n_distinct: number; n_lines: number; n_chars: number };
+  vacancy_stats: LexVacancyStats;
+  bijective: boolean;
+  remint_rounds: number;
+  preview: string;
+  original_preview: string;
+  preview_chars: number;
+  truncated: boolean;
+  vacated_chars: number;
+  vacated_sha256: string;
+  original_chars: number;
+  original_sha256: string;
+}
+
 export interface LexTrainBody extends LexCoverageBody, LexShapeParams {
   steps?: number;
   lr?: number;
@@ -225,6 +306,8 @@ export interface LexTrainBody extends LexCoverageBody, LexShapeParams {
   seed?: number;
   sample_every?: number;
   base?: string;
+  /** Feature 007, optional and additive: train on the VACATED corpus (§7.2). */
+  vacancy?: LexVacancyParamsBody;
 }
 
 export interface LexTrainRecord {
@@ -344,6 +427,7 @@ export interface LexClient {
   lexSpec(): Promise<LexSpec>;
   lexBudgets(params?: LexShapeParams & { source?: string }): Promise<LexBudgetsResult>;
   lexCoverage(body?: LexCoverageBody): Promise<LexCoverageResult>;
+  lexVacancy(body?: LexVacancyBody): Promise<LexVacancyResult>;
   lexTrain(body?: LexTrainBody): Promise<LexTrainResult>;
   lexSpectrum(params: LexSpectrumParams): Promise<LexSpectrumResult>;
   lexGenerate(body: LexGenerateBody): Promise<LexGenerateResult>;
@@ -356,6 +440,72 @@ export const LEX_BUNDLE_VERSION = 1;
 
 /** The most frequent out-of-budget types returned by /coverage. A sample, labelled so. */
 const OOV_SAMPLE_SIZE = 24;
+
+/**
+ * Characters of vacated text returned inline by default, and the ceiling a caller may
+ * ask for. These MUST equal `routes_lex.py`'s `VACANCY_PREVIEW_CHARS` /
+ * `VACANCY_PREVIEW_MAX`: the API-parity fixture is generated with the default and
+ * compared here, so a drift in the default fails a test rather than quietly serving two
+ * different excerpts in the two modes.
+ */
+export const VACANCY_PREVIEW_CHARS = 2000;
+export const VACANCY_PREVIEW_MAX = 20000;
+
+/**
+ * Contract §7.1's knobs out of a wire body, snake_case to camelCase, defaults filled by
+ * the engine's own `vacancyParams` so this cannot drift from them.
+ *
+ * Written as a spread over the engine's defaults rather than as an object literal on
+ * purpose: the transform's parameter set is still growing (§8.3's swap mint), and a
+ * literal here would silently drop whatever is added next.
+ */
+function vacancyParamsFrom(body: LexVacancyParamsBody): VacancyParams {
+  const keep = body.keep;
+  if (typeof keep === "string") {
+    throw invalidParamError(
+      `keep must be a list of words, not a string (got ${JSON.stringify(keep)}); ` +
+        "a string would be read letter by letter",
+    );
+  }
+  if (keep != null && !Array.isArray(keep)) {
+    throw invalidParamError(`keep must be a list of words, got ${JSON.stringify(keep)}`);
+  }
+  const p = asFloat(body.p, "p", 0);
+  if (!(Number.isFinite(p) && p >= 0 && p <= 1)) {
+    throw invalidParamError(`p must lie in [0, 1], got ${JSON.stringify(body.p)}`);
+  }
+  const revealAfter = asInt(body.reveal_after, "reveal_after", 0);
+  if (revealAfter < 0) throw invalidParamError(`reveal_after must be >= 0, got ${revealAfter}`);
+  return vacancyParamsWithDefaults({
+    p,
+    seed: asInt(body.seed, "seed", 0),
+    consistent: asBool(body.consistent, "consistent", true),
+    matchProsody: asBool(body.match_prosody, "match_prosody", true),
+    revealAfter,
+    keep: keep == null ? [] : keep.map(String),
+  });
+}
+
+/**
+ * The backend runs the whole response through `jsonable_6sig`, so the counts pass through
+ * as integers and every measured fraction is rounded to 6 significant digits. Doing the
+ * same here is what lets the two payloads be compared field for field.
+ */
+function roundVacancyStats(stats: VacancyStats): LexVacancyStats {
+  return {
+    ...stats,
+    meanSyllablesBefore: sig6(stats.meanSyllablesBefore, "meanSyllablesBefore"),
+    meanSyllablesAfter: sig6(stats.meanSyllablesAfter, "meanSyllablesAfter"),
+    meanAnapestBefore: sig6(stats.meanAnapestBefore, "meanAnapestBefore"),
+    meanAnapestAfter: sig6(stats.meanAnapestAfter, "meanAnapestAfter"),
+    stressFromTableBefore: sig6(stats.stressFromTableBefore, "stressFromTableBefore"),
+    stressFromTableAfter: sig6(stats.stressFromTableAfter, "stressFromTableAfter"),
+    stressFromMintedBefore: sig6(stats.stressFromMintedBefore, "stressFromMintedBefore"),
+    stressFromMintedAfter: sig6(stats.stressFromMintedAfter, "stressFromMintedAfter"),
+    stressFromRuleBefore: sig6(stats.stressFromRuleBefore, "stressFromRuleBefore"),
+    stressFromRuleAfter: sig6(stats.stressFromRuleAfter, "stressFromRuleAfter"),
+  };
+}
 
 // --- transport parity ------------------------------------------------------------------
 
@@ -842,6 +992,101 @@ export class LexSection {
     };
   }
 
+  // --- the vacancy transform (feature 007) -------------------------------------------
+
+  /**
+   * POST /api/lex/vacancy — computed here, LIVE, not refused.
+   *
+   * The Lexicon Lab is browser-side in both modes, and the transform is pure string work
+   * over a corpus this build already ships, so there is nothing here a static page cannot
+   * do for real. `lexEngine/vacancy.ts` and `llm_geometry/lex/vacancy.py` implement the
+   * same normative document, and `tests/unit/staticVacancy.test.ts` pins this method's
+   * whole response against what the real FastAPI route returned for the same request —
+   * the statistics AND the sha256 of the entire vacated corpus, which is the parity this
+   * feature rests on.
+   *
+   * The response is an excerpt plus a digest for the same reason the backend's is: the
+   * corpus is ~86 kB and a `p` sweep would otherwise move megabytes to show a screenful.
+   */
+  async lexVacancy(body: LexVacancyBody = {}): Promise<LexVacancyResult> {
+    const original = await this.textSource(body);
+    const params = vacancyParamsFrom(body);
+
+    const previewChars = asInt(body.preview_chars, "preview_chars", VACANCY_PREVIEW_CHARS);
+    if (!(previewChars >= 0 && previewChars <= VACANCY_PREVIEW_MAX)) {
+      throw invalidParamError(
+        `preview_chars must be in 0..${VACANCY_PREVIEW_MAX}, got ${previewChars}. ` +
+          "The whole vacated corpus is never returned; `vacated_sha256` identifies it, " +
+          "and /api/lex/train vacates in place so the text never needs a round trip.",
+      );
+    }
+
+    const vmap = buildVacancyMap(vacancyDomain(tokenize(original)), params);
+    const vacated = vacateText(original, vmap, params);
+    const { vocab, rule } = this.vacancyVocab(body, params, vmap, original, vacated);
+    const stats = vacancyStats(original, vacated, vmap, params);
+
+    return {
+      p: sig6(params.p, "p"),
+      seed: params.seed,
+      consistent: params.consistent,
+      match_prosody: params.matchProsody,
+      reveal_after: params.revealAfter,
+      keep: [...params.keep].map(String).sort(),
+      vocabulary_rule: rule,
+      words: [...vocab.words],
+      budget: {
+        source: vocab.source,
+        budget: vocab.budgetName,
+        size: vocab.budgetSize,
+        rows: vocab.rows,
+        coverage: this.roundCoverage(vocab.coverage(vacated)),
+      },
+      corpus: corpusStats(vacated),
+      vacancy_stats: roundVacancyStats(stats),
+      bijective: stats.bijective,
+      remint_rounds: stats.remintRounds,
+      preview: vacated.slice(0, previewChars),
+      original_preview: original.slice(0, previewChars),
+      preview_chars: previewChars,
+      truncated: vacated.length > previewChars,
+      vacated_chars: vacated.length,
+      vacated_sha256: sha256Hex(utf8Bytes(vacated)),
+      original_chars: original.length,
+      original_sha256: sha256Hex(utf8Bytes(original)),
+    };
+  }
+
+  /**
+   * §7.2's two rules, and which one applies.
+   *
+   * **Mapped** (`consistent`, `revealAfter = 0`): resolve the budget against the ENGLISH
+   * corpus, then push its word list through the same `transformWord`, preserving order.
+   * The map is injective, so every word keeps the id its pre-image had — that is the
+   * invariance theorem of §7.3, and it is why a mapped run's loss is bit-identical.
+   *
+   * **Rebuilt** (everything else): a source type no longer has a single image, so the
+   * budget is rebuilt from the vacated corpus by the tab's normal rule and coverage
+   * collapses. The collapse is not a defect, it is the measurement (FR-715).
+   */
+  private vacancyVocab(
+    body: LexCoverageBody,
+    params: VacancyParams,
+    vmap: VacancyMap,
+    original: string,
+    vacated: string,
+  ): { vocab: LexVocab; rule: "mapped" | "rebuilt" } {
+    if (!params.consistent || params.revealAfter !== 0) {
+      return { vocab: this.resolveBudgetSync(body, vacated), rule: "rebuilt" };
+    }
+    const english = this.resolveBudgetSync(body, original);
+    const mapped = mapVocabWords([...english.words], vmap, params);
+    return {
+      vocab: new LexVocab(mapped, english.source, english.budgetName),
+      rule: "mapped",
+    };
+  }
+
   // --- training ---------------------------------------------------------------------
 
   /**
@@ -851,7 +1096,27 @@ export class LexSection {
    * are 200-style cache hits, exactly like the backend's content-hash single-flight.
    */
   async lexTrain(body: LexTrainBody = {}): Promise<LexTrainResult> {
-    const text = await this.textSource(body);
+    const originalText = await this.textSource(body);
+
+    // Feature 007, optional and additive: absent, everything below is exactly what it was
+    // before the transform existed. Present, the model trains on the VACATED corpus under
+    // the vocabulary §7.2 assigns it. Vacating here rather than in the caller matches the
+    // backend, where `/api/lex/vacancy` deliberately returns only an excerpt.
+    let text = originalText;
+    let vacParams: VacancyParams | null = null;
+    let vmap: VacancyMap | null = null;
+    if (body.vacancy != null) {
+      if (typeof body.vacancy !== "object" || Array.isArray(body.vacancy)) {
+        throw invalidParamError(
+          "vacancy must be an object of the transform's parameters " +
+            "(p, seed, consistent, match_prosody, reveal_after, keep), got " +
+            JSON.stringify(body.vacancy),
+        );
+      }
+      vacParams = vacancyParamsFrom(body.vacancy);
+      vmap = buildVacancyMap(vacancyDomain(tokenize(originalText)), vacParams);
+      text = vacateText(originalText, vmap, vacParams);
+    }
 
     const steps = asInt(body.steps, "steps", DEFAULT_STEPS);
     if (!(steps >= 1 && steps <= MAX_STEPS)) {
@@ -883,6 +1148,9 @@ export class LexSection {
       cfg = base.cfg;
       vocab = base.vocab;
       initialWeights = base.model.weights;
+    } else if (vacParams !== null && vmap !== null) {
+      vocab = this.vacancyVocab(body, vacParams, vmap, originalText, text).vocab;
+      cfg = configFrom(body, vocab.rows);
     } else {
       vocab = await this.resolveBudget(body, text);
       cfg = configFrom(body, vocab.rows);
@@ -893,6 +1161,9 @@ export class LexSection {
       cfg,
       words: vocab.words,
       source: vocab.source,
+      // Redundant with (text, words) today, and in the key anyway so that a knob added to
+      // the transform later cannot land on a cache entry made before it existed.
+      vacancy: vacParams,
       base: body.base ?? null,
       steps,
       lr,
@@ -1292,6 +1563,15 @@ export class LexSection {
   }
 
   private async resolveBudget(body: LexCoverageBody, text: string): Promise<LexVocab> {
+    return this.resolveBudgetSync(body, text);
+  }
+
+  /**
+   * The same resolution, without the promise. `resolveBudget` is `async` for its callers'
+   * convenience and never awaits anything; the vacancy path resolves a budget twice
+   * against two different texts (§7.2) and reads better without the ceremony.
+   */
+  private resolveBudgetSync(body: LexCoverageBody, text: string): LexVocab {
     const source = this.assertSource(body.source ?? DEFAULT_BUDGET_SOURCE);
     const budget = String(body.budget ?? DEFAULT_BUDGET);
     if (!(DOLCH_ORDER as readonly string[]).includes(budget)) {
@@ -1461,6 +1741,7 @@ export function lexClientFrom(section: LexSection): LexClient {
     lexSpec: () => section.lexSpec(),
     lexBudgets: (params) => section.lexBudgets(params),
     lexCoverage: (body) => section.lexCoverage(body),
+    lexVacancy: (body) => section.lexVacancy(body),
     lexTrain: (body) => section.lexTrain(body),
     lexSpectrum: (params) => section.lexSpectrum(params),
     lexGenerate: (body) => section.lexGenerate(body),
