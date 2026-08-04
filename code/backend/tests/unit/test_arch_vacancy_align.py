@@ -179,8 +179,15 @@ def test_intermediate_p_is_refused_exactly_as_the_lexicon_lab_refuses_it() -> No
     for p in (0.0, 1.0):
         texts = variant_texts(passage, p=p, seed=0, match_prosody=True, keep=frozenset())
         assert set(texts) == {"english", "swap", "nonce"}
-    assert len({variant_texts(passage, p=0.0, seed=0, match_prosody=True, keep=frozenset())[n]
-                for n in ("english", "swap", "nonce")}) == 1
+    assert (
+        len(
+            {
+                variant_texts(passage, p=0.0, seed=0, match_prosody=True, keep=frozenset())[n]
+                for n in ("english", "swap", "nonce")
+            }
+        )
+        == 1
+    )
 
 
 def test_default_passages_are_deterministic_and_sized() -> None:
