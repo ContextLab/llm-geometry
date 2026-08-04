@@ -432,6 +432,13 @@ These were gaps, not choices. Both stacks do it this way or the golden fixture f
   argument. The source used a module-level `MINTED_STRESS` dict mutated by `register_minted`,
   which makes two concurrently-live maps corrupt each other — and the Lexicon Lab holds several
   at once (one per condition being compared).
+- **`forbidden` is STORED, not reconstructed, and includes superseded re-mint nonces.** One
+  stack stored it; the other rebuilt it as `domain ∪ mapping.values()`, which silently drops
+  every nonce that a re-mint round replaced (`wak` at seed 7). Nothing observable diverges from
+  that today — all digests agree — but the two sets are genuinely different, and the
+  per-occurrence path of the `consistent = false` control now *draws against* `forbidden`, so it
+  is one unlucky hash away from mattering. Superseded nonces stay forbidden because they were
+  rejected for a reason: reusing one can recreate the very collision the re-mint resolved.
 - **`VacancyMap`'s stem→nonce field is `mapping` in both stacks.** TypeScript called it `map`
   and Python `mapping`, which is the third naming asymmetry this feature produced (after the
   missing `vacancyDomain` helper and the `avoid` default) and cost a debugging round for
