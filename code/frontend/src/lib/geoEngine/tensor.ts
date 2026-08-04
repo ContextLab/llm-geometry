@@ -9,25 +9,132 @@
 
 export type Mat = Float32Array | Float64Array;
 
+/**
+ * Products below this many multiply-accumulates take the straightforward path.
+ *
+ * `matmul` and `matmulTN` are *reductions over a strided axis*, which is why the naive
+ * loops for them run at ~0.6 GMAC/s while the contiguous-`k` dot-product kernel
+ * (`matmulNT`) reaches ~3. Above the cut-off it is a clear win to materialize the
+ * transpose and hand the work to that one good kernel; below it the transpose's
+ * allocation dominates, which matters because the GeoTransformer multiplies
+ * d_model = 3 matrices in a tight loop. Measured on the Lexicon Lab's five shapes
+ * (2048x64x{64,192,256,318} and 2048x256x64): 0.63 -> 2.9 GMAC/s for `matmul`,
+ * 0.61 -> 2.4 for `matmulTN`.
+ *
+ * Every kernel here is **bit-identical** to the naive triple loop it replaced: blocking
+ * and unrolling only interleave independent accumulator chains, never reassociate one.
+ * A 12-step Lexicon Lab training run hashes identically before and after, and the
+ * golden parity tests depend on that property — keep it if you touch these.
+ */
+const VIA_TRANSPOSE_MIN_MACS = 1 << 16;
+
+/** dst(cols,rows) = src(rows,cols)^T, cache-blocked. */
+export function transposeInto(src: Mat, dst: Float64Array, rows: number, cols: number): Float64Array {
+  const BS = 32;
+  for (let i0 = 0; i0 < rows; i0 += BS) {
+    const iEnd = Math.min(i0 + BS, rows);
+    for (let j0 = 0; j0 < cols; j0 += BS) {
+      const jEnd = Math.min(j0 + BS, cols);
+      for (let i = i0; i < iEnd; i++) {
+        const ro = i * cols;
+        for (let j = j0; j < jEnd; j++) dst[j * rows + i] = src[ro + j];
+      }
+    }
+  }
+  return dst;
+}
+
 /** c = a(n,k) @ b(k,m) -> (n,m). */
 export function matmul(a: Mat, b: Mat, n: number, k: number, m: number): Float64Array {
+  if (n * k * m >= VIA_TRANSPOSE_MIN_MACS) {
+    return matmulNT(a, transposeInto(b, new Float64Array(m * k), k, m), n, k, m);
+  }
   const c = new Float64Array(n * m);
+  const k8 = k - (k % 8);
   for (let i = 0; i < n; i++) {
-    for (let t = 0; t < k; t++) {
-      const av = a[i * k + t];
+    const rowA = i * k;
+    const rowC = i * m;
+    let t = 0;
+    // Unrolled by 8 over the contraction axis: eight `a` scalars share one pass over
+    // `c`, cutting its read-modify-write traffic 8x. Each c[j] still accumulates its
+    // terms in ascending `t`, exactly as the rolled loop did.
+    for (; t < k8; t += 8) {
+      const a0 = a[rowA + t], a1 = a[rowA + t + 1], a2 = a[rowA + t + 2], a3 = a[rowA + t + 3];
+      const a4 = a[rowA + t + 4], a5 = a[rowA + t + 5], a6 = a[rowA + t + 6], a7 = a[rowA + t + 7];
+      const r0 = t * m, r1 = r0 + m, r2 = r1 + m, r3 = r2 + m;
+      const r4 = r3 + m, r5 = r4 + m, r6 = r5 + m, r7 = r6 + m;
+      for (let j = 0; j < m; j++) {
+        let s = c[rowC + j];
+        s += a0 * b[r0 + j];
+        s += a1 * b[r1 + j];
+        s += a2 * b[r2 + j];
+        s += a3 * b[r3 + j];
+        s += a4 * b[r4 + j];
+        s += a5 * b[r5 + j];
+        s += a6 * b[r6 + j];
+        s += a7 * b[r7 + j];
+        c[rowC + j] = s;
+      }
+    }
+    for (; t < k; t++) {
+      const av = a[rowA + t];
       if (av === 0) continue;
       const rowB = t * m;
-      const rowC = i * m;
       for (let j = 0; j < m; j++) c[rowC + j] += av * b[rowB + j];
     }
   }
   return c;
 }
 
-/** c = a(n,k) @ b(m,k)^T -> (n,m). (y = x @ W^T for row-major W of shape (m,k).) */
+/**
+ * c = a(n,k) @ b(m,k)^T -> (n,m). (y = x @ W^T for row-major W of shape (m,k).)
+ *
+ * The one kernel worth tuning: `k` runs contiguously in BOTH operands. A 4x4 block of
+ * outputs is held in 16 accumulators, so each `b` element loaded serves four rows of `a`
+ * and four independent dependency chains keep the FPU busy. ~3 GMAC/s vs 0.85 rolled.
+ */
 export function matmulNT(a: Mat, b: Mat, n: number, k: number, m: number): Float64Array {
   const c = new Float64Array(n * m);
-  for (let i = 0; i < n; i++) {
+  const n4 = n - (n % 4);
+  const m4 = m - (m % 4);
+  let i = 0;
+  for (; i < n4; i += 4) {
+    const A0 = i * k, A1 = A0 + k, A2 = A1 + k, A3 = A2 + k;
+    const C0 = i * m, C1 = C0 + m, C2 = C1 + m, C3 = C2 + m;
+    let j = 0;
+    for (; j < m4; j += 4) {
+      const r0 = j * k, r1 = r0 + k, r2 = r1 + k, r3 = r2 + k;
+      let x0 = 0, x1 = 0, x2 = 0, x3 = 0;
+      let y0 = 0, y1 = 0, y2 = 0, y3 = 0;
+      let z0 = 0, z1 = 0, z2 = 0, z3 = 0;
+      let w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+      for (let t = 0; t < k; t++) {
+        const q0 = b[r0 + t], q1 = b[r1 + t], q2 = b[r2 + t], q3 = b[r3 + t];
+        let av = a[A0 + t];
+        x0 += av * q0; x1 += av * q1; x2 += av * q2; x3 += av * q3;
+        av = a[A1 + t];
+        y0 += av * q0; y1 += av * q1; y2 += av * q2; y3 += av * q3;
+        av = a[A2 + t];
+        z0 += av * q0; z1 += av * q1; z2 += av * q2; z3 += av * q3;
+        av = a[A3 + t];
+        w0 += av * q0; w1 += av * q1; w2 += av * q2; w3 += av * q3;
+      }
+      c[C0 + j] = x0; c[C0 + j + 1] = x1; c[C0 + j + 2] = x2; c[C0 + j + 3] = x3;
+      c[C1 + j] = y0; c[C1 + j + 1] = y1; c[C1 + j + 2] = y2; c[C1 + j + 3] = y3;
+      c[C2 + j] = z0; c[C2 + j + 1] = z1; c[C2 + j + 2] = z2; c[C2 + j + 3] = z3;
+      c[C3 + j] = w0; c[C3 + j + 1] = w1; c[C3 + j + 2] = w2; c[C3 + j + 3] = w3;
+    }
+    for (; j < m; j++) {
+      const rowB = j * k;
+      let x = 0, y = 0, z = 0, w = 0;
+      for (let t = 0; t < k; t++) {
+        const q = b[rowB + t];
+        x += a[A0 + t] * q; y += a[A1 + t] * q; z += a[A2 + t] * q; w += a[A3 + t] * q;
+      }
+      c[C0 + j] = x; c[C1 + j] = y; c[C2 + j] = z; c[C3 + j] = w;
+    }
+  }
+  for (; i < n; i++) {
     const rowA = i * k;
     const rowC = i * m;
     for (let j = 0; j < m; j++) {
@@ -42,11 +149,37 @@ export function matmulNT(a: Mat, b: Mat, n: number, k: number, m: number): Float
 
 /** c = a(n,k)^T @ b(n,m) -> (k,m). (Gradient accumulation: dW = x^T @ dy.) */
 export function matmulTN(a: Mat, b: Mat, n: number, k: number, m: number): Float64Array {
+  if (n * k * m >= VIA_TRANSPOSE_MIN_MACS) {
+    // a^T b = a^T(k,n) @ (b^T(m,n))^T — both transposes make `n` the contiguous
+    // contraction axis, which is exactly what matmulNT wants.
+    const aT = transposeInto(a, new Float64Array(k * n), n, k);
+    const bT = transposeInto(b, new Float64Array(m * n), n, m);
+    return matmulNT(aT, bT, k, n, m);
+  }
   const c = new Float64Array(k * m);
+  const k8 = k - (k % 8);
   for (let i = 0; i < n; i++) {
     const rowA = i * k;
     const rowB = i * m;
-    for (let t = 0; t < k; t++) {
+    let t = 0;
+    for (; t < k8; t += 8) {
+      const a0 = a[rowA + t], a1 = a[rowA + t + 1], a2 = a[rowA + t + 2], a3 = a[rowA + t + 3];
+      const a4 = a[rowA + t + 4], a5 = a[rowA + t + 5], a6 = a[rowA + t + 6], a7 = a[rowA + t + 7];
+      const r0 = t * m, r1 = r0 + m, r2 = r1 + m, r3 = r2 + m;
+      const r4 = r3 + m, r5 = r4 + m, r6 = r5 + m, r7 = r6 + m;
+      for (let j = 0; j < m; j++) {
+        const bv = b[rowB + j];
+        c[r0 + j] += a0 * bv;
+        c[r1 + j] += a1 * bv;
+        c[r2 + j] += a2 * bv;
+        c[r3 + j] += a3 * bv;
+        c[r4 + j] += a4 * bv;
+        c[r5 + j] += a5 * bv;
+        c[r6 + j] += a6 * bv;
+        c[r7 + j] += a7 * bv;
+      }
+    }
+    for (; t < k; t++) {
       const av = a[rowA + t];
       if (av === 0) continue;
       const rowC = t * m;

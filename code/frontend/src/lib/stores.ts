@@ -8,9 +8,9 @@
 import { writable } from "svelte/store";
 
 /** Which view is active in the main panel. */
-export type View = "architecture" | "geometry" | "info";
+export type View = "architecture" | "geometry" | "lexicon" | "info";
 
-const VIEWS: View[] = ["architecture", "geometry", "info"];
+const VIEWS: View[] = ["architecture", "geometry", "lexicon", "info"];
 
 const isView = (v: string): v is View => (VIEWS as string[]).includes(v);
 

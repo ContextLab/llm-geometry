@@ -17,6 +17,7 @@ from ..errors import LLMGeometryError
 from .routes import router
 from .routes_arch import router as arch_router
 from .routes_geo import router as geo_router
+from .routes_lex import router as lex_router
 
 
 def create_app() -> FastAPI:
@@ -59,6 +60,9 @@ def create_app() -> FastAPI:
     app.include_router(router, prefix="/api")
     app.include_router(geo_router, prefix="/api")
     app.include_router(arch_router, prefix="/api")
+    # Feature 006 (additive; the frozen 002 contract is untouched — see
+    # specs/006-lexicon-lab-tiny/contracts/api-lex.md).
+    app.include_router(lex_router, prefix="/api")
 
     # Serve the built frontend if present (production). Mounted last so /api wins.
     dist = REPO_ROOT / "code" / "frontend" / "dist"

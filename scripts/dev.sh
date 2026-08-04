@@ -42,6 +42,24 @@ done
 cd "$ROOT/code/backend"
 # shellcheck disable=SC1091
 . .venv/bin/activate
+
+# The Lexicon Lab trains in the BROWSER in both modes, so it reads its corpus from the
+# build-time export rather than from the API. Without this, `npm run dev` alone leaves the
+# tab correctly refusing to invent a corpus — which is right, but is not a working dev
+# stack. Generate it once if it is missing; the real export overwrites it in CI and in the
+# Pages build. (--only lex keeps this to ~1 s instead of re-exporting arch's weight tiles.)
+LEX_CORPUS="$ROOT/code/frontend/public/static-data/lex/corpus.json"
+if [ ! -f "$LEX_CORPUS" ]; then
+  echo -n "exporting the Lexicon Lab corpus (first run only) "
+  if (cd "$ROOT" && python scripts/export_static_assets.py --quick --only lex \
+        >"$RUN_DIR/lex-export.log" 2>&1); then
+    echo "ok"
+  else
+    echo "FAILED — see $RUN_DIR/lex-export.log" >&2
+    echo "The Lexicon tab will say its corpus is missing rather than fabricate one." >&2
+  fi
+fi
+
 python -m uvicorn llm_geometry.api.app:app --port 8000 >"$RUN_DIR/backend.log" 2>&1 &
 echo $! >"$RUN_DIR/backend.pid"
 

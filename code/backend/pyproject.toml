@@ -37,9 +37,10 @@ test = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-# The Geometry Lab's training corpus ships with the package (public domain), so pip
-# installs / containers / CI never re-download it.
-llm_geometry = ["geo/data/*.txt"]
+# Both labs' training corpora ship with the package (public domain), so pip installs /
+# containers / CI never re-download them. geo/ = Alice (PG #11); lex/ = The Real Mother
+# Goose (PG #10607), committed whole with its licence footer intact.
+llm_geometry = ["geo/data/*.txt", "lex/data/*.txt"]
 
 [tool.ruff]
 line-length = 100

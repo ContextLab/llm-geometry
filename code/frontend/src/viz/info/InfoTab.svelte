@@ -15,6 +15,7 @@
     { id: "notation", label: "Notation" },
     { id: "arch", label: "Architecture Explorer" },
     { id: "geo", label: "Geometry Lab" },
+    { id: "lex", label: "Lexicon Lab" },
     { id: "real", label: "What's real" },
     { id: "limits", label: "Known limits" },
     { id: "refs", label: "Source & references" },
@@ -29,12 +30,15 @@
   <header>
     <h2>What you're looking at</h2>
     <p class="lede">
-      Two views of a transformer at two magnifications. The <b>Architecture Explorer</b> takes a
+      Three views of a transformer at three magnifications. The <b>Architecture Explorer</b> takes a
       real open-weights model and unfolds one genuine forward pass into a clickable graph. The
       <b>Geometry Lab</b> takes a transformer small enough that its entire representation space is
       a sphere — <b>d_model = 3</b> — trains it for real, and lets you move its weights around and
-      watch the geometry respond. Nothing on either tab is a schematic or an illustration: every
-      tensor shown came out of a model that actually ran.
+      watch the geometry respond. The <b>Lexicon Lab</b> holds the model small and moves the other
+      dial instead: it trains a word-level transformer in your browser under a
+      <b>bounded vocabulary</b>, so you can watch what a budget of a few hundred words can and
+      cannot say. Nothing on any of the three is a schematic or an illustration: every tensor shown
+      came out of a model that actually ran.
     </p>
     <nav class="toc" aria-label="sections">
       {#each SECTIONS as s (s.id)}
@@ -69,6 +73,19 @@
         the checkpoint before anything appears; the deployed site ships it pre-trained.)
       </p>
       <button class="go" onclick={() => view.set("geometry")}>Open the Geometry Lab →</button>
+    </article>
+    <article class="card">
+      <h4>Lexicon Lab</h4>
+      <p>“What can a model with a few hundred words say — and what can it never say?”</p>
+      <p>
+        A word-level transformer trained from scratch <i>in your browser</i> on
+        <i>The Real Mother Goose</i> (1916). You pick the <b>vocabulary budget</b> — a prescribed
+        Dolch list, or the corpus's own most frequent words at the same size — and the coverage
+        counters, the loss, the text it generates and the geometry of its embedding matrix all
+        answer together. This tab runs entirely in the browser in both modes; it never calls the
+        backend.
+      </p>
+      <button class="go" onclick={() => view.set("lexicon")}>Open the Lexicon Lab →</button>
     </article>
   </div>
 
@@ -506,12 +523,117 @@
   </p>
 
   <!-- ------------------------------------------------------------------- real -->
+  <!-- -------------------------------------------------------------------------- lex -->
+  <h3 id="lex">The Lexicon Lab</h3>
+
+  <p class="para">
+    The other two tabs vary the <i>model</i>. This one varies the <b>vocabulary</b>. You choose a
+    word budget, choose the model's dimensions, and train it from scratch in your browser — then
+    watch three things move together: the loss, the text it produces, and the geometry of its
+    embedding matrix. The question it makes explorable is what a <i>bounded</i> vocabulary can
+    learn and say, and what it cannot.
+  </p>
+
+  <h4 class="sub">Two kinds of budget, at the same size</h4>
+  <p class="para">
+    A budget can be <b>prescribed</b> or <b>described</b>, and the tab ships both so you can hold
+    <code>|V|</code> fixed and swap which one you are using:
+  </p>
+  <ul class="para">
+    <li>
+      <b>Dolch</b> — the graded sight-word lists Edward William Dolch published in <b>1936</b>, a
+      real pedagogical word list still in use. The five cumulative budgets are
+      <b>40 / 92 / 133 / 220 / 314</b> words, and they <b>nest</b>: growing the budget only ever
+      adds words, so a comparison across sizes is not confounded by words leaving.
+    </li>
+    <li>
+      <b>Corpus frequency</b> — the most frequent <code>N</code> word types of whatever text you
+      are training on, ties broken alphabetically so the budget is a deterministic function of the
+      corpus.
+    </li>
+  </ul>
+  <p class="para">
+    On the shipped corpus the descriptive budget covers more of its own text than the prescribed one
+    at every matched size — 70.7% against 60.8% at <code>|V| = 314</code>. That is not a defect in
+    Dolch's list; it is what "descriptive" means. The interesting part is what each one <i>cannot</i>
+    say.
+  </p>
+
+  <h4 class="sub">Why 314 and not 315</h4>
+  <p class="para">
+    The Dolch noun list contains <code>Santa Claus</code>, which has a space in it and can never be
+    matched by a word-level tokenizer. The source project shipped it, so its “315-word” budget was
+    silently 314 words wide. We drop it and report the number the code actually contains. The same
+    pass fixed a transcription slip in the first-grade list, which had <code>giving</code> where the
+    published list has <code>going</code> — a word that occurs 27 times in the shipped corpus, so
+    the slip cost real coverage.
+  </p>
+
+  <h4 class="sub">What a budget cannot say</h4>
+  <p class="para">
+    Words outside the budget become <code>&lt;unk&gt;</code> when the model is trained, and
+    <code>&lt;unk&gt;</code> is <b>banned at generation</b>. So the model learns from the whole
+    corpus but can only ever speak in-budget — guaranteed by construction, because the vocabulary
+    <i>is</i> the budget. There is no filter to leak through. The <code>&lt;unk&gt;</code> rate is
+    displayed rather than hidden: at <code>|V| = 314</code> the Dolch budget cannot express
+    <b>39.2%</b> of the corpus's tokens, and only <b>215 of 3,071</b> lines are wholly inside it.
+  </p>
+
+  <h4 class="sub">Reading the spectrum — and the trap in it</h4>
+  <p class="para">
+    The geometry panel shows the singular-value spectrum of the embedding matrix and its
+    <b>effective rank</b>, <code>exp(−Σ pᵢ ln pᵢ)</code> with <code>pᵢ = σᵢ²/Σσⱼ²</code> — the
+    exponentiated entropy of the normalized squared spectrum, computed on the column-mean-centred
+    matrix.
+  </p>
+  <p class="para">
+    <b>It is very easy to fool yourself with this number,</b> so the panel makes that hard. Effective
+    rank is bounded above by <code>min(|V| − 1, d)</code>, which rises as you grow the budget
+    <i>whatever the weights contain</i>. A rank curve that climbs with <code>|V|</code> and then
+    flattens is therefore the <b>null result</b>, not evidence of learning. So the panel always draws
+    two extra things beside your model: the <code>min(|V| − 1, d)</code> ceiling, and an
+    <b>untrained random-init model of the same shape</b>. Any claim worth making is about the gap
+    between the trained curve and those two — never about the trained curve alone.
+  </p>
+  <p class="para">
+    The token cloud is a <b>PCA projection</b> onto the top three components, and is labelled as one
+    wherever it appears, with its explained variance shown. This is the opposite of the Geometry
+    Lab's sphere, where the coordinates are the representation itself. Do not read the two the same
+    way.
+  </p>
+
+  <h4 class="sub">Where this came from, and what is not claimed</h4>
+  <p class="para">
+    This tab was built from a research bundle exploring what a closed word budget reveals about
+    lexicalization. That bundle is explicitly <b>a proposal, not results</b>: by its own independent
+    audit it is “a proposal plus partial instrumentation—not a result package,” shipping no trained
+    checkpoint, no generated corpus and no run manifest, with 8 of its 9 figures schematic — one
+    legend reads “schematic data,” another caption “I have drawn my bet, not a finding.”
+  </p>
+  <p class="para">
+    So <b>nothing here reproduces its curves</b>. Every number in this tab is computed live from a
+    model that actually trained in your browser. Three of its instruments were deliberately left out
+    rather than shipped broken: its meter score, which does not measure meter (the line
+    <i>“and I do not like green eggs and ham”</i> scores 0.333 against a nonsense corpus's 0.346);
+    its constrained decoder, which can emit fused non-words and is unnecessary here anyway; and its
+    nonce-word “vacancy” experiment, which needs a parameter-matched control that does not yet
+    exist.
+  </p>
+  <p class="para">
+    Finally, on the name: this is <b>not</b> a Dr. Seuss model. His work is under copyright and is
+    not used, quoted, or trained on. The corpus is <i>The Real Mother Goose</i> (1916), and the
+    budget is Dolch's 1936 word list. The source project's own paper puts it plainly — “the tiny
+    model is therefore not a Seuss pastiche.”
+  </p>
+
   <h3 id="real">What's real, and where it runs</h3>
   <p class="para">
     This page is deployed as a static site with no Python behind it, so it is worth being precise
     about what that changes. {#if STATIC_MODE}<b>You are currently on the static build</b>, so the
     right-hand column describes what you have.{:else}<b>You are currently running against the full
-    stack</b>, so the middle column describes what you have.{/if}
+    stack</b>, so the middle column describes what you have.{/if} The Lexicon Lab is the one tab
+    with nothing to choose between: it computes in the browser either way, so its rows span both
+    columns.
   </p>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <div class="tblwrap" role="group" aria-label="capability comparison" tabindex="0">
@@ -551,6 +673,26 @@
         </td>
       </tr>
       <tr>
+        <td>Lexicon Lab: budgets, training, generation, spectrum</td>
+        <td colspan="2" class="span">
+          <b>Real, in your browser, in both modes — this tab never calls the backend.</b> The
+          vocabulary, the training loop (in a Web Worker), generation, the forward-pass trace and
+          the eigendecomposition are all the same TypeScript engine whichever way you are running,
+          so the two columns cannot differ. The backend's <code>/api/lex/*</code> routes exist for
+          parity and for callers outside this tab; nothing here uses them
+        </td>
+      </tr>
+      <tr>
+        <td>Lexicon Lab: the corpus</td>
+        <td colspan="2" class="span">
+          In both modes the tab loads <code>static-data/lex/corpus.json</code> — the build-time
+          export of the committed Project Gutenberg file, trimmed to its body by the real backend —
+          and <b>re-hashes that body in your browser</b> against the digest the export declares. A
+          mismatch, or a missing digest, is fatal: the tab refuses to run rather than measure
+          budgets against text it cannot identify
+        </td>
+      </tr>
+      <tr>
         <td>Architecture: weight matrices</td>
         <td>from the loaded model</td>
         <td>
@@ -583,16 +725,29 @@
       <a href="https://github.com/ContextLab/llm-geometry/issues/5" target="_blank" rel="noopener">issue #5</a>.
     </li>
     <li>
-      <b>A browser training run and a Python training run are not bit-identical.</b> The objective,
-      optimizer, hyperparameters, clipping, sphere projection, and vocabulary construction are the
-      same, and vocabulary building is exact — but the RNG streams are not portable, so two runs
-      “from the same seed” are two independent runs of one recipe. The forward pass <i>is</i> held
-      to ≤ 1e-5 against the Python reference.
+      <b>A browser training run and a Python training run are not bit-identical.</b> In the
+      <b>Geometry Lab</b> the objective, optimizer, hyperparameters, clipping, sphere projection,
+      and vocabulary construction are the same, and vocabulary building is exact — but the RNG
+      streams are not portable, so two runs “from the same seed” are two independent runs of one
+      recipe. The forward pass <i>is</i> held to ≤ 1e-5 against the Python reference.
     </li>
     <li>
       <b>The Geometry Lab's tokenizer is word-level</b>, lowercased, with punctuation as tokens.
       Words outside its 1000-type vocabulary become <code>&lt;unk&gt;</code>, which the token strip
       marks.
+    </li>
+    <li>
+      <b>The Lexicon Lab has no server half to fall back on.</b> It trains in your browser in both
+      modes, so what it can do is bounded by your machine and your patience rather than by the
+      deployment — and the same caveat as above applies to its numbers: the forward pass, the loss
+      and every spectrum statistic are pinned to ≤ 1e-5 against the Python implementation by a
+      golden test, but <i>whole-run</i> training equality with a Python run is not claimed.
+    </li>
+    <li>
+      <b>A model trained in the Lexicon Lab lives in that tab and nowhere else.</b> There is no
+      account and no server-side checkpoint, so closing the page ends the model unless you save the
+      <code>.llmlex.json</code> bundle — which carries the weights <i>and</i> the vocabulary,
+      because a token id means nothing without the budget it was trained under.
     </li>
   </ul>
 
@@ -601,8 +756,10 @@
   <ul class="para links">
     <li>
       <a href="https://github.com/ContextLab/llm-geometry" target="_blank" rel="noopener">
-        github.com/ContextLab/llm-geometry</a> — the full stack, the tests, and the spec. Both tabs
-      run locally against real PyTorch with one command.
+        github.com/ContextLab/llm-geometry</a> — the full stack, the tests, and the spec. The
+      Architecture Explorer and the Geometry Lab run locally against real PyTorch with one command;
+      the Lexicon Lab runs in your browser either way, and the backend's <code>/api/lex/*</code>
+      routes are there for parity rather than for the tab.
     </li>
     <li>
       M. J. Latifi Jebelli, <i>On Transformer Dynamics</i>,
@@ -618,7 +775,18 @@
     <li>
       <a href="https://www.gutenberg.org/ebooks/11" target="_blank" rel="noopener">
         Project Gutenberg ebook #11</a> — <i>Alice's Adventures in Wonderland</i>, the training
-      corpus for the shipped checkpoint.
+      corpus for the <b>Geometry Lab</b>'s shipped checkpoint.
+    </li>
+    <li>
+      <a href="https://www.gutenberg.org/ebooks/10607" target="_blank" rel="noopener">
+        Project Gutenberg ebook #10607</a> — <i>The Real Mother Goose</i> (1916), illustrated by
+      Blanche Fisher Wright: the <b>Lexicon Lab</b>'s corpus. It is committed to the repository
+      whole, header and licence footer intact, and trimmed to its body only when it is used.
+    </li>
+    <li>
+      E. W. Dolch, <i>A Basic Sight Vocabulary</i>, The Elementary School Journal 36(6):456–460,
+      1936, <a href="https://doi.org/10.1086/457353" target="_blank" rel="noopener">
+        doi:10.1086/457353</a> — the source of the Lexicon Lab's prescribed word budgets.
     </li>
   </ul>
 </section>
@@ -817,6 +985,12 @@
   }
   .tbl td b {
     color: var(--text);
+  }
+  /* A row whose two runtime columns say the same thing says it once, across both — the
+     Lexicon Lab is byte-identical in either mode, and splitting that into two identical
+     cells would invite a reader to hunt for a difference that does not exist. */
+  .tbl td.span {
+    background: rgba(91, 224, 176, 0.06);
   }
   .tbl.notation td:nth-child(odd) {
     white-space: nowrap;

@@ -22,6 +22,7 @@ test.describe("Info tab", () => {
       "Notation",
       "The Architecture Explorer",
       "The Geometry Lab",
+      "The Lexicon Lab",
       "What's real, and where it runs",
       "Known limits",
       "Source & references",
@@ -201,5 +202,83 @@ test.describe("in-tab explainers", () => {
     await expect(controls).toContainText("W_Q and W_K");
     await controls.getByRole("button", { name: "Info tab" }).click();
     await expect(page.getByTestId("info-view")).toBeVisible();
+  });
+});
+
+test.describe("Lexicon Lab documentation", () => {
+  // Feature 006's numbers, pinned the same way: read the fact from the running system,
+  // then assert the prose still agrees. This tab has already produced two stale-number
+  // defects during development — a parameter count that moved when the defaults changed,
+  // and a hand-copied effective-rank increment — so nothing here is left unpinned.
+
+  test("documented budget sizes match the real Dolch lists", async ({ page, request }) => {
+    const spec = await (await request.get("/api/lex/spec")).json();
+    const sizes = spec.budgets.map((b: { size: number }) => b.size);
+
+    // Measured from the shipped word lists, never quoted. The largest is 314, not the
+    // widely-cited 315: `Santa Claus` contains a space and no word tokenizer can match it.
+    expect(sizes).toEqual([40, 92, 133, 220, 314]);
+
+    await openInfo(page);
+    const info = page.getByTestId("info-view");
+    await expect(info).toContainText("40 / 92 / 133 / 220 / 314");
+    await expect(info).toContainText("314");
+  });
+
+  test("documented coverage figures match a real backend measurement", async ({
+    page,
+    request,
+  }) => {
+    // The prose claims the descriptive budget beats the prescribed one at matched |V|:
+    // "70.7% against 60.8% at |V| = 314". Recompute both against the shipped corpus.
+    const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
+
+    const dolch = await (
+      await request.post("/api/lex/coverage", {
+        data: { source: "dolch", budget: "full" },
+      })
+    ).json();
+    const freq = await (
+      await request.post("/api/lex/coverage", {
+        data: { source: "frequency", budget: "full" },
+      })
+    ).json();
+
+    expect(dolch.size).toBe(freq.size); // the comparison must be at matched |V|
+    expect(freq.coverage.token_coverage).toBeGreaterThan(dolch.coverage.token_coverage);
+
+    await openInfo(page);
+    const info = page.getByTestId("info-view");
+    await expect(info).toContainText(pct(freq.coverage.token_coverage));
+    await expect(info).toContainText(pct(dolch.coverage.token_coverage));
+    // …and the <unk> rate, which is the measurable form of what a budget cannot say.
+    await expect(info).toContainText(pct(dolch.coverage.unk_rate));
+    await expect(info).toContainText(
+      `${dolch.coverage.whole_lines_in_budget} of ${dolch.coverage.total_lines.toLocaleString("en-US")}`,
+    );
+  });
+
+  test("the Lexicon Lab is described as browser-only, because it is", async ({ page }) => {
+    // It trains in a worker in BOTH modes and never calls the backend. The what's-real
+    // table used to say "Both tabs run against real PyTorch", which was false for it.
+    await openInfo(page);
+    const info = page.getByTestId("info-view");
+    await expect(info).toContainText(/never calls the backend|entirely in the browser/i);
+    await expect(info).not.toContainText("Both tabs run against real PyTorch");
+  });
+
+  test("the corpus is identified exactly, and the tab verifies what it loaded", async ({
+    page,
+    request,
+  }) => {
+    const spec = await (await request.get("/api/lex/spec")).json();
+    expect(spec.corpus.gutenberg_id).toBe(10607);
+    expect(spec.corpus.year).toBe(1916);
+
+    await openInfo(page);
+    const info = page.getByTestId("info-view");
+    await expect(info).toContainText("The Real Mother Goose");
+    await expect(info).toContainText("1916");
+    await expect(info).toContainText("10607");
   });
 });

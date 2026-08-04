@@ -51,9 +51,11 @@ import { StaticAssets, type FetchLike } from "./assets";
 import { LocalJobRegistry } from "./jobs";
 import type { RuntimeLoader, StaticRuntimeInfo } from "./runtimeTypes";
 import { GeoSection } from "./geo";
+import { LexSection, lexClientFrom, type LexClient } from "./lex";
 
 export { STATIC_MODE_ERROR } from "./errors";
 export type { StaticRuntimeInfo } from "./runtimeTypes";
+export type { LexClient } from "./lex";
 
 /** Friendly names for the curated static models (labels only, not data). */
 const DISPLAY_NAMES: Record<string, string> = {
@@ -70,7 +72,14 @@ export interface StaticClientOptions {
   runtimeLoader?: RuntimeLoader;
 }
 
-export interface StaticExtras {
+/**
+ * `LexClient` is part of the static surface rather than of `Client` because the Lexicon
+ * Lab computes in the browser in BOTH modes — the live backend's `/api/lex/*` routes
+ * exist for parity and for callers outside the tab, and nothing in the tab needs a
+ * client to reach lexEngine. Extending `StaticExtras` keeps the method names identical
+ * to the contract, so folding them into `Client` later is additive.
+ */
+export interface StaticExtras extends LexClient {
   /** Marker + type guard hook for views that need static-only affordances. */
   readonly staticMode: true;
   /** The example prompts with precomputed traces for a curated model. */
@@ -90,6 +99,7 @@ export function createStaticClient(opts: StaticClientOptions = {}): StaticClient
   const jobs = new LocalJobRegistry();
   const geo = new GeoSection(assets, jobs);
   const arch = new ArchSection(assets, opts.runtimeLoader);
+  const lex = new LexSection(assets, jobs);
 
   // --- curated model catalog -------------------------------------------------------
 
@@ -198,6 +208,9 @@ export function createStaticClient(opts: StaticClientOptions = {}): StaticClient
     getArchTrace: (params: ArchTraceParams, _signal?: AbortSignal): Promise<ArchTrace> =>
       arch.getArchTrace(params),
     archGenerate: (body: ArchGenerateBody): Promise<ArchGenerateResult> => arch.archGenerate(body),
+    // Lexicon Lab: budgets, training, generation and spectra all computed in-browser by
+    // lexEngine; only the shipped corpus text and the read-only /spec are precomputed.
+    ...lexClientFrom(lex),
     // Static-only extras (views reach these via isStaticClient())
     staticMode: true,
     staticArchTracePresets: (modelId: string): Promise<TraceIndexEntry[]> =>

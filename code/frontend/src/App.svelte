@@ -1,14 +1,16 @@
 <script lang="ts">
   import ArchitectureExplorer from "./viz/arch/ArchitectureExplorer.svelte";
   import GeometryLab from "./viz/geo/GeometryLab.svelte";
+  import LexiconLab from "./viz/lex/LexiconLab.svelte";
   import InfoTab from "./viz/info/InfoTab.svelte";
   import Tooltip from "./lib/Tooltip.svelte";
   import StaticBadge from "./lib/StaticBadge.svelte";
   import { STATIC_MODE } from "./lib/staticUx";
   import { view, type View } from "./lib/stores";
 
-  // Two tabs, each owning its own controls (feature 004 removed the three
-  // embedding-geometry views and the shared control sidebar they needed).
+  // Three explorers plus a reference tab, each owning its own controls (feature 004
+  // removed the three embedding-geometry views and the shared control sidebar they
+  // needed; 006 added the Lexicon Lab).
   const tabs: { id: View; label: string; blurb: string }[] = [
     {
       id: "architecture",
@@ -19,6 +21,12 @@
       id: "geometry",
       label: "Geometry",
       blurb: "A 3-D transformer you can read, edit, and train on the sphere it lives on.",
+    },
+    {
+      id: "lexicon",
+      label: "Lexicon",
+      blurb:
+        "Train a tiny transformer whose vocabulary budget is the control — and see what a bounded vocabulary can learn and say.",
     },
     {
       id: "info",
@@ -94,6 +102,8 @@
       <ArchitectureExplorer />
     {:else if $view === "geometry"}
       <GeometryLab />
+    {:else if $view === "lexicon"}
+      <LexiconLab />
     {:else}
       <InfoTab />
     {/if}

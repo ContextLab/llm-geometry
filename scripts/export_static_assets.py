@@ -15,13 +15,15 @@ Usage (from the backend venv):
     python scripts/export_static_assets.py --quick --out /tmp/static-data ...
 
 ``--quick`` (integration-test mode): geo assets in full; arch graph + tiles + 2 traces
-for gpt2 only. Everything still comes from the real backend — quick only shrinks
+for gpt2 only; lex corpus + spec + the default (Dolch) budget table, without the
+frequency-budget table. Everything still comes from the real backend — quick only shrinks
 model/param coverage, never fabricates.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -339,6 +341,126 @@ def export_geo(client: Any, out: Path) -> dict[str, Any]:
     return {"checkpoint_id": spec["checkpoint"]["checkpoint_id"]}
 
 
+# --- lex --------------------------------------------------------------------------------
+
+
+def export_lex(client: Any, out: Path, quick: bool) -> dict[str, Any]:
+    """Everything the Lexicon Lab needs with no Python behind it (feature 006).
+
+    The Lexicon Lab trains **in the browser in both modes** — the TypeScript engine in
+    `src/lib/lexEngine/` is the same model, budget and recipe as `llm_geometry.lex`. So
+    unlike the Geometry Lab there is no checkpoint to ship: the one thing the static build
+    genuinely cannot compute for itself is the shipped corpus TEXT, because the book is a
+    committed file on the backend's disk. That plus the two read-only metadata endpoints
+    (`/spec`, `/budgets`) is the whole export.
+
+    `corpus.json` carries the TRIMMED body — `lex/corpus.py::load_corpus_text()`, the
+    Gutenberg header and licence footer removed — because that is the string every number
+    in the tab is measured against. The committed file's digest is verified against
+    `config.CORPUS_SHA256` first and recorded in the asset, and the *body*'s own digest is
+    recorded beside it so the browser can tell a truncated download from the real text.
+    """
+    from llm_geometry.lex.config import (
+        BUDGET_SOURCES,
+        CORPUS_BYTES,
+        CORPUS_GUTENBERG_ID,
+        CORPUS_PATH,
+        CORPUS_SHA256,
+        CORPUS_TITLE,
+        CORPUS_YEAR,
+        DEFAULT_BUDGET_SOURCE,
+    )
+    from llm_geometry.lex.corpus import corpus_sha256, load_corpus_text
+
+    log("lex: verifying the committed corpus digest")
+    digest = corpus_sha256()
+    if digest != CORPUS_SHA256:
+        raise SystemExit(
+            f"lex corpus {CORPUS_PATH} hashes to {digest}, but config.CORPUS_SHA256 is "
+            f"{CORPUS_SHA256}. Refusing to publish a corpus that is not the one this "
+            "project's numbers were measured on — restore the committed file, or change "
+            "the constant deliberately in its own commit."
+        )
+    on_disk = CORPUS_PATH.stat().st_size
+    if on_disk != CORPUS_BYTES:
+        raise SystemExit(
+            f"lex corpus is {on_disk} bytes on disk but config.CORPUS_BYTES says "
+            f"{CORPUS_BYTES}; /api/lex/spec would quote a number the file does not have"
+        )
+
+    text = load_corpus_text()  # re-verifies the digest, then trims header + footer
+    body_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    spec = get_json(client, "/api/lex/spec")
+    # The spec's corpus block is what the tab quotes. If the route and the file it was
+    # built from ever disagree, the deployed page would quote a digest for text it is not
+    # actually holding.
+    if spec["corpus"]["sha256"] != digest:
+        raise SystemExit(
+            f"/api/lex/spec reports corpus sha256 {spec['corpus']['sha256']} but the "
+            f"committed file hashes to {digest}"
+        )
+    write_json(out / "lex" / "spec.json", spec)
+
+    corpus_stats = {
+        key: spec["corpus"][key] for key in ("n_tokens", "n_distinct", "n_lines", "n_chars")
+    }
+    if corpus_stats["n_chars"] != len(text):
+        raise SystemExit(
+            f"/api/lex/spec reports n_chars={corpus_stats['n_chars']} but the trimmed body "
+            f"is {len(text)} characters — the route and the exporter trimmed differently"
+        )
+    write_json(
+        out / "lex" / "corpus.json",
+        {
+            "format": "lex-corpus-v1",
+            "title": CORPUS_TITLE,
+            "year": CORPUS_YEAR,
+            "gutenberg_id": CORPUS_GUTENBERG_ID,
+            # Digest + size of the COMMITTED file (header and footer included), which is
+            # what /api/lex/spec quotes; `body_*` describe the trimmed text below it.
+            "sha256": digest,
+            "bytes": CORPUS_BYTES,
+            "body_sha256": body_sha256,
+            "body_bytes": len(text.encode("utf-8")),
+            **corpus_stats,
+            "text": text,
+        },
+    )
+
+    # /budgets with no parameters — the default (Dolch) table at the default model shape.
+    # `--quick` stops here; the frequency table is a second full pass over the corpus and
+    # the static client recomputes either of them locally anyway (this file is the golden
+    # the TypeScript engine is checked against, not the client's data source).
+    budgets = get_json(client, "/api/lex/budgets")
+    if budgets["source"] != DEFAULT_BUDGET_SOURCE:
+        raise SystemExit(
+            f"/api/lex/budgets defaulted to source={budgets['source']!r}, expected "
+            f"{DEFAULT_BUDGET_SOURCE!r}"
+        )
+    write_json(out / "lex" / "budgets.json", budgets)
+    exported_sources = [DEFAULT_BUDGET_SOURCE]
+    if not quick:
+        for source in BUDGET_SOURCES:
+            if source == DEFAULT_BUDGET_SOURCE:
+                continue
+            log(f"lex: budgets for source={source}")
+            write_json(
+                out / "lex" / f"budgets-{source}.json",
+                get_json(client, "/api/lex/budgets", {"source": source}),
+            )
+            exported_sources.append(source)
+
+    return {
+        "corpus_sha256": digest,
+        "corpus_body_sha256": body_sha256,
+        "corpus_bytes": CORPUS_BYTES,
+        "corpus_body_bytes": len(text.encode("utf-8")),
+        "budget_sources": exported_sources,
+        **corpus_stats,
+    }
+
+
 # --- arch -------------------------------------------------------------------------------
 
 
@@ -475,6 +597,7 @@ def build_index(
     args: argparse.Namespace,
     arch_meta: list[dict[str, Any]],
     geo_meta: dict[str, Any],
+    lex_meta: dict[str, Any],
 ) -> None:
     files: dict[str, int] = {}
     for p in sorted(out.rglob("*")):
@@ -497,6 +620,8 @@ def build_index(
         geo_meta = prior["geo"]
     if not arch_meta and prior.get("arch_models"):
         arch_meta = prior["arch_models"]
+    if not lex_meta and prior.get("lex"):
+        lex_meta = prior["lex"]
 
     write_json(
         out / "index.json",
@@ -506,6 +631,7 @@ def build_index(
             "git_sha": args.git_sha,
             "quick": bool(args.quick),
             "geo": geo_meta,
+            "lex": lex_meta,
             "arch_models": arch_meta,
             "files": files,
             "total_bytes": sum(files.values()),
@@ -535,8 +661,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--only",
-        default="geo,arch",
-        help="comma list of sections to export (geo,arch)",
+        default="geo,lex,arch",
+        help="comma list of sections to export (geo,lex,arch)",
     )
     args = parser.parse_args(argv)
 
@@ -553,10 +679,13 @@ def main(argv: list[str] | None = None) -> int:
     from llm_geometry.api.app import app
 
     geo_meta: dict[str, Any] = {}
+    lex_meta: dict[str, Any] = {}
     arch_meta: list[dict[str, Any]] = []
     with TestClient(app) as client:
         if "geo" in sections:
             geo_meta = export_geo(client, out)
+        if "lex" in sections:
+            lex_meta = export_lex(client, out, quick=bool(args.quick))
         if "arch" in sections:
             for mid in arch_models:
                 arch_meta.append(export_arch_model(client, out, mid, n_traces))
@@ -574,7 +703,7 @@ def main(argv: list[str] | None = None) -> int:
                         _safetensors_meta(bf16_mid, ref["revision"]),
                     )
 
-    build_index(out, args, arch_meta, geo_meta)
+    build_index(out, args, arch_meta, geo_meta, lex_meta)
     log(f"done in {time.time() - t0:.1f}s -> {out}")
     return 0
 
