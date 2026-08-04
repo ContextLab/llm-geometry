@@ -164,6 +164,13 @@ describe("live runtime seam (no model downloads)", () => {
       calls.push(["tokenize", modelId, revision, text]);
       return { model_id: modelId, tokens: [{ token: 1, token_str: "x" }] };
     },
+    // The vacancy measurement is not the seam under test here; it has its own suite
+    // (archVacancy.test.ts) and its own e2e. Recording the call and refusing keeps a
+    // stray route from silently scoring nothing.
+    scoreTexts: async (onnxRepo, texts) => {
+      calls.push(["scoreTexts", onnxRepo, texts.length]);
+      throw new Error("this runtime seam test does not exercise scoring");
+    },
     generate: async (body, onnxRepo): Promise<ArchGenerateResult> => {
       calls.push(["generate", body.model_id, onnxRepo]);
       return {

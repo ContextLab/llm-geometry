@@ -34,7 +34,13 @@ import {
 import type { ArchGenerateBody, ArchGenerateResult, ArchGeneratedToken, TokenizeResult } from "../dataClient";
 import { computeError, invalidParamError } from "./errors";
 import { assertNonDegenerateLogits } from "./logitsSanity";
-import { IDLE_GENERATION_INFO, RUNTIME_LADDER, type ArchRuntime, type RuntimeGenerationInfo } from "./runtimeTypes";
+import {
+  IDLE_GENERATION_INFO,
+  RUNTIME_LADDER,
+  type ArchRuntime,
+  type RuntimeGenerationInfo,
+  type RuntimeScoredText,
+} from "./runtimeTypes";
 
 const MAX_NEW_TOKENS_LIMIT = 128; // ARCH_MAX_NEW_TOKENS (backend config)
 const TOPK = 5;
@@ -320,6 +326,78 @@ async function generateImpl(
   };
 }
 
+/**
+ * Byte-level pieces for a text — the strings the UTF-8 span algorithm decodes (§8.2).
+ *
+ * `_tokenizer` is the underlying `tokenizers` object; `encode(...).tokens` is the only
+ * place transformers.js 4.x surfaces the raw pieces (there is no offsets API at all).
+ * It is a private-ish field, so it is checked here and the failure is loud: the
+ * alternative — decoding tokens one at a time — provably corrupts multi-byte characters.
+ */
+function byteLevelPieces(tokenizer: PreTrainedTokenizer, text: string): string[] {
+  const inner = (tokenizer as unknown as { _tokenizer?: { encode(t: string): { tokens?: string[] } } })._tokenizer;
+  const tokens = inner?.encode(text)?.tokens;
+  if (!Array.isArray(tokens)) {
+    throw computeError(
+      "this build of @huggingface/transformers does not expose byte-level token pieces " +
+        "(tokenizer._tokenizer.encode(text).tokens), so tokens cannot be attributed to " +
+        "words. Refusing to guess — per-token decoding corrupts multi-byte characters.",
+    );
+  }
+  return tokens;
+}
+
+async function scoreTextsImpl(
+  onnxRepo: string,
+  texts: readonly string[],
+): Promise<RuntimeScoredText[]> {
+  if (texts.length === 0) throw invalidParamError("scoreTexts needs at least one text");
+  const generator = await getPipeline(onnxRepo);
+  const tokenizer = generator.tokenizer;
+  const model = generator.model;
+  const out: RuntimeScoredText[] = [];
+  for (const text of texts) {
+    const ids = tokenizer.encode(text, { add_special_tokens: false });
+    if (ids.length < 2) {
+      throw invalidParamError(
+        `a passage must tokenize to at least 2 tokens to be scored, got ${ids.length}`,
+      );
+    }
+    const pieces = byteLevelPieces(tokenizer, text);
+    if (pieces.length !== ids.length) {
+      throw computeError(
+        `the tokenizer returned ${ids.length} ids but ${pieces.length} byte-level pieces`,
+      );
+    }
+    const result = (await (
+      model as unknown as (o: Record<string, unknown>) => Promise<{ logits: Tensor }>
+    )({
+      input_ids: idsTensor(ids),
+      attention_mask: new Tensor("int64", BigInt64Array.from(ids, () => 1n), [1, ids.length]),
+    })) as { logits: Tensor };
+    const [, seqLen, vocab] = result.logits.dims as number[];
+    if (seqLen !== ids.length) {
+      throw computeError(`the forward pass returned ${seqLen} positions for ${ids.length} tokens`);
+    }
+    const data = result.logits.data as Float32Array;
+    const nll = new Array<number>(ids.length).fill(NaN);
+    for (let t = 0; t + 1 < ids.length; t++) {
+      const row = data.subarray(t * vocab, (t + 1) * vocab);
+      // log softmax at the target, computed stably — there is no log_softmax helper on
+      // a transformers.js tensor, and materializing probabilities for a 50k vocabulary
+      // at every position would be needlessly expensive.
+      let max = -Infinity;
+      for (let i = 0; i < row.length; i++) if (row[i] > max) max = row[i];
+      let sum = 0;
+      for (let i = 0; i < row.length; i++) sum += Math.exp(row[i] - max);
+      nll[t + 1] = -(row[ids[t + 1]] - max - Math.log(sum));
+    }
+    (result.logits as unknown as { dispose?: () => void }).dispose?.();
+    out.push({ pieces, nll, nChars: text.length });
+  }
+  return out;
+}
+
 export const runtime: ArchRuntime = {
   info: () => ({ ...generationInfo }),
 
@@ -333,4 +411,6 @@ export const runtime: ArchRuntime = {
   },
 
   generate: generateImpl,
+
+  scoreTexts: scoreTextsImpl,
 };

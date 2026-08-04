@@ -352,3 +352,51 @@ test("real in-browser generation on the smallest model", async ({ page }) => {
     fullPage: true,
   });
 });
+
+// ---------------------------------------------------------------------------------
+// [g] The vacancy instrument's pretrained arm — computed live, reported NARROWLY
+// (feature 007, contract §8.3a / FR-720a / SC-707b). The browser runs a quantized
+// export, so it may state only what was MEASURED for that dtype: pooled
+// `swap − english` and `nonce − english` with the measured ±0.1 nats, and nothing
+// else. This drives the built site and asserts it does one or the other — never a
+// bare number.
+
+test("the vacancy panel reports only what q8 has a measured bound for", async ({ page }) => {
+  test.setTimeout(600_000);
+  await page.goto(BASE);
+  await page.getByTestId("tab-architecture").click();
+  const panel = page.getByTestId("arch-vacancy");
+  await panel.scrollIntoViewIfNeeded();
+  await page.getByTestId("arch-vac-run").click();
+
+  // Real ONNX download + 18 real forward passes (6 pooled excerpts × 3 variants).
+  await expect(page.getByTestId("arch-vac-table")).toBeVisible({ timeout: 560_000 });
+  await expect(page.getByTestId("arch-vac-error")).toHaveCount(0);
+
+  // Refused: nonce − swap, by name, with the reason and the command that would fix it.
+  const refusal = page.getByTestId("arch-vac-refused-unknown_form");
+  await expect(refusal).toBeVisible();
+  await expect(refusal).toContainText("sign flip");
+  await expect(refusal).toContainText("uvicorn");
+  await expect(page.getByTestId("arch-vac-unknown_form")).toHaveCount(0);
+
+  // Refused: the absolute NLLs and every per-passage row.
+  await expect(page.getByTestId("arch-vac-refused-absolute")).toBeVisible();
+  await expect(page.getByTestId("arch-vac-refused-passages")).toBeVisible();
+  const english = page.getByTestId("arch-vac-row-english");
+  await expect(english).toContainText("—");
+
+  // Reported: the two pooled differences, each with the MEASURED quantization ±.
+  const wrong = page.getByTestId("arch-vac-wrong_content");
+  await expect(wrong).toContainText(/\d\.\d{3}/);
+  await expect(page.getByTestId("arch-vac-wrong_content-err")).toContainText("0.2 (quantization, measured)");
+
+  // The residual caveat is stated even where the number is refused: a reader must not
+  // have to earn the caveat by being shown a value.
+  await expect(page.getByTestId("arch-vac-honesty")).toContainText("UPPER BOUND");
+  await expect(page.getByTestId("arch-vac-honesty")).toContainText("higher entropy");
+
+  await panel.screenshot({
+    path: "tests/e2e/__screenshots__/static-arch-vacancy.png",
+  });
+});

@@ -59,6 +59,20 @@ export interface StaticRuntimeInfo {
   generation: RuntimeGenerationInfo;
 }
 
+/** One text scored by ONE real teacher-forced forward pass (contract §8.1). */
+export interface RuntimeScoredText {
+  /** Byte-level pieces, in order — the input to the UTF-8 span algorithm (§8.2). */
+  pieces: string[];
+  /**
+   * Per-token negative log-likelihood in nats: `nll[i]` is the cost of predicting token
+   * `i` given tokens `< i`. Position 0 has no prediction and is `NaN`, never 0 — a zero
+   * there would read as a perfectly predicted first token.
+   */
+  nll: number[];
+  /** Characters of the scored text, for `bitsPerChar`. */
+  nChars: number;
+}
+
 /** The surface the lazily-imported transformersRuntime module implements. */
 export interface ArchRuntime {
   info(): RuntimeGenerationInfo;
@@ -67,6 +81,13 @@ export interface ArchRuntime {
   /** Live generation (webgpu q8 → wasm q8 fallback) with real per-token probs. */
   /** The ONNX mirror is resolved at `main` — see transformersRuntime's header. */
   generate(body: ArchGenerateBody, onnxRepo: string): Promise<ArchGenerateResult>;
+  /**
+   * Per-token NLL for each text, one real forward pass each, plus the byte-level pieces
+   * the caller needs to attribute those tokens to words. No special tokens and no chat
+   * template: the passage is scored exactly as written, so variants of it differ by the
+   * transform and by nothing else.
+   */
+  scoreTexts(onnxRepo: string, texts: readonly string[]): Promise<RuntimeScoredText[]>;
 }
 
 export type RuntimeLoader = () => Promise<ArchRuntime>;

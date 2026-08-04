@@ -21,6 +21,7 @@
   import { view } from "../../lib/stores";
   import ArchInspector from "./ArchInspector.svelte";
   import ArchTracePanel from "./ArchTracePanel.svelte";
+  import VacancyScorePanel from "./VacancyScorePanel.svelte";
   import { evictArchGraph, fetchArchGraph, formatCount, plainError } from "./archShared";
   import { STATIC_MODE, isStaticMiss, staticExtras } from "../../lib/staticUx";
   import type { TraceIndexEntry } from "../../lib/staticClient/arch";
@@ -487,6 +488,11 @@
     onHighlight={(id) => (highlightId = id)}
     onRetry={() => traceArgs && runTrace(traceArgs.m, traceArgs.p, traceArgs.sp)}
   />
+
+  <!-- Feature 007: the pretrained arm of the vacancy instrument. It owns its own
+       controls and runs only on demand (real forward passes), so it sits below the
+       trace breakdown rather than in the prompt rail. -->
+  <VacancyScorePanel />
 </section>
 
 <style>
