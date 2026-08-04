@@ -320,6 +320,10 @@ code/frontend  $ npx vitest run     Test Files 29 passed (29) · Tests 596 passe
 code/frontend  $ npm run build      ✓ built in 3.19s
 ```
 
+Re-run in full after the commits landed (the tree also picked up two other agents'
+commits in the meantime): `532 passed, 1 warning in 154.45s`, ruff and black clean,
+`0 ERRORS 0 WARNINGS`, `596 passed | 1 skipped`, build ✓.
+
 **SC-703 and the TS↔Python differential suite are undisturbed.** `tests/unit/vacancy.test.ts`
 (76 cases) and `tests/unit/vacancyGolden.test.ts` are green, and the §10 numbers they print
 are unchanged: `stemsTotal=1676`, `tokensVacated(p=1)=8125`, `domainTypes 2233/1940`,
