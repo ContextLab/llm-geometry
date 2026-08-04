@@ -1,4 +1,10 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { expect, test, type Page } from "@playwright/test";
+
+const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "src");
 
 // The Info tab and the in-tab explainers, against the REAL backend.
 //
@@ -23,6 +29,7 @@ test.describe("Info tab", () => {
       "The Architecture Explorer",
       "The Geometry Lab",
       "The Lexicon Lab",
+      "The vacancy transform",
       "What's real, and where it runs",
       "Known limits",
       "Source & references",
@@ -280,5 +287,143 @@ test.describe("Lexicon Lab documentation", () => {
     await expect(info).toContainText("The Real Mother Goose");
     await expect(info).toContainText("1916");
     await expect(info).toContainText("10607");
+  });
+});
+
+test.describe("vacancy transform documentation", () => {
+  // Feature 007's numbers, pinned by feature 005's rule: read the fact from the running
+  // system — the real transform, the real panel, the real constant in the source — and then
+  // assert the sentence still agrees with it. Nothing in the Info tab's vacancy section is a
+  // number someone typed and nobody checks again.
+  //
+  // The source document's own prosody figures are ITS numbers on a corpus we do not have,
+  // and are transcribed nowhere; every figure asserted here is measured on Mother Goose.
+
+  const en = (x: number): string => x.toLocaleString("en-US");
+
+  test("the documented counts are what the transform really produces", async ({
+    page,
+    request,
+  }) => {
+    // p = 1, seed 0 on the shipped corpus — the configuration the prose quotes.
+    const res = await request.post("/api/lex/vacancy", { data: { p: 1, seed: 0 } });
+    expect(res.ok(), await res.text()).toBe(true);
+    const body = await res.json();
+    const s = body.vacancy_stats;
+
+    // Full vacancy means these identities hold; the sentence about 8,202 tokens is only
+    // true while they do, so they are asserted rather than assumed.
+    expect(s.stemsVacated).toBe(s.stemsTotal);
+    expect(s.corpusTypesVacated).toBe(s.corpusTypesEligible);
+    expect(body.bijective).toBe(true);
+
+    await openInfo(page);
+    const info = page.getByTestId("info-view");
+    // Domain scope governs the map; corpus scope is what a reader can see in the text. The
+    // prose states both, labelled — an unprefixed "types" is forbidden (contract §10).
+    for (const value of [
+      s.domainTypesTotal, // 2,233 = corpus types ∪ the FULL Dolch list
+      s.corpusTypesTotal, // 2,211 of them are the corpus's own
+      s.domainTypesEligible, // 1,944 eligible — also the size of the swap pool
+      s.stemsTotal, // 1,680 distinct stems, i.e. the size of the map
+      s.tokensVacated, // 8,202 rewritten word occurrences at p = 1
+      s.tokensTotal, // out of 16,000
+    ]) {
+      await expect(info, `the prose no longer states ${en(value)}`).toContainText(en(value));
+    }
+
+    // The honesty number beside every prosody statistic: what fraction of this corpus's
+    // tokens the unverified hand table actually covers.
+    await expect(info).toContainText(`${(s.stressFromTableBefore * 100).toFixed(1)}%`);
+  });
+
+  test("the documented swap collisions are the ones the engine measures", async ({ page }) => {
+    // Contract §5.2a as a number rather than as an adjective. `swap` draws its replacements
+    // FROM the domain, so at an intermediate p a vacated type lands on one that has not
+    // moved. The prose states the measured triple; this reads it off the running panel, so a
+    // change to the map, the pool or the tie rule fails here instead of quietly making the
+    // documentation wrong.
+    await page.goto("/#lexicon");
+    await expect(page.getByTestId("lex-vacancy")).toBeVisible({ timeout: 30_000 });
+    await page
+      .getByTestId("lex-vacancy-mint")
+      .getByRole("radio", { name: "swap", exact: true })
+      .click();
+
+    const slider = page.getByTestId("lex-vacancy-p");
+    const lost = page.getByTestId("lex-vacancy-lost-slots");
+    const measured: string[] = [];
+    for (const p of ["0.25", "0.5", "0.75"]) {
+      await slider.fill(p);
+      await slider.dispatchEvent("input");
+      await expect(page.getByTestId("lex-vacancy")).toContainText(`p = ${Number(p).toFixed(2)}`);
+      // The refusal is SHOWN, not worked around: no clamped p, no silent fall back to nonce.
+      await expect(page.getByTestId("lex-vacancy-refusal")).toBeVisible();
+      await expect(page.getByTestId("lex-vacancy-refusal-message")).toContainText("§5.2a");
+      measured.push((await lost.innerText()).trim());
+    }
+
+    // …and 0 at full vacancy, where swap IS a bijection of the domain and the invariance
+    // theorem holds for it exactly as it does for nonce.
+    await slider.fill("1");
+    await slider.dispatchEvent("input");
+    await expect(lost).toHaveText("0");
+    await expect(page.getByTestId("lex-vacancy-refusal")).toHaveCount(0);
+    await expect(page.getByTestId("lex-vacancy-invariance-verdict")).toHaveText(/identical/i);
+
+    await openInfo(page);
+    await expect(page.getByTestId("info-view")).toContainText(measured.join(" / "));
+  });
+
+  test("the documented stress-table size is the table the engine actually has", async ({
+    page,
+  }) => {
+    await page.goto("/#lexicon");
+    await expect(page.getByTestId("lex-vacancy")).toBeVisible({ timeout: 30_000 });
+    const honesty = await page.getByTestId("lex-vacancy-prosody-honesty").innerText();
+    const entries = honesty.match(/(\d+) hand-set entries/)?.[1];
+    expect(entries, `no entry count in: ${honesty}`).toBeDefined();
+
+    await openInfo(page);
+    await expect(page.getByTestId("info-view")).toContainText(`hand table of ${entries} entries`);
+  });
+
+  test("the documented static-mode limits are the constants the static client enforces", async ({
+    page,
+  }) => {
+    // These two live in the static client rather than behind an endpoint, so the fact is
+    // read from the source that enforces it. A stated ± that was never measured is a
+    // fabricated error bar — which is exactly why the number must not be retyped.
+    const src = readFileSync(path.join(SRC, "lib", "staticClient", "arch.ts"), "utf8");
+    const uncertainty = src.match(/VACANCY_Q8_UNCERTAINTY_NATS = ([\d.]+)/)?.[1];
+    const floor = src.match(/VACANCY_MIN_POOLED_PRESERVED = (\d+)/)?.[1];
+    expect(uncertainty, "VACANCY_Q8_UNCERTAINTY_NATS is gone or renamed").toBeDefined();
+    expect(floor, "VACANCY_MIN_POOLED_PRESERVED is gone or renamed").toBeDefined();
+
+    await openInfo(page);
+    const info = page.getByTestId("info-view");
+    await expect(info).toContainText(`±${uncertainty} nats`);
+    await expect(info).toContainText(`${floor} preserved tokens`);
+  });
+
+  test("the caveats that make the numbers readable are all present", async ({ page }) => {
+    // Each of these is a claim the instrument would be dishonest without, so each is
+    // asserted rather than left to survive an edit by luck.
+    await openInfo(page);
+    const info = page.getByTestId("info-view");
+    // The decomposition, and that its second term is a BOUND rather than a measurement.
+    await expect(info).toContainText("the cost of wrong content");
+    await expect(info).toContainText("the cost of unknown form");
+    await expect(info).toContainText(/upper bound/i);
+    // What the static build refuses, by name.
+    await expect(info).toContainText("nonce − swap");
+    await expect(info).toContainText(/Per-passage rows: refused/i);
+    await expect(info).toContainText(/dtype without a measured bound: refused/i);
+    // The coverage gap that belongs in the documentation rather than in a commit message.
+    // `\s+` rather than a space: a regex matcher sees the raw textContent, newlines and
+    // source indentation included, so a rewrapped paragraph must not fail this.
+    await expect(info).toContainText(/CI only ever\s+exercises the WASM rung/i);
+    // The exact zero, framed as the finding rather than as a missing curve.
+    await expect(info).toContainText(/exact zero is the result/i);
   });
 });

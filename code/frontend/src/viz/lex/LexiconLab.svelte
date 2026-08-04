@@ -64,9 +64,11 @@
   import {
     buildVacancyMap,
     mapVocabWords,
+    typeCounts,
     vacancyDomain,
     vacancyParams,
     vacateText,
+    type MintStrategy,
     type VacancyMap,
     type VacancyParams,
   } from "../../lib/lexEngine/vacancy";
@@ -134,7 +136,7 @@
   let vacCondition = $state<VacancyCondition>("consistent");
   let vacRevealAfter = $state(1);
   let vacProsody = $state(true);
-  let vacMint = $state("nonce");
+  let vacMint = $state<MintStrategy>("nonce");
 
   /**
    * What a training run produced, or null while nothing has been trained at the CURRENT
@@ -205,25 +207,50 @@
       consistent: vacCondition !== "inconsistent",
       matchProsody: vacProsody,
       revealAfter: vacCondition === "reveal" ? vacRevealAfter : 0,
+      mint: vacMint,
     }),
   );
 
   /**
-   * The nonce assignment, built ONCE over the domain (corpus types ∪ the full Dolch list)
-   * in canonical order — contract §5.2. It reads `vacSeed` and `vacProsody` and
-   * deliberately NOT `vacP`: the map is `p`-independent, which is what makes a stem's
-   * nonce the same string at every `p` where it is vacated, and building it inside a
-   * derived that also read `p` would silently re-mint the whole corpus on every tick of
-   * the slider — visibly breaking the stability the panel exists to demonstrate.
+   * The replacement assignment, built ONCE over the domain (corpus types ∪ the full Dolch
+   * list) in canonical order — contract §5.2. It reads `vacSeed`, `vacProsody` and the
+   * minting strategy, and deliberately NOT `vacP`: the map is `p`-independent, which is what
+   * makes a stem's replacement the same string at every `p` where it is vacated, and building
+   * it inside a derived that also read `p` would silently re-mint the whole corpus on every
+   * tick of the slider — visibly breaking the stability the panel exists to demonstrate.
+   *
+   * `consistent` IS passed, even though the map itself does not depend on it, because the
+   * engine refuses `mint = "swap"` under the inconsistent control (contract §8.3: 1 680
+   * open-class stems against 8 202 vacated tokens, so there is no supply of real words to
+   * mint a fresh one per occurrence). Deciding that here would be re-deriving a rule the
+   * engine owns; asking the engine and CARRYING its refusal is the honest form. Nothing is
+   * substituted for a refused map — `vacRefusal` renders the engine's own sentence and the
+   * panels below have no vocabulary, which is exactly the state the reader is in.
    */
-  const vacMap = $derived.by<VacancyMap | null>(() =>
-    corpus
-      ? buildVacancyMap(
-          vacancyDomain(tokenize(corpus.text)),
-          vacancyParams({ seed: vacSeed, matchProsody: vacProsody }),
-        )
-      : null,
-  );
+  const vacBuild = $derived.by<{ map: VacancyMap | null; refusal: string }>(() => {
+    if (!corpus) return { map: null, refusal: "" };
+    const tokens = tokenize(corpus.text);
+    try {
+      return {
+        map: buildVacancyMap(
+          vacancyDomain(tokens),
+          vacancyParams({
+            seed: vacSeed,
+            matchProsody: vacProsody,
+            mint: vacMint,
+            consistent: vacParams.consistent,
+          }),
+          // The swap control ranks its replacement pool by corpus frequency, so it needs the
+          // TOKEN STREAM's counts; `nonce` never looks at them.
+          vacMint === "swap" ? typeCounts(tokens) : undefined,
+        ),
+        refusal: "",
+      };
+    } catch (e) {
+      return { map: null, refusal: e instanceof Error ? e.message : String(e) };
+    }
+  });
+  const vacMap = $derived(vacBuild.map);
 
   /** The corpus every panel below measures, trains on and generates from. */
   const vacatedText = $derived.by(() =>
@@ -251,18 +278,37 @@
    * tab's normal rule. Coverage then collapses — and the collapse is the measurement, not
    * a failure to be papered over.
    */
-  const vocab = $derived.by<LexVocab | null>(() => {
-    if (!corpus || !baseVocab) return null;
-    if (!vacated) return baseVocab;
+  const vocabResult = $derived.by<{ vocab: LexVocab | null; refusal: string }>(() => {
+    if (vacBuild.refusal) return { vocab: null, refusal: vacBuild.refusal };
+    if (!corpus || !baseVocab) return { vocab: null, refusal: "" };
+    if (!vacated) return { vocab: baseVocab, refusal: "" };
     if (vacMapped && vacMap) {
-      return new LexVocab(
-        mapVocabWords(baseVocab.words, vacMap, vacParams),
-        baseVocab.source,
-        baseVocab.budgetName,
-      );
+      try {
+        return {
+          vocab: new LexVocab(
+            mapVocabWords(baseVocab.words, vacMap, vacParams),
+            baseVocab.source,
+            baseVocab.budgetName,
+          ),
+          refusal: "",
+        };
+      } catch (e) {
+        // Contract §5.2a, and the one refusal a reader will actually meet: `mint = "swap"`
+        // draws its replacements FROM the domain, so at an intermediate `p` a vacated type
+        // can land on one that has not moved and two budget words would share an embedding
+        // row. The theorem there proves no `p`-stable swap avoids it, so this is not a defect
+        // to re-draw away. The engine's sentence is carried up verbatim and NOTHING is put in
+        // its place: rebuilding the budget from the vacated corpus here would be a different
+        // measurement (§7.2's rebuilt rule belongs to the control conditions) wearing the
+        // mapped condition's label.
+        return { vocab: null, refusal: e instanceof Error ? e.message : String(e) };
+      }
     }
-    return buildVocab(budgetSource, budgetName, vacatedText);
+    return { vocab: buildVocab(budgetSource, budgetName, vacatedText), refusal: "" };
   });
+  const vocab = $derived(vocabResult.vocab);
+  /** The engine's own words for a configuration it declines, or `""`. Never paraphrased. */
+  const vacRefusal = $derived(vocabResult.refusal);
   const coverage = $derived.by<Coverage | null>(() =>
     vocab && corpus ? vocab.coverage(vacatedText) : null,
   );
@@ -270,7 +316,7 @@
   const activeCorpusLabel = $derived(
     corpus
       ? vacated
-        ? `${corpus.label} · vacated p=${vacP.toFixed(2)}, seed ${vacSeed}, ${vacCondition}`
+        ? `${corpus.label} · vacated p=${vacP.toFixed(2)}, seed ${vacSeed}, ${vacCondition}, ${vacMint}`
         : corpus.label
       : "",
   );
@@ -545,10 +591,16 @@
           one matrix counted twice.
         </li>
         <li>
-          <b>Not shipped:</b> nonce-word minting (it needs a parameter-matched control that
-          does not exist), and the meter/rhyme "fingerprint" (the source's meter score does
-          not measure meter — under its scheme every word's stress pattern begins the same
-          way, so the score converges to the template's own density whatever you feed it).
+          <b>Shipped, corrected:</b> nonce-word minting — the vacancy panel above. Feature 006
+          deferred it for want of a parameter-matched control; the control turned out to be the
+          design, since under the mapped condition the transform preserves the vocabulary
+          exactly. Four properties the source claims for itself are broken by its own
+          implementation and fixed here (its map is built lazily while rewriting, so a nonce
+          depends on <code>p</code>; its give-up path and its seam fix are order-dependent; and
+          injectivity is assumed rather than verified).
+          <b>Not shipped:</b> the meter/rhyme "fingerprint" (the source's meter score does not
+          measure meter — under its scheme every word's stress pattern begins the same way, so
+          the score converges to the template's own density whatever you feed it).
         </li>
         <li>
           Browser and Python run the <b>same recipe</b>, held to ≤1e-5 on the forward pass,
@@ -623,12 +675,13 @@
       condition={vacCondition}
       revealAfter={vacRevealAfter}
       mint={vacMint}
+      refusal={vacRefusal}
       onP={(v) => (vacP = v)}
       onSeed={(v) => (vacSeed = v)}
       onCondition={(c) => (vacCondition = c as VacancyCondition)}
       onRevealAfter={(v) => (vacRevealAfter = v)}
       onProsody={(v) => (vacProsody = v)}
-      onMint={(m) => (vacMint = m)}
+      onMint={(m) => (vacMint = m as MintStrategy)}
     />
   </div>
 

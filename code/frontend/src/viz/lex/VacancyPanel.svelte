@@ -31,6 +31,13 @@
    *   * THAT THE NULL IS THE FINDING (§1.6) — an exact zero drawn as a flat line looks
    *     like a broken chart. It is stated as the result it is, in words, next to the
    *     measurement.
+   *   * WHAT THE ENGINE REFUSES, AND WHY (§5.2a) — `mint = "swap"` draws its replacements
+   *     from the domain, so it is injective only at `p ∈ {0, 1}`; at an intermediate `p`
+   *     the mapped vocabulary is refused with a typed error. That error is rendered here
+   *     VERBATIM and nothing is computed in its place: the `p` slider is never clamped,
+   *     no fallback to `nonce` is performed, and the injectivity counter beside the mint
+   *     control reports the collisions as a measured number at the current `p` — so the
+   *     reader sees the theorem rather than a control that quietly disagrees with them.
    *
    * PROSODY HONESTY (FR-712 / SC-708): the stress table is rule-seeded and unverified, so
    * no prosody statistic is ever rendered without the three-way stress split beside it and
@@ -60,6 +67,7 @@
     effectiveKeepSet,
     isEligible,
     stemAndSuffix,
+    transformWord,
     vacancyStats,
     vacancyU,
     type VacancyMap,
@@ -87,6 +95,13 @@
     revealAfter: number;
     /** "nonce" | "swap" (contract §8.3). */
     mint: string;
+    /**
+     * The engine's own sentence for a configuration it declines, or `""`. The tab does not
+     * paraphrase it and does not compute anything in its place — see the refusal card below,
+     * and `LexiconLab`'s `vocabResult` for why substituting a rebuilt budget would be worse
+     * than showing nothing.
+     */
+    refusal: string;
     onP: (v: number) => void;
     onSeed: (v: number) => void;
     onCondition: (v: string) => void;
@@ -104,6 +119,7 @@
     condition,
     revealAfter,
     mint,
+    refusal,
     onP,
     onSeed,
     onCondition,
@@ -136,15 +152,14 @@
     {
       id: "nonce",
       label: "nonce",
-      title: "Replace the stem with a phonotactically legal invented form.",
-      enabled: true,
+      title:
+        "Replace the stem with a phonotactically legal invented form. Its images are outside the domain, so the map is injective at every p.",
     },
     {
       id: "swap",
       label: "swap",
       title:
-        "Contract §8.3: draw a real, frequency-rank-matched English word instead. Both engines implement it; this control is not wired to them yet.",
-      enabled: false,
+        "Draw a real, frequency-rank-matched English word instead (contract §8.3) — the control that separates wrong content from unknown form. Its images ARE domain words, so it is injective only at p = 0 or p = 1 (§5.2a).",
     },
   ];
 
@@ -180,6 +195,31 @@
 
   const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
   const n = (x: number) => x.toLocaleString();
+
+  // ---- injectivity at the CURRENT p, measured rather than claimed (contract §5.2a) ------
+
+  /**
+   * Push every type of the map's domain through the transform at the current `p` and count
+   * how many distinct surface forms come back. `|domain| − |images|` is the number of rows
+   * two source types would have to share, so it is 0 exactly when the relabelling is a
+   * relabelling.
+   *
+   * This is the measurement, not a restatement of the flag: `map.injectiveAtEveryP` says
+   * which regime a map is in, and this says what the regime costs HERE, at the `p` on the
+   * slider. Under `nonce` it is 0 at every `p` — condition B keeps every image out of the
+   * domain — and under `swap` it is 0 at the two endpoints and positive in between, which is
+   * §5.2a's theorem happening in front of the reader rather than being asserted at them.
+   *
+   * Only defined in the mapped condition, because `transformWord` is the order-free path: the
+   * inconsistent control and partial reveal need an occurrence index and rebuild the budget
+   * from the vacated corpus anyway, so injectivity of a type map is not what they claim.
+   */
+  const images = $derived.by(() => {
+    if (!map || !mapped) return null;
+    const seen = new Set<string>();
+    for (const t of map.domain) seen.add(transformWord(t, map, params).toLowerCase());
+    return { types: map.domain.size, distinct: seen.size, lost: map.domain.size - seen.size };
+  });
 
   // ---- the corpus view (ui.md §1.2 — the doc's Figure 5, live) -------------------------
 
@@ -615,26 +655,85 @@
             tabindex={mint === m.id ? 0 : -1}
             data-value={m.id}
             class:active={mint === m.id}
-            disabled={!m.enabled}
             title={m.title}
-            onclick={() => m.enabled && onMint(m.id)}>{m.label}</button
+            onclick={() => onMint(m.id)}>{m.label}</button
           >
         {/each}
       </div>
     </div>
   </div>
 
-  <p class="note" data-testid="lex-vacancy-mint-note">
-    <b>swap</b> — draw a real, frequency-rank-matched English word instead of an invented one
-    (contract §8.3) — is the control that separates <i>wrong content</i> from
-    <i>unknown form</i> for the pretrained arm. <b>Both engines now implement it</b>, and they
-    agree word for word; this panel is not wired to them yet, so it is offered
-    <b>disabled</b> rather than silently falling back to <code>nonce</code>. One thing it will
-    have to say when it is: a swap map is injective only at <b>p = 0 or p = 1</b>. Its
-    replacements are real corpus words, so at an intermediate <i>p</i> a vacated word can land
-    on one that has <i>not</i> moved — and contract §5.2a proves no stable swap avoids that.
-    The engines refuse the mapped vocabulary there rather than duplicate a row.
-  </p>
+  <div class="mintbox" data-testid="lex-vacancy-mint-note">
+    <p class="note">
+      <b>nonce</b> invents the replacement. <b>swap</b> draws a real English word instead —
+      from this corpus's own open-class types, matched on frequency rank (contract §8.3). The
+      passage is left exactly as nonsensical either way, but under <b>swap</b> every form is a
+      word the reader, and a pretrained tokenizer, already knows. That difference is the whole
+      control: it separates the cost of <i>wrong content</i> from the cost of an
+      <i>unknown form</i>, which is the measurement the
+      <button class="linklike" onclick={() => view.set("architecture")}>
+        Architecture Explorer</button
+      > makes on a model that has forms it knows.
+    </p>
+    <p class="note">
+      <b>A swap map is injective only at <code>p = 0</code> and <code>p = 1</code>. That is a
+      theorem, not a rough edge.</b>
+      Swap's replacements are drawn <i>from</i> the domain, so at an intermediate
+      <code>p</code> a vacated word can land on a word that has not been vacated yet, and two
+      source types share one row. Contract §5.2a proves that no non-trivial map can avoid this:
+      one that is stable in <code>p</code> and whose images are domain words is injective at
+      every <code>p</code> only if it is the identity. So the engine <b>refuses</b> the mapped
+      vocabulary in between rather than handing the trainer a vocabulary with a duplicated row,
+      and this panel shows you the refusal instead of quietly moving the slider for you. Full
+      vacancy — <code>p = 1</code>, where swap <i>is</i> a bijection of the domain — is the
+      configuration the pretrained arm actually measures at, so nothing the control exists for
+      is lost.
+    </p>
+    {#if images}
+      <p
+        class="regime"
+        class:broken={images.lost > 0}
+        data-testid="lex-vacancy-injectivity"
+      >
+        Measured just now at <code>p = {params.p.toFixed(2)}</code>, <code>{mint}</code>:
+        {n(images.distinct)} distinct images from {n(images.types)} domain types —
+        <b data-testid="lex-vacancy-lost-slots">{n(images.lost)}</b>
+        lost image {images.lost === 1 ? "slot" : "slots"}.
+        {#if images.lost === 0}
+          Every type still has a row of its own, so the relabelling is a relabelling.
+        {:else}
+          Each lost slot is two source types on one row — exactly what §5.2a says must happen
+          here, counted rather than described.
+        {/if}
+      </p>
+    {/if}
+  </div>
+
+  {#if refusal}
+    <div class="refusal" data-testid="lex-vacancy-refusal">
+      <p class="msg">
+        <b>Refused, in the engine's own words:</b>
+        <span data-testid="lex-vacancy-refusal-message">{refusal}</span>
+      </p>
+      <p>
+        Nothing has been substituted for it: there is no vocabulary, so the budget counters, the
+        trainer and the invariance check below have nothing to report — which is the honest state
+        of this configuration, not a rendering failure. Rebuilding the budget from the vacated
+        corpus would produce numbers, but they would be a different measurement (contract §7.2
+        gives that rule to the control conditions) wearing the mapped condition's label.
+      </p>
+      <div class="actions">
+        <button class="secondary" data-testid="lex-vacancy-refusal-p1" onclick={() => onP(1)}>
+          Set p = 1 — full vacancy
+        </button>
+        <button class="secondary" onclick={() => onP(0)}>Set p = 0</button>
+        <button class="secondary" onclick={() => onMint("nonce")}>Switch to nonce</button>
+        <button class="secondary" onclick={() => onCondition("consistent")}>
+          Use the consistent condition
+        </button>
+      </div>
+    </div>
+  {/if}
 
   <!-- ---- the corpus, live (ui.md §1.2) -------------------------------------------- -->
   <div class="ctl">
@@ -764,12 +863,28 @@
       </div>
       <div class="counter">
         <span class="k">map</span>
-        <span class="v" class:good={stats.bijective} data-testid="lex-vacancy-bijective">
-          {stats.bijective ? "injective ✓" : "NOT injective"}
+        <span
+          class="v"
+          class:good={stats.bijective && (map?.injectiveAtEveryP || images?.lost === 0)}
+          data-testid="lex-vacancy-bijective"
+        >
+          {#if !stats.bijective}
+            NOT injective
+          {:else if map?.injectiveAtEveryP}
+            injective ✓
+          {:else}
+            injective at p = 0, 1
+          {/if}
         </span>
         <span class="d">
-          verified over assembled surface forms at every <code>p</code>, not assumed ·
-          <b>{n(stats.remintRounds)}</b> re-mint {stats.remintRounds === 1 ? "round" : "rounds"} ·
+          {#if map?.injectiveAtEveryP}
+            verified over assembled surface forms at every <code>p</code>, not assumed
+          {:else}
+            verified at <b>full vacancy</b> — swap's replacements are domain words, so contract
+            §5.2a bounds injectivity to <code>p = 0</code> and <code>p = 1</code>, and the count
+            beside the mint control says what it costs in between
+          {/if}
+          · <b>{n(stats.remintRounds)}</b> re-mint {stats.remintRounds === 1 ? "round" : "rounds"} ·
           image {n(stats.imageSize)}
         </span>
       </div>
@@ -1033,6 +1148,19 @@
       sweeping this slider spends their time.
     </p>
     <p>
+      The <b>swap</b> control cannot have that property, and the argument is three lines. Suppose
+      a map is stable in <code>p</code> and every image is a domain word — both true of swap by
+      construction. If it were injective at every <code>p</code> it would be a bijection of the
+      domain onto itself, and would therefore carry each vacated set
+      <code>V_p</code> onto itself; but the <code>V_p</code> grow one stem family at a time as
+      <code>p</code> rises, so such a bijection fixes every family, i.e. it is the identity.
+      Hence no non-trivial swap is injective in between, and the counter above reports how many
+      rows collide at the <code>p</code> you are on. At <code>p = 1</code> the un-vacated set is
+      exactly the ineligible types, swap is a bijection of the domain, and the theorem holds for
+      it exactly as it does for <code>nonce</code> — which is the check that the control is
+      implemented correctly, and the configuration the pretrained arm scores at.
+    </p>
+    <p>
       What it does <b>not</b> prove: that form is worthless in general. It proves that a
       word-level model whose entire lexicon is a table of embedding rows has no channel through
       which a form could matter — it never sees the characters. A model with subword tokens has
@@ -1206,6 +1334,61 @@
     max-width: 62rem;
   }
   .note b {
+    color: var(--text);
+  }
+  .mintbox {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+  /* The measured injectivity line: green while every type keeps its own row, amber the
+     moment two share one. It is a measurement, so it is styled as a verdict rather than as
+     a warning — under `swap` at an intermediate `p` the non-zero IS the expected result. */
+  .regime {
+    margin: 0;
+    align-self: flex-start;
+    font-size: 0.72rem;
+    line-height: 1.55;
+    font-family: var(--mono);
+    color: var(--good);
+    background: rgba(91, 224, 176, 0.08);
+    border: 1px solid rgba(91, 224, 176, 0.28);
+    border-radius: 9px;
+    padding: 0.35rem 0.6rem;
+    max-width: 62rem;
+  }
+  .regime.broken {
+    color: #ffb454;
+    background: rgba(255, 180, 84, 0.09);
+    border-color: rgba(255, 180, 84, 0.3);
+  }
+  .regime code,
+  .mintbox code {
+    color: inherit;
+    font-family: var(--mono);
+  }
+  .refusal {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    background: rgba(255, 180, 84, 0.09);
+    border: 1px solid rgba(255, 180, 84, 0.3);
+    border-radius: 10px;
+    padding: 0.6rem 0.75rem;
+    font-size: 0.74rem;
+    line-height: 1.6;
+    color: var(--text-dim);
+    max-width: 62rem;
+  }
+  .refusal p {
+    margin: 0;
+  }
+  .refusal b {
+    color: #ffb454;
+  }
+  .refusal .msg span {
+    font-family: var(--mono);
+    font-size: 0.94em;
     color: var(--text);
   }
 

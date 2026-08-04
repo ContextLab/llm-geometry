@@ -152,6 +152,52 @@ Lesson worth keeping: both defects are invisible to unit tests and to any test t
 thrown errors. They produce *plausible* wrong answers. The only thing that caught them was
 running the real thing and comparing against a known-good reference.
 
+## The swap control in the Lexicon Lab, and how its constraint is surfaced
+
+`mint = "swap"` is now live in `VacancyPanel` (it had been rendered disabled). Three decisions
+worth keeping, because each replaces a tempting shortcut:
+
+1. **The constraint is shown, never enforced by the UI.** `p` is not clamped, `swap` is not
+   silently downgraded to `nonce`, and the typed error is not caught-and-replaced with a
+   fallback. `LexiconLab` asks the engine (`buildVacancyMap` with the real `consistent`,
+   `mapVocabWords` at the real `p`) and CARRIES the refusal up as a string; the panel prints it
+   verbatim in a refusal card, with buttons for the two exits (`p = 1`, `p = 0`, switch to
+   nonce, use the consistent condition). With no vocabulary, the budget counters, the trainer
+   and the invariance check simply have nothing to report — which is the honest state.
+2. **The theorem is COUNTED, not asserted.** Beside the mint control, every domain type is
+   pushed through the real transform at the current `p` and the distinct images are counted:
+   `|domain| − |images|` lost image slots. Measured on the shipped corpus, seed 0:
+   **244 / 322 / 233 at p = .25/.5/.75, and 0 at both endpoints** (reproduced independently in
+   Python while writing the docs). Under `nonce` it is 0 everywhere. So §5.2a happens in front
+   of the reader.
+3. **The `bijective` chip branches on `injectiveAtEveryP`.** Under swap it reads "injective at
+   p = 0, 1" rather than a bare tick — the map property is real, but claiming it at every `p`
+   would be false.
+
+Two shipped-code defects fixed in passing: `LexiconLab` never passed `mint` into `vacParams` at
+all (so the control could not have worked), and `staticClient/arch.ts` still documented a
+"±0.1 nats" quantization uncertainty that its own constant had superseded with 0.2.
+
+## Documentation (FR-724/725/726, ui.md §3)
+
+Info tab gains `<h3 id="vacancy">`: the T4 2×2 with the vacancy cell marked, the transform's
+definition (with `u` as an equation), nesting + stability and the four properties the source
+implementation claims and breaks, the invariance theorem with §7.4's framing (the exact zero IS
+the finding), the swap decomposition with "cost of unknown form" stated as an UPPER BOUND, the
+stress table's real status, and a by-name list of what the static build refuses plus the WebGPU
+/ CI coverage gap. `#real`, `#limits` and `#refs` updated (Gutenberg #12 — *Through the
+Looking-Glass* — added; link checked).
+
+**Every number is pinned** in `tests/e2e/docs.spec.ts` (5 new tests): the counts come from a live
+`POST /api/lex/vacancy` at p = 1 (2,233 / 2,211 / 1,944 / 1,680 / 8,202 / 16,000 and the 5.1%
+stress-table coverage), the swap collisions are read off the running panel, the stress-table size
+is read off the panel's own honesty line, and the static-mode ±0.2 nats / 700-token floor are
+regex'd out of `staticClient/arch.ts`. Nothing in the section is a number a human retyped.
+
+Note for anyone extending this: the pretrained arm's measured deltas are deliberately NOT quoted
+in the Info tab. They depend on model, passage set and dtype, and the only honest pin would be a
+real Qwen run per CI job. The panel reports them from the run the reader triggers.
+
 ## Status
 
 ### Contract defects found by BUILDING it (13, not one of which I caught by re-reading)
@@ -186,7 +232,8 @@ consistently wrong.
 - [ ] Lexicon Lab vacancy panel
 - [ ] API routes + static client
 - [ ] Pretrained arm
-- [ ] Docs (Info tab + in-tab prose)
+- [x] Docs (Info tab + in-tab prose) — `#vacancy` section, `#real`/`#limits`/`#refs` updated,
+      the swap control enabled in the Lexicon Lab
 - [ ] Full suite, deploy, live verification
 
 ## Standing constraints (from CLAUDE.md)

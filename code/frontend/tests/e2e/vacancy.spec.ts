@@ -295,6 +295,69 @@ test("the tab trains on the VACATED corpus, at a non-default budget (FR-713/FR-7
   expect(errors, `client-side errors: ${errors.join(" | ")}`).toEqual([]);
 });
 
+test("the swap control runs, and refuses the p it cannot support (FR-719a, §5.2a)", async ({
+  page,
+}) => {
+  const errors = watchErrors(page);
+  const corpus = page.getByTestId("lex-vacancy-corpus");
+  const lost = page.getByTestId("lex-vacancy-lost-slots");
+  const mint = page.getByTestId("lex-vacancy-mint");
+
+  // The control is live, not decoration: switching it rewrites the corpus with real English
+  // words drawn by frequency rank instead of invented ones.
+  await setP(page, "1");
+  const withNonce = await corpus.innerText();
+  await expect(lost).toHaveText("0");
+  await mint.getByRole("radio", { name: "swap", exact: true }).click();
+  await expect(mint.getByRole("radio", { name: "swap", exact: true })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  const withSwap = await corpus.innerText();
+  expect(withSwap).not.toBe(withNonce);
+
+  // At FULL vacancy swap is a bijection of the domain, so the theorem holds for it exactly
+  // as it does for nonce — that is the check that the control is implemented correctly.
+  await expect(lost).toHaveText("0");
+  await expect(page.getByTestId("lex-vacancy-invariance-verdict")).toHaveText(/identical/i);
+  await expect(page.getByTestId("lex-vacancy-refusal")).toHaveCount(0);
+
+  // In between it CANNOT be injective (contract §5.2a). The panel must show the engine's
+  // refusal and the measured cost — never a clamped p, never a silent nonce map.
+  await setP(page, "0.5");
+  const refusal = page.getByTestId("lex-vacancy-refusal");
+  await expect(refusal).toBeVisible();
+  await expect(page.getByTestId("lex-vacancy-refusal-message")).toContainText("§5.2a");
+  await expect(page.getByTestId("lex-vacancy-refusal-message")).toContainText("swap");
+  expect(Number((await lost.innerText()).replace(/[^\d]/g, ""))).toBeGreaterThan(0);
+  // The slider really is still where the reader put it, and nothing was computed in place
+  // of the refused vocabulary.
+  await expect(page.getByTestId("lex-vacancy")).toContainText("p = 0.50");
+  await expect(mint.getByRole("radio", { name: "swap", exact: true })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await expect(page.getByTestId("lex-vacancy-invariance")).toHaveCount(0);
+  await expect(page.getByTestId("lex-vacancy-demo-run")).toBeDisabled();
+
+  // The way out is offered explicitly and works.
+  await page.getByTestId("lex-vacancy-refusal-p1").click();
+  await expect(refusal).toHaveCount(0);
+  await expect(page.getByTestId("lex-vacancy")).toContainText("p = 1.00");
+  await expect(page.getByTestId("lex-vacancy-invariance-verdict")).toHaveText(/identical/i);
+
+  // The inconsistent control is refused under swap for a countable reason: it needs a fresh
+  // type per occurrence and the corpus has no supply of real words at that rate.
+  await page
+    .getByTestId("lex-vacancy-condition")
+    .getByRole("radio", { name: "inconsistent", exact: true })
+    .click();
+  await expect(refusal).toBeVisible();
+  await expect(page.getByTestId("lex-vacancy-refusal-message")).toContainText(/consistent/);
+
+  expect(errors, `client-side errors: ${errors.join(" | ")}`).toEqual([]);
+});
+
 test("no horizontal page overflow at 390px with the panel present", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/${LEX}`);

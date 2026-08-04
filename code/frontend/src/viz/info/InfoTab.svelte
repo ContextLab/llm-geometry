@@ -6,7 +6,10 @@
   // what you can manipulate, and — as importantly — what is NOT claimed. Every number
   // and equation here is transcribed from the code it describes:
   //   geo/model.py, geo/fields.py, geo/config.py, geo/bundle.py, geo/scratch.py,
-  //   arch/{graph,trace,generate}.py, config.py.
+  //   arch/{graph,trace,generate,vacancy_score}.py, config.py,
+  //   lex/{dolch,vacancy}.py + lib/lexEngine/vacancy.ts (the vacancy section's counts are
+  //   what `POST /api/lex/vacancy` reports on the shipped corpus), and
+  //   lib/staticClient/arch.ts (what the static build may and may not say).
   // If you change one of those, change the matching sentence here; the e2e docs test
   // pins the values that are cheapest to let drift.
 
@@ -16,6 +19,7 @@
     { id: "arch", label: "Architecture Explorer" },
     { id: "geo", label: "Geometry Lab" },
     { id: "lex", label: "Lexicon Lab" },
+    { id: "vacancy", label: "Vacancy transform" },
     { id: "real", label: "What's real" },
     { id: "limits", label: "Known limits" },
     { id: "refs", label: "Source & references" },
@@ -614,16 +618,285 @@
     So <b>nothing here reproduces its curves</b>. Every number in this tab is computed live from a
     model that actually trained in your browser. Three of its instruments were deliberately left out
     rather than shipped broken: its meter score, which does not measure meter (the line
-    <i>“and I do not like green eggs and ham”</i> scores 0.333 against a nonsense corpus's 0.346);
-    its constrained decoder, which can emit fused non-words and is unnecessary here anyway; and its
-    nonce-word “vacancy” experiment, which needs a parameter-matched control that does not yet
-    exist.
+    <i>“and I do not like green eggs and ham”</i> scores 0.333 against a nonsense corpus's 0.346),
+    and its constrained decoder, which can emit fused non-words and is unnecessary here anyway.
+    Its third instrument — the nonce-word <b>vacancy transform</b> — was held back for want of a
+    parameter-matched control, and then shipped once it became clear that the control <i>is</i> the
+    design: under the mapped condition the transform preserves the vocabulary exactly. It has its
+    own section below, including the four properties its original implementation claims and breaks.
   </p>
   <p class="para">
     Finally, on the name: this is <b>not</b> a Dr. Seuss model. His work is under copyright and is
     not used, quoted, or trained on. The corpus is <i>The Real Mother Goose</i> (1916), and the
     budget is Dolch's 1936 word list. The source project's own paper puts it plainly — “the tiny
     model is therefore not a Seuss pastiche.”
+  </p>
+
+  <!-- ---------------------------------------------------------------- vacancy -->
+  <h3 id="vacancy">The vacancy transform</h3>
+
+  <p class="para">
+    The two labs above each hold one thing fixed and move another. This instrument moves a third,
+    and it spans both tabs. It rewrites a corpus so that its syntax, its inflection, its
+    punctuation and its line structure survive <b>byte for byte</b>, while a controlled fraction
+    <code>p</code> of the open-class <b>stems</b> is replaced by invented forms carrying the same
+    syllable count and stress. What is left is the condition <i>Jabberwocky</i> puts a reader in —
+    complete scaffolding, vacant content — manufactured at a rate you choose, on any text.
+  </p>
+
+  <h4 class="sub">The 2×2 it fills in, and what each arm measures</h4>
+  <p class="para">
+    A token can carry two independent things. Its <b>location</b> is whatever the form itself has
+    already earned — you have met the string before, and something about it is yours. Its
+    <b>field</b> is everything the surrounding context fixes about it. Vacancy manufactures the
+    cell where the field is fully supplied and the location is gone:
+  </p>
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <div class="tblwrap" role="group" aria-label="the field/location 2×2" tabindex="0">
+    <table class="tbl">
+    <thead>
+      <tr><th></th><th>no field</th><th>field supplied</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><b>no location</b></td>
+        <td>(i) random init, no data</td>
+        <td class="cell-mark">
+          <b>(iii) vacancy</b> — nonce form, full syntactic support. <i>This instrument.</i>
+        </td>
+      </tr>
+      <tr>
+        <td><b>location</b></td>
+        <td>(ii) minting at a hub centroid</td>
+        <td>(iv) ordinary word learning</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="para">
+    Two arms measure that cell, and they give different answers because their models differ in
+    exactly the way the 2×2 is about. The <b>Lexicon Lab</b>'s word-level model is trained from
+    scratch and has no locations at all — its entire lexicon is a table of embedding rows, and it
+    never sees a letter — so for it the transform is a pure relabelling and the answer is an
+    <b>exact zero</b>. The <b>Architecture Explorer</b>'s pretrained model does have locations, so
+    its answer is not zero. Neither number means anything alone; the pair is the result.
+  </p>
+
+  <h4 class="sub">What is preserved, and what is replaced</h4>
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <div class="eq" role="group" aria-label="equation" tabindex="0">
+    words are found with the tokenizer's OWN regex &nbsp; [A-Za-z]+(?:['-][A-Za-z]+)*<br />
+    u(stem) = (first 8 bytes of sha256(“seed:stem”) as a uint64 ≫ 11) / 2⁵³<br />
+    vacate the stem &nbsp; iff &nbsp; u(stem) &lt; p
+  </div>
+  <p class="para">
+    <b>Preserved, byte for byte:</b> everything that is not a word match — whitespace, punctuation,
+    digits, line breaks; the closed class, which is a curated function-word list and deliberately
+    <i>not</i> a Dolch budget (unioning the two silently protects content verbs like
+    <code>run</code> and <code>eat</code> and understates the vacancy rate); inflectional suffixes,
+    since the stem is vacated and the suffix re-attached, so <code>dog's</code> becomes
+    <code>&lt;nonce&gt;'s</code>; and anything failing the eligibility test — <code>good-bye</code>
+    contains a hyphen, so it never moves. <b>Replaced:</b> eligible stems, and only stems.
+  </p>
+  <p class="para">
+    That the transform finds words with the <i>tokenizer's</i> regular expression rather than one
+    written beside it is load-bearing rather than tidy: the theorem below is false the moment the
+    transform's idea of a word differs from the trainer's. On the shipped corpus the map's domain
+    is <b>2,233</b> types — the corpus's own <b>2,211</b> plus the full Dolch list, so that
+    switching budgets cannot re-mint the text under the reader — of which <b>1,944</b> are
+    eligible, sharing <b>1,680</b> distinct stems. At <code>p = 1</code> that rewrites
+    <b>8,202</b> of the corpus's <b>16,000</b> word tokens; the rest are closed class, too short,
+    or not ASCII letters.
+  </p>
+
+  <h4 class="sub">Nesting and stability — which the original implementation breaks</h4>
+  <p class="para">
+    Two properties make a <code>p</code>-sweep interpretable. <b>Nesting</b>: since
+    <code>u</code> is a function of <code>(seed, stem)</code> alone, the set of stems vacated at
+    <code>p</code> is a subset of the set vacated at any larger <code>p</code>. <b>Stability</b>: a
+    stem's replacement is the same string at every <code>p</code> at which it is vacated, because
+    the map is built <i>once</i> over the whole type set in canonical order, before any
+    <code>p</code> is chosen.
+  </p>
+  <p class="para">
+    The source project claims both and has neither, and the reasons are worth naming because they
+    are the kind of bug a test suite does not see. Its map is built lazily <i>while rewriting</i>
+    and guards uniqueness with a growing <code>used</code> set, so which of two colliding stems has
+    to retry depends on which was reached first — and therefore on <code>p</code>. Its give-up path
+    returns a syllable plus <code>len(used)</code>, a count of how many words happened to be minted
+    earlier. Its seam fix (<code>wee</code> + <code>er</code> → <code>weeer</code>) draws from a
+    shared RNG, so it too depends on order. And its injectivity is assumed: it accepts an
+    <code>avoid</code> parameter and never passes one, so a minted form can silently merge with a
+    real English word. Here the map is a pure function of the domain, the seed and the prosody
+    setting; the seam fix is a hash of <code>(stem, suffix)</code>; and injectivity is
+    <b>verified</b> over assembled surface forms and re-minted on collision. The Lexicon Lab's
+    ribbon shows both properties cell by cell — the classification comes from the real map, so a
+    broken one would show as a reverted cell rather than as a paragraph that stopped being true.
+  </p>
+
+  <h4 class="sub">The invariance theorem, and why the zero is the finding</h4>
+  <p class="para">
+    With one nonce per source type and no partial reveal, and with the budget's word list pushed
+    through the <i>same</i> transform in the same order:
+  </p>
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <div class="eq" role="group" aria-label="equation" tabindex="0">
+    tokenStream(vacate(C, p), V_p) &nbsp;=&nbsp; tokenStream(C, V) &nbsp; element for element<br />
+    <span class="note">for every p, every seed, every budget, and either prosody setting</span>
+  </div>
+  <p class="para">
+    Three facts make it true. The transform is a bijection on word occurrences preserving order
+    and line structure, so the <code>&lt;eos&gt;</code>-per-line rule fires in the same places. The
+    type map is injective on the whole domain — verified at build time over assembled surface
+    forms, and therefore at every <code>p</code> at once, not merely at full vacancy. And because
+    the budget is mapped in order, every word keeps the id its pre-image had and out-of-budget
+    types still land out of budget, so <code>&lt;unk&gt;</code> appears in exactly the same
+    positions. The corollary is that training is <b>bit-identical</b>: the model's configuration
+    depends on the vocabulary only through its row count, which does not move.
+  </p>
+  <p class="para">
+    <b>So the headline of the tiny arm is an exact zero, and the exact zero is the result — not a
+    chart that failed to render.</b> Three of the knobs — <code>p</code>, <code>seed</code>,
+    <code>match prosody</code> — are <i>invisible</i> to a word-level model trained from scratch,
+    and only the controls that break type identity can move a loss. Read plainly: for this model
+    class, all of a word's meaning is field and none of it is form. The Lexicon Lab checks it
+    rather than asserting it, in two tiers — the id streams are compared element for element on
+    every control change, and a button trains twice and reports <code>max |Δloss|</code>, which is
+    <code>0</code> and is printed as <code>0</code>, never as “≈ 0”. A non-zero there would be a
+    defect, and the panel says so instead of rounding it away.
+  </p>
+  <p class="para">
+    What the theorem does <b>not</b> prove is that form is worthless in general. It proves that a
+    model whose lexicon is a table of rows has no channel through which a form <i>could</i> matter.
+    A model with subword tokens has that channel — which is why the second arm exists.
+  </p>
+
+  <h4 class="sub">The swap control, and the decomposition</h4>
+  <p class="para">
+    Vacating the content words of a passage changes three things at once: the forms become unknown,
+    they fragment into many subword tokens, and the passage stops meaning anything. Only the first
+    is “location”, and no caveat can separate them — but a control can. <b>Swap</b> runs the same
+    transform with the replacement drawn as a <i>real English word</i>: from the corpus's own
+    open-class types, matched on frequency rank. The passage is then exactly as nonsensical while
+    every form remains a word the model knows and the tokenizer segments normally. So:
+  </p>
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <div class="eq" role="group" aria-label="equation" tabindex="0">
+    nll(swap) &nbsp;−&nbsp; nll(english) &nbsp;=&nbsp; <b>the cost of wrong content</b><br />
+    nll(nonce) &nbsp;−&nbsp; nll(swap) &nbsp;&nbsp;=&nbsp; <b>the cost of unknown form</b>
+  </div>
+  <p class="para">
+    Both are means over the tokens of <b>preserved</b> words only — the closed-class scaffolding,
+    which is character-identical in all three variants, so the comparison is the same function word
+    against itself. Their sum, <code>nll(nonce) − nll(english)</code>, is never the headline: it
+    credits the cost of nonsense to the cost of an unknown word.
+  </p>
+  <p class="para">
+    <b>“Cost of unknown form” is an upper bound, not a measurement of location.</b> Nonce forms
+    fragment into more subword tokens than real words do, so that difference carries the cost of an
+    unknown form <i>together with</i> the cost of a longer, stranger context. The two are not
+    separable without a tokenizer-level control, which this instrument does not have — so the
+    number bounds what a word's location was worth rather than equalling it, and the panel says so
+    beside the number instead of at the bottom of the page.
+  </p>
+  <p class="para">
+    Swap draws its replacements from a finite pool — <b>1,944</b> eligible domain types against the
+    map's <b>1,680</b> stems — so the tail of the canonical order draws from what is left and its
+    frequency match degrades there; and a source type carrying a suffix may receive an already
+    inflected replacement. Both are consequences of drawing from a real vocabulary, and both are
+    stated rather than smoothed over.
+  </p>
+  <p class="para">
+    <b>A swap map is injective only at <code>p = 0</code> and <code>p = 1</code>, and that is a
+    theorem rather than an implementation limit.</b> Its images <i>are</i> domain words, so at an
+    intermediate <code>p</code> a vacated word can land on one that has not been vacated yet. This
+    cannot be engineered away: a map that is stable in <code>p</code> and whose images are domain
+    types would, if it were injective at every <code>p</code>, have to be a bijection carrying each
+    nested vacated set onto itself — hence the identity. Measured on the shipped corpus, swap loses
+    <b>244 / 322 / 233</b> image slots at <code>p = 0.25 / 0.5 / 0.75</code>, and <b>0</b> at both
+    endpoints. The engine therefore <b>refuses</b> the mapped vocabulary in between, with a typed
+    error naming the theorem, and the panel shows you that refusal rather than clamping the slider
+    or quietly substituting a nonce map. Full vacancy — where swap <i>is</i> a bijection of the
+    domain and the invariance theorem holds for it exactly as for nonce — is where the pretrained
+    arm scores, so the control loses nothing it exists for. The inconsistent-assignment condition
+    is refused under swap for a different and equally countable reason: it needs a fresh type per
+    occurrence, and 1,680 stems cannot cover 8,202 vacated tokens.
+  </p>
+
+  <h4 class="sub">The stress table, stated honestly</h4>
+  <p class="para">
+    When <b>match prosody</b> is on, a nonce is built to carry its stem's syllable count and stress
+    pattern — which requires knowing the stem's stress. That comes from a hand table of
+    <b>61</b> entries covering the polysyllables of the Dolch list, and the table's own provenance
+    is: <i>seeded by rule and then never checked by a human</i>. The source's status page says it
+    “wants roughly an hour of human checking”, and that hour has not happened here either. The
+    table covers <b>5.1%</b> of this corpus's tokens; everything else falls through to a spelling
+    heuristic that counts vowel groups. <b>So every prosody number on these pages is indicative,
+    not exact</b>, and none is ever shown without the three-way split beside it — how much of the
+    stress came from the hand table, how much from forms we minted ourselves (known by
+    construction, but asserted rather than verified: the minter checks syllable <i>count</i>, not
+    pattern), and how much from the rule, which is a guess.
+  </p>
+  <p class="para">
+    The suffix splitter is a spelling heuristic too, not a morphological analyser: it is right on
+    its exception list and wrong outside it (<code>ladder</code> → <code>ladd</code> +
+    <code>er</code>). That is tolerable — the nonce still carries a consistent identity and an
+    inflected-looking surface — and it is said here rather than absorbed quietly.
+  </p>
+  <p class="para">
+    One rule this project holds itself to, and the reason the numbers above are the ones they are:
+    the source document reports its own prosody figures on <i>its</i> corpus, which we do not have.
+    <b>None of its numbers is transcribed anywhere here.</b> Every figure on this page was measured
+    on <i>The Real Mother Goose</i>, by the code that ships.
+  </p>
+
+  <h4 class="sub">What is refused, and where</h4>
+  <p class="para">
+    The full stack scores in float32 and reports everything. The static build runs a quantized ONNX
+    export in your browser, and quantization moves absolute log-likelihoods by tenths of a nat —
+    in a direction that is not even the same across two models. It may therefore state a number
+    only where an error bound has actually been measured for the dtype it ran, and it refuses the
+    rest <i>by name</i> rather than printing a value with a plausible-looking margin:
+  </p>
+  <ul class="para">
+    <li>
+      <b>Absolute <code>nllPreserved</code>: refused.</b> Quantization shifts it by tenths of a
+      nat, with the sign varying by model, so the number would say more about the export than about
+      the passage.
+    </li>
+    <li>
+      <b><code>nll(nonce) − nll(swap)</code>: refused.</b> It is the small difference — the
+      interesting one — and quantization's error on it reaches a fifth of its own size, with sign
+      flips. A contrast that quantization eats is not a contrast.
+    </li>
+    <li>
+      <b>Per-passage rows: refused.</b> Pooled differences cancel; a single passage's does not,
+      and one measured case was wrong by more than its own value.
+    </li>
+    <li>
+      <b>A pool below 700 preserved tokens: refused</b> — that is the size at which the bound was
+      measured, and below it the honest answer is no number.
+    </li>
+    <li>
+      <b>Any dtype without a measured bound: refused outright.</b> A stated ± that was never
+      measured is a fabricated error bar, which is worse than no number at all.
+    </li>
+    <li>
+      <b>What it does report</b> — pooled <code>swap − english</code> and
+      <code>nonce − english</code> — carries <b>±0.2</b> nats of quantization uncertainty stated
+      beside the sampling standard error, quoted to one decimal place because that is all the
+      measurement supports.
+    </li>
+  </ul>
+  <p class="para">
+    One coverage gap belongs here rather than in a commit message. The browser runs
+    <code>webgpu/q8</code> where a GPU is available and <code>wasm/q8</code> otherwise, and every
+    session is gated at load by a non-degeneracy check — a causal model's output must depend on its
+    input — because a dtype this app once tried first built a working-looking session and returned
+    input-independent logits. That gate and the ladder are unit-tested, and the WebGPU path is
+    verified end to end on a real GPU. <b>But GitHub's runners have no GPU, so CI only ever
+    exercises the WASM rung</b>: the WebGPU path is checked on a developer machine, not in
+    continuous integration.
   </p>
 
   <h3 id="real">What's real, and where it runs</h3>
@@ -693,6 +966,27 @@
         </td>
       </tr>
       <tr>
+        <td>The vacancy transform itself</td>
+        <td colspan="2" class="span">
+          <b>Real, in your browser, in both modes.</b> The transform, the map, the statistics and
+          the invariance check are the TypeScript half of the same contract the Python package
+          implements, pinned to it by a golden fixture: the map's every stem→nonce pair at two
+          seeds, the vacated text, the statistics, and the token-id-stream digests, compared
+          exactly for strings and ids. The backend's <code>/api/lex/vacancy</code> exists for
+          parity and for callers outside the tab
+        </td>
+      </tr>
+      <tr>
+        <td>The pretrained arm (vacancy scoring)</td>
+        <td>real, in PyTorch at float32 — every number, including per-passage rows</td>
+        <td>
+          real, in your browser via transformers.js + ONNX at <code>q8</code>, but only the
+          quantities with a measured error bound: the pooled differences, with ±0.2 nats of
+          quantization uncertainty stated. Absolute NLL, per-passage rows and
+          <code>nonce − swap</code> are refused by name — see the section above
+        </td>
+      </tr>
+      <tr>
         <td>Architecture: weight matrices</td>
         <td>from the loaded model</td>
         <td>
@@ -744,6 +1038,26 @@
       golden test, but <i>whole-run</i> training equality with a Python run is not claimed.
     </li>
     <li>
+      <b>The stress table is unverified.</b> 61 hand-set entries, seeded by rule and never checked
+      by a human, covering 5.1% of this corpus's tokens. Every prosody statistic is therefore
+      indicative rather than exact, and is shown with the three-way split that says so.
+    </li>
+    <li>
+      <b>The swap control is injective only at <code>p = 0</code> and <code>p = 1</code></b>, which
+      is a theorem about maps whose images are domain words, not a defect. In between, the mapped
+      vocabulary is refused with a typed error instead of being computed with two words on one row.
+    </li>
+    <li>
+      <b>The static build refuses most of the pretrained arm's numbers</b>, and states ±0.2 nats of
+      measured quantization uncertainty on the ones it does report. For absolute NLL, per-passage
+      rows or <code>nonce − swap</code>, run the full stack, which scores at float32.
+    </li>
+    <li>
+      <b>The WebGPU path is not covered by CI.</b> It is verified end to end on a real GPU on a
+      developer machine; GitHub's runners have none, so continuous integration exercises the WASM
+      rung, the load-time non-degeneracy gate and the dtype ladder, but never the GPU one.
+    </li>
+    <li>
       <b>A model trained in the Lexicon Lab lives in that tab and nowhere else.</b> There is no
       account and no server-side checkpoint, so closing the page ends the model unless you save the
       <code>.llmlex.json</code> bundle — which carries the weights <i>and</i> the vocabulary,
@@ -782,6 +1096,12 @@
         Project Gutenberg ebook #10607</a> — <i>The Real Mother Goose</i> (1916), illustrated by
       Blanche Fisher Wright: the <b>Lexicon Lab</b>'s corpus. It is committed to the repository
       whole, header and licence footer intact, and trimmed to its body only when it is used.
+    </li>
+    <li>
+      <a href="https://www.gutenberg.org/ebooks/12" target="_blank" rel="noopener">
+        Project Gutenberg ebook #12</a> — <i>Through the Looking-Glass</i> (Lewis Carroll, 1871),
+      whose “Jabberwocky” is the condition the <b>vacancy transform</b> manufactures on demand:
+      every function word and every inflection in place, every content stem vacant.
     </li>
     <li>
       E. W. Dolch, <i>A Basic Sight Vocabulary</i>, The Elementary School Journal 36(6):456–460,
@@ -991,6 +1311,15 @@
      cells would invite a reader to hunt for a difference that does not exist. */
   .tbl td.span {
     background: rgba(91, 224, 176, 0.06);
+  }
+  /* The one cell of the 2×2 this instrument occupies: marked in the table rather than
+     described underneath it, so the claim and the picture cannot drift apart. */
+  .tbl td.cell-mark {
+    background: rgba(110, 168, 254, 0.09);
+    box-shadow: inset 0 0 0 1px rgba(110, 168, 254, 0.35);
+  }
+  .tbl td.cell-mark b {
+    color: var(--accent);
   }
   .tbl.notation td:nth-child(odd) {
     white-space: nowrap;

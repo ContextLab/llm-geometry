@@ -721,7 +721,11 @@ export class ArchSection {
    *     is 14–23 % pooled with sign flips, so quantization eats exactly the contrast that
    *     makes the result mean something;
    *   - pooled `swap − english` and `nonce − english` are reported, with the measured
-   *     ±0.1 nats quantization uncertainty stated beside the sampling standard error.
+   *     `VACANCY_Q8_UNCERTAINTY_NATS` quantization uncertainty stated beside the sampling
+   *     standard error. (This line said "±0.1" until that constant was re-derived on the
+   *     configuration that actually ships and came out at 0.2 — see its own comment. A
+   *     number written twice is a number that drifts, so it is named here rather than
+   *     retyped.)
    *
    * A dtype with no measured bound is refused outright rather than given a ± copied from
    * a different dtype: a stated error bar that was never measured is a fabrication, and
