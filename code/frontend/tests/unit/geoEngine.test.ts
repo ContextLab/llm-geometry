@@ -19,6 +19,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import { GeoEngine, GeoEngineError } from "../../src/lib/geoEngine";
 import { clipPrompt } from "../../src/lib/geoEngine/fields";
+import { sha256Hex, utf8Bytes } from "../../src/lib/geoEngine/hash";
 import { GeoModel } from "../../src/lib/geoEngine/model";
 import type {
   GeoVectorFieldData,
@@ -421,5 +422,62 @@ describe("minted-set persistence hooks (static reload survival) [fixtures]", () 
     bad.weights[firstKey] = bad.weights[firstKey].slice(0, -4) + "AAA=";
     const engine3 = GeoEngine.fromAssets(fixtureSrc.checkpoint, fixtureSrc.vocab);
     expect(engine3.importWeightSet(minted.weights_token, bad)).toBe(false);
+  });
+
+  /**
+   * A model trained from scratch (or loaded from a file) has a vocabulary of its OWN:
+   * its token id 17 is not the shipped model's token id 17. The static build persists
+   * minted sets to sessionStorage and restores them after a reload — and it used to
+   * persist the weights WITHOUT the word list, so the restored set fell back to the
+   * shipped tokenizer. The damage was not a wrong label on screen: `exportBundle` then
+   * wrote a `.llmgeo.json` pairing those weights with the shipped word list and hashed
+   * THAT list into `vocab_sha256`, producing a file no integrity check can reject — the
+   * exact corruption the three digests exist to prevent, committed by the writer. So
+   * "save → reload → save" silently changed which words the model file described.
+   */
+  it("carries a loaded model's OWN vocabulary across the persistence hop", () => {
+    const engine = GeoEngine.fromAssets(fixtureSrc.checkpoint, fixtureSrc.vocab);
+
+    // A real model file whose word list is NOT the shipped one — the situation every
+    // from-scratch run and every `.llmgeo.json` load produces.
+    // Distinct weights (so the token is not the canonical one) AND distinct words.
+    const minted = engine.postWeights({
+      base: "learned",
+      edits: [{ layer: 1, matrix: "W_K", preset: "identity" }],
+    });
+    const shipped = engine.exportBundle(minted.weights_token);
+    const words = (JSON.parse(shipped.vocab) as { words: string[] }).words.map((w, i) =>
+      i === 0 ? `${w}zz` : w,
+    );
+    const vocabJson = JSON.stringify({
+      format: "geo-tokenizer-v1",
+      specials: { "<unk>": 0, "<eos>": 1, "<pad>": 2 },
+      words,
+    });
+    const file = {
+      ...shipped,
+      vocab: vocabJson,
+      vocab_sha256: sha256Hex(utf8Bytes(vocabJson)),
+    };
+    const { weights_token: token } = engine.importBundle(file);
+    expect(JSON.parse(engine.exportBundle(token).vocab).words).toEqual(words);
+
+    // The reload hop: persist, restore into a fresh engine, save again.
+    const saved = engine.exportWeightSet(token);
+    expect(saved.vocabWords).toEqual(words);
+    const reloaded = GeoEngine.fromAssets(fixtureSrc.checkpoint, fixtureSrc.vocab);
+    expect(reloaded.importWeightSet(token, saved)).toBe(true);
+    const after = engine.exportBundle(token);
+    expect(JSON.parse(reloaded.exportBundle(token).vocab).words).toEqual(words);
+    // Byte-for-byte the same file, which is the user-visible claim.
+    expect(reloaded.exportBundle(token)).toEqual(after);
+
+    // A payload that LOST the word list is dropped, not restored half-right: the token
+    // simply is not there afterwards, so the caller deletes it and the evicted-token
+    // self-heal resets visibly instead of quietly relabelling the model.
+    const { vocabWords: _dropped, ...withoutVocab } = saved;
+    const stale = GeoEngine.fromAssets(fixtureSrc.checkpoint, fixtureSrc.vocab);
+    expect(stale.importWeightSet(token, withoutVocab)).toBe(false);
+    expect(() => stale.exportBundle(token)).toThrow(/unknown/);
   });
 });

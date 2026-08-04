@@ -151,6 +151,70 @@ test("geometry lab runs fully live in-browser (engine, edits, worker fine-tune)"
   });
 });
 
+/**
+ * A model trained here has a vocabulary of its OWN — its token id 17 is not the shipped
+ * model's token id 17 — and the static build keeps the model across a reload by
+ * persisting the minted weight set to sessionStorage. It used to persist the WEIGHTS
+ * ONLY, so after a reload the engine fell back to the shipped tokenizer and `Save model`
+ * wrote a `.llmgeo.json` pairing these weights with Alice in Wonderland's word list,
+ * hashing THAT list into `vocab_sha256`. The file was internally consistent, so no
+ * reader on either side could reject it: save → reload → save silently changed which
+ * words the model file described. The full stack was never affected — the Python
+ * backend stores the vocabulary beside the weights (`save_weight_set(..., vocab_json=)`).
+ *
+ * One epoch is enough: this is about what the file SAYS, not about the loss.
+ */
+test("a model trained here keeps its own vocabulary across a reload (save → reload → save)", async ({
+  page,
+}) => {
+  test.setTimeout(600_000);
+  await page.goto(`${BASE}#geometry`);
+  await ready(page, "geo-view", 60_000);
+
+  const corpus = readFileSync(
+    path.join(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "../../../backend/src/llm_geometry/lex/data/real-mother-goose.txt",
+    ),
+    "utf8",
+  );
+  await page.getByTestId("geo-train-src-paste").click();
+  await page.getByTestId("geo-train-text").fill(corpus);
+  await expect(page.getByTestId("geo-train-stats")).toContainText(/enough to fill/);
+  const epochs = page.getByTestId("geo-train-epochs");
+  await epochs.fill("1");
+  await epochs.dispatchEvent("input");
+  await page.getByTestId("geo-train-run").click();
+  await expect(page.getByTestId("geo-train-result")).toBeVisible({ timeout: 480_000 });
+
+  const saveBundle = async (): Promise<{ weights_token: string; vocab: string }> => {
+    const dl = page.waitForEvent("download", { timeout: 120_000 });
+    await page.getByTestId("geo-save-model").click();
+    await expect(page.getByTestId("geo-io-error")).toHaveCount(0);
+    const stream = await (await dl).createReadStream();
+    const chunks: Buffer[] = [];
+    for await (const c of stream) chunks.push(c as Buffer);
+    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+      weights_token: string;
+      vocab: string;
+    };
+  };
+
+  const before = await saveBundle();
+  const wordsBefore = (JSON.parse(before.vocab) as { words: string[] }).words;
+  // It really is a vocabulary of its own, not the shipped one.
+  expect(wordsBefore).not.toContain("alice");
+
+  await page.reload();
+  await ready(page, "geo-view", 60_000);
+  const after = await saveBundle();
+  expect(after.weights_token).toBe(before.weights_token);
+  expect(
+    (JSON.parse(after.vocab) as { words: string[] }).words,
+    "the saved model file's vocabulary changed across a reload",
+  ).toEqual(wordsBefore);
+});
+
 // ---------------------------------------------------------------------------------
 // [c] Architecture Explorer — precomputed graph/traces, LIVE weight windows (US-2)
 // ---------------------------------------------------------------------------------
