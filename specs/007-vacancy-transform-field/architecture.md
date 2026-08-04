@@ -289,7 +289,18 @@ indices and not of a number in a document.
 
 ### 5.5 The mint loop
 
-For `salt = 0, 1, 2, …`:
+A mint call carries a **base salt** `S` (0 for the first build; §5.8 sets it for re-mints) and
+runs an **attempt counter** `a = 0, 1, 2, …`. The byte stream of §5.3 is keyed on
+`salt = S + a`; **the quality thresholds below are on `a`, not on `salt`.**
+
+That distinction is load-bearing. Read the other way — thresholds on the absolute salt — a
+re-mint at `S = 1001` would begin with every quality check already relaxed, so the replacement
+nonce would not be prosody-matched, and a second round at `S = 2001` would exceed the give-up
+bound and raise, contradicting §5.2's "raise after 8 rounds". Counting attempts per call means a
+re-mint is held to exactly the same standard as an original mint, which is what makes the
+seed-7 replacement (`hang → smeeg`) monosyllabic like the word it replaces.
+
+For `a = 0, 1, 2, …`:
 
 1. `pattern` := the stem's stress pattern (§6) when `matchProsody`, else `"1"`.
    `nSyl` := `len(pattern)`.
@@ -306,9 +317,9 @@ For `salt = 0, 1, 2, …`:
    **Do not "fix" this in either stack** — doing so would change every multi-syllable nonce.
 3. Collapse runs: `re.sub(r"([bcdfghjklmnpqrstvwxz])\1{2,}", r"\1\1", w)`.
 4. Accept iff `len(w) >= 3` **and** `w ∉ forbidden` **and** `syllables(w) == nSyl`.
-5. On `salt >= 400`, drop the syllable-count check. On `salt >= 800`, drop the length check.
+5. On `a >= 400`, drop the syllable-count check. On `a >= 800`, drop the length check.
    These relaxations are deterministic and order-independent, unlike the source's counter.
-   Reaching `salt >= 1200` raises — it has never happened and if it does we want to know.
+   Reaching `a >= 1200` raises — it has never happened and if it does we want to know.
 
 ### 5.6 Stability
 
@@ -351,8 +362,9 @@ These were gaps, not choices. Both stacks do it this way or the golden fixture f
 
 - **Re-mint selection.** When conditions A/B of §5.2 fail, re-mint **only the losing stem** —
   the one later in canonical (ASCII-ascending) order among those involved in the collision — at
-  salt `1000 * round + previousSalt + 1`. Round counts from 1. Winners keep their nonce, so a
-  re-mint never cascades.
+  **base salt** `1000 * round + previousBaseSalt + 1`. Round counts from 1. Winners keep their
+  nonce, so a re-mint never cascades. The attempt counter restarts at `a = 0` inside the new
+  call, so §5.5's quality checks apply in full (see the note there).
 - **`consistent = false` key.** The per-occurrence nonce is minted for the key
   `f"{stem}#{idx}"` where `idx` is the 0-based occurrence index of that **stem** in document
   order. The `#` is not a legal `WORD_RE` character, so the key can never collide with a stem.
