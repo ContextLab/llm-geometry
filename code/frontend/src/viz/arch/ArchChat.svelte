@@ -112,7 +112,8 @@
 <div class="chat">
   {#if STATIC_MODE}
     <!-- Static build: generation is fully live via transformers.js — this badge reports
-         the real device/dtype ladder (webgpu·q4f16 → wasm·q8) as it loads. -->
+         the real device/dtype ladder (webgpu·q8 → wasm·q8) as it loads, and marks
+         the badge "fallback" when a rung was rejected. -->
     <StaticRuntimeBadge />
   {/if}
   {#if chatTemplate === false}

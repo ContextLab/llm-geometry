@@ -382,6 +382,91 @@ export interface ArchGenerateResult {
   finish_reason: "eos" | "length";
 }
 
+// --- Feature 007: the pretrained arm of the vacancy instrument (contract §8) ---
+
+export interface ArchVacancyScoreBody {
+  model_id: string;
+  /** One passage (the panel's editable excerpt) … */
+  passage?: string;
+  /** … or several, pooled at the token level. Omit both for the shipped default set. */
+  passages?: string[];
+  p?: number; // default 1.0 — full vacancy, the measured condition
+  seed?: number;
+  match_prosody?: boolean;
+  keep?: string[];
+}
+
+/** A quantity this stack measured but may not report, with the reason and the fix. */
+export interface ArchVacancyRefusal {
+  type: string; // the typed-error name the full stack would raise
+  message: string;
+}
+
+/** Contract §8.1, per variant. Absolutes are `null` where the running dtype has no bound. */
+export interface ArchVacancyStats {
+  nllPreserved: number | null;
+  nllAll: number | null;
+  bitsPerChar: number | null;
+  nTokens: number;
+  nPreservedTokens: number;
+  nChars: number;
+}
+
+export interface ArchVacancyVariant {
+  id: "english" | "swap" | "nonce";
+  pooled: ArchVacancyStats;
+  preview: string;
+  /** Present when the absolute NLLs are withheld (quantized stack). */
+  refused?: ArchVacancyRefusal;
+}
+
+export interface ArchVacancyDifference {
+  /** `wrong_content` = swap − english; `unknown_form` = nonce − swap; `total` = their sum. */
+  id: "wrong_content" | "unknown_form" | "total";
+  label: string;
+  expr: string;
+  /** `total` is false: it conflates the two and is never a headline (contract §8.3). */
+  headline: boolean;
+  nats: number | null;
+  se: number | null;
+  nPairs: number;
+  upperBound?: boolean;
+  note?: string;
+  /** Stated only where it was MEASURED for the dtype that ran; never invented. */
+  quantizationUncertaintyNats?: number;
+  refused?: ArchVacancyRefusal;
+}
+
+export interface ArchVacancyPassage {
+  index: number;
+  nWords: number;
+  nPreservedWords: number;
+  variants: Record<string, ArchVacancyStats>;
+}
+
+export interface ArchVacancyScoreResult {
+  model_id: string;
+  revision?: string;
+  /** "backend" (torch, fp32) or "static" (transformers.js, quantized ONNX). */
+  stack: "backend" | "static";
+  dtype: string;
+  device?: string;
+  p: number;
+  seed: number;
+  match_prosody: boolean;
+  keep: string[];
+  alignment: { mechanism: string; unit: string; verified: boolean; note: string };
+  variants: ArchVacancyVariant[];
+  /** The English passages exactly as scored (NFC-normalized), so the UI can show them. */
+  passages_used: string[];
+  differences: ArchVacancyDifference[];
+  /** Per-passage rows, or `null` where they are refused (quantized stack). */
+  passages: ArchVacancyPassage[] | null;
+  passagesRefused?: ArchVacancyRefusal;
+  tiny_arm: { delta_nats: number; exact: boolean; label: string; note: string };
+  confound: string;
+}
+
 export class ApiError extends Error {
   type: string;
   constructor(type: string, message: string) {
@@ -657,6 +742,13 @@ export function createClient(opts: ClientOptions = {}) {
     return request("/api/arch/generate", jsonInit(body));
   }
 
+  function archVacancyScore(
+    body: ArchVacancyScoreBody,
+    signal?: AbortSignal,
+  ): Promise<ArchVacancyScoreResult> {
+    return request("/api/arch/vacancy-score", { ...jsonInit(body), signal });
+  }
+
   return {
     listModels,
     resolveModel,
@@ -682,6 +774,7 @@ export function createClient(opts: ClientOptions = {}) {
     getArchWeights,
     getArchTrace,
     archGenerate,
+    archVacancyScore,
   };
 }
 

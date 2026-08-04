@@ -23,6 +23,8 @@ import type {
   ArchGraph,
   ArchTrace,
   ArchTraceParams,
+  ArchVacancyScoreBody,
+  ArchVacancyScoreResult,
   ArchWeightsData,
   ArchWeightsParams,
   Client,
@@ -208,6 +210,10 @@ export function createStaticClient(opts: StaticClientOptions = {}): StaticClient
     getArchTrace: (params: ArchTraceParams, _signal?: AbortSignal): Promise<ArchTrace> =>
       arch.getArchTrace(params),
     archGenerate: (body: ArchGenerateBody): Promise<ArchGenerateResult> => arch.archGenerate(body),
+    archVacancyScore: (
+      body: ArchVacancyScoreBody,
+      _signal?: AbortSignal,
+    ): Promise<ArchVacancyScoreResult> => arch.archVacancyScore(body),
     // Lexicon Lab: budgets, training, generation and spectra all computed in-browser by
     // lexEngine; only the shipped corpus text and the read-only /spec are precomputed.
     ...lexClientFrom(lex),

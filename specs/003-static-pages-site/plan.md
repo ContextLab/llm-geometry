@@ -28,6 +28,9 @@ Python backend — per issue #1's "ideally it could run entirely in a browser".
    - Generation/chat: LIVE via transformers.js v4 pipeline, device webgpu
      dtype q4f16 (117 MB from HF CDN) with wasm+q8 fallback; per-token probs from
      logits (direct forward calls).
+     AMENDED (2026-08-04, defect fix): q4f16 returns input-independent logits on
+     WebGPU and is never requested; the ladder is webgpu/q8 → wasm/q8 with a
+     load-time non-degeneracy check on every session.
    - Trace panel (per-layer attentions/hidden norms): NOT available from ONNX →
      precomputed traces for ~6 example prompts (dropdown), clearly labeled; the
      playback/diagram animation runs on the precomputed node_activations. Arbitrary

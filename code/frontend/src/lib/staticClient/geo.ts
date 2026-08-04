@@ -45,8 +45,14 @@ import type { LocalJobRegistry, ProgressFn } from "./jobs";
 // Minted weight sets persist across reloads (red-team static finding #3: the
 // engine's store is in-memory, so a sessionStorage token would otherwise silently
 // self-heal back to "learned" after a reload — the backend build persists edits).
+//
+// A set trained from scratch or loaded from a file also carries its OWN vocabulary,
+// and `exportWeightSet` puts it in the payload: weights alone do not describe such a
+// model, and restoring them alone made `Save model` write a file pairing them with the
+// shipped word list under a matching `vocab_sha256` — an unrejectable wrong file. The
+// backend has always stored the two together (`save_weight_set(..., vocab_json=…)`).
 const MINTED_SETS_KEY = "llm-geometry:static-weight-sets";
-const MINTED_SETS_CAP = 8; // LRU; each entry is ~50 KB of JSON
+const MINTED_SETS_CAP = 8; // LRU; each entry is ~50 KB of JSON, ~60 KB with a vocabulary
 
 function loadPersistedSets(): Record<string, ExportedWeightSet> {
   try {

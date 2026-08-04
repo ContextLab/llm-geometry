@@ -52,6 +52,18 @@
     budgetName: string;
     corpusText: string;
     corpusLabel: string;
+    /**
+     * An EXPLICIT word list for a from-scratch run, or null to let the worker resolve the
+     * budget from `corpusText` as it always has.
+     *
+     * Feature 007 needs this: under the vacancy transform's mapped condition the budget is
+     * not a function of the text at all — it is the ORIGINAL budget pushed through the same
+     * transform, in the same order, so every word keeps the embedding row its pre-image had.
+     * Letting the worker rebuild a Dolch list from a vacated corpus would hand the model a
+     * vocabulary of English words the text no longer contains, and the invariance theorem
+     * this tab demonstrates would be false for a reason nothing on screen explained.
+     */
+    vocabWords: readonly string[] | null;
     trainedModel: LexModel | null;
     trainedVocab: LexVocab | null;
     trainedNote: string;
@@ -64,6 +76,7 @@
     budgetName,
     corpusText,
     corpusLabel,
+    vocabWords,
     trainedModel,
     trainedVocab,
     trainedNote,
@@ -297,6 +310,9 @@
         text: corpusText,
         budgetSource,
         budget: budgetName,
+        // Only when the tab hands one down: otherwise the worker resolves the budget from
+        // the text, which is what every pre-007 run did and must keep doing.
+        vocabWords: vocabWords ? [...vocabWords] : undefined,
         model: modelDims,
         steps,
         lr,

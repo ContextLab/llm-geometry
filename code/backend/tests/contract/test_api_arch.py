@@ -308,3 +308,70 @@ def test_generate_oversized_model_is_422_envelope():
     )
     assert resp.status_code == 422
     assert resp.json()["error"]["type"] == "ModelTooLargeError"
+
+
+# --- POST /api/arch/vacancy-score (feature 007, contract §8) -------------------------
+
+
+VACANCY_PASSAGE = (
+    "Little Jack Horner sat in a corner,\n"
+    "Eating a Christmas pie;\n"
+    "He put in his thumb, and pulled out a plum,\n"
+    "And said, What a good boy am I!\n"
+    "Hey diddle diddle, the cat and the fiddle,\n"
+    "The cow jumped over the moon;\n"
+    "The little dog laughed to see such sport,\n"
+    "And the dish ran away with the spoon.\n"
+)
+
+
+def _vacancy(payload):
+    return client.post("/api/arch/vacancy-score", json={"model_id": MODEL, **payload})
+
+
+def test_vacancy_score_shape_and_the_labelled_decomposition():
+    resp = _vacancy({"passage": VACANCY_PASSAGE, "p": 1.0, "seed": 0})
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert [v["id"] for v in body["variants"]] == ["english", "swap", "nonce"]
+    for v in body["variants"]:
+        stats = v["pooled"]
+        assert stats["nllPreserved"] == sig6(stats["nllPreserved"])
+        assert stats["nPreservedTokens"] > 0
+    # Every variant scores the SAME scaffolding — the property the deltas rest on.
+    assert len({v["pooled"]["nPreservedTokens"] for v in body["variants"]}) == 1
+
+    by_id = {d["id"]: d for d in body["differences"]}
+    assert by_id["wrong_content"]["expr"] == "nll(swap) − nll(english)"
+    assert by_id["unknown_form"]["expr"] == "nll(nonce) − nll(swap)"
+    # The conflated difference is present but explicitly NOT a headline (§8.3).
+    assert by_id["total"]["expr"] == "nll(nonce) − nll(english)"
+    assert by_id["total"]["headline"] is False
+    assert by_id["unknown_form"]["upperBound"] is True
+
+    # The full stack reports everything: per-passage rows, and the tiny arm's exact 0.
+    assert len(body["passages"]) == 1
+    assert body["tiny_arm"]["delta_nats"] == 0.0
+    assert body["dtype"] == "float32"
+    assert body["alignment"]["unit"] == "utf8_bytes"
+
+
+def test_vacancy_score_rejects_both_passage_and_passages():
+    resp = _vacancy({"passage": VACANCY_PASSAGE, "passages": [VACANCY_PASSAGE]})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["type"] == "InvalidParamError"
+
+
+def test_vacancy_score_bad_p_is_400_envelope():
+    resp = _vacancy({"passage": VACANCY_PASSAGE, "p": 2.0})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["type"] == "InvalidParamError"
+
+
+def test_vacancy_score_oversized_model_is_422_envelope():
+    resp = client.post(
+        "/api/arch/vacancy-score", json={"model_id": TOO_BIG, "passage": VACANCY_PASSAGE}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["type"] == "ModelTooLargeError"

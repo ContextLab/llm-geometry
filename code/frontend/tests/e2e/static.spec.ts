@@ -151,6 +151,70 @@ test("geometry lab runs fully live in-browser (engine, edits, worker fine-tune)"
   });
 });
 
+/**
+ * A model trained here has a vocabulary of its OWN — its token id 17 is not the shipped
+ * model's token id 17 — and the static build keeps the model across a reload by
+ * persisting the minted weight set to sessionStorage. It used to persist the WEIGHTS
+ * ONLY, so after a reload the engine fell back to the shipped tokenizer and `Save model`
+ * wrote a `.llmgeo.json` pairing these weights with Alice in Wonderland's word list,
+ * hashing THAT list into `vocab_sha256`. The file was internally consistent, so no
+ * reader on either side could reject it: save → reload → save silently changed which
+ * words the model file described. The full stack was never affected — the Python
+ * backend stores the vocabulary beside the weights (`save_weight_set(..., vocab_json=)`).
+ *
+ * One epoch is enough: this is about what the file SAYS, not about the loss.
+ */
+test("a model trained here keeps its own vocabulary across a reload (save → reload → save)", async ({
+  page,
+}) => {
+  test.setTimeout(600_000);
+  await page.goto(`${BASE}#geometry`);
+  await ready(page, "geo-view", 60_000);
+
+  const corpus = readFileSync(
+    path.join(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "../../../backend/src/llm_geometry/lex/data/real-mother-goose.txt",
+    ),
+    "utf8",
+  );
+  await page.getByTestId("geo-train-src-paste").click();
+  await page.getByTestId("geo-train-text").fill(corpus);
+  await expect(page.getByTestId("geo-train-stats")).toContainText(/enough to fill/);
+  const epochs = page.getByTestId("geo-train-epochs");
+  await epochs.fill("1");
+  await epochs.dispatchEvent("input");
+  await page.getByTestId("geo-train-run").click();
+  await expect(page.getByTestId("geo-train-result")).toBeVisible({ timeout: 480_000 });
+
+  const saveBundle = async (): Promise<{ weights_token: string; vocab: string }> => {
+    const dl = page.waitForEvent("download", { timeout: 120_000 });
+    await page.getByTestId("geo-save-model").click();
+    await expect(page.getByTestId("geo-io-error")).toHaveCount(0);
+    const stream = await (await dl).createReadStream();
+    const chunks: Buffer[] = [];
+    for await (const c of stream) chunks.push(c as Buffer);
+    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+      weights_token: string;
+      vocab: string;
+    };
+  };
+
+  const before = await saveBundle();
+  const wordsBefore = (JSON.parse(before.vocab) as { words: string[] }).words;
+  // It really is a vocabulary of its own, not the shipped one.
+  expect(wordsBefore).not.toContain("alice");
+
+  await page.reload();
+  await ready(page, "geo-view", 60_000);
+  const after = await saveBundle();
+  expect(after.weights_token).toBe(before.weights_token);
+  expect(
+    (JSON.parse(after.vocab) as { words: string[] }).words,
+    "the saved model file's vocabulary changed across a reload",
+  ).toEqual(wordsBefore);
+});
+
 // ---------------------------------------------------------------------------------
 // [c] Architecture Explorer — precomputed graph/traces, LIVE weight windows (US-2)
 // ---------------------------------------------------------------------------------
@@ -277,12 +341,62 @@ test("real in-browser generation on the smallest model", async ({ page }) => {
   const tok = page.getByTestId("arch-reply").locator(".tok").first();
   await expect(tok).toBeAttached();
   await expect(tok).toHaveAttribute("aria-label", /%/);
-  // the runtime ladder settled on a real device/dtype pair
+  // The runtime ladder settled on a device/dtype pair that PASSED the load-time
+  // non-degeneracy check (transformersRuntime.selfCheck). Both rungs read the same
+  // model_quantized.onnx; only the execution provider differs.
   await expect(page.getByTestId("static-runtime-badge")).toContainText(
-    /webgpu · q4f16|wasm · q8/,
+    /(webgpu|wasm) · q8/,
   );
   await page.screenshot({
     path: "tests/e2e/__screenshots__/static-generation.png",
     fullPage: true,
+  });
+});
+
+// ---------------------------------------------------------------------------------
+// [g] The vacancy instrument's pretrained arm — computed live, reported NARROWLY
+// (feature 007, contract §8.3a / FR-720a / SC-707b). The browser runs a quantized
+// export, so it may state only what was MEASURED for that dtype: pooled
+// `swap − english` and `nonce − english` with the measured ±0.1 nats, and nothing
+// else. This drives the built site and asserts it does one or the other — never a
+// bare number.
+
+test("the vacancy panel reports only what q8 has a measured bound for", async ({ page }) => {
+  test.setTimeout(600_000);
+  await page.goto(BASE);
+  await page.getByTestId("tab-architecture").click();
+  const panel = page.getByTestId("arch-vacancy");
+  await panel.scrollIntoViewIfNeeded();
+  await page.getByTestId("arch-vac-run").click();
+
+  // Real ONNX download + 18 real forward passes (6 pooled excerpts × 3 variants).
+  await expect(page.getByTestId("arch-vac-table")).toBeVisible({ timeout: 560_000 });
+  await expect(page.getByTestId("arch-vac-error")).toHaveCount(0);
+
+  // Refused: nonce − swap, by name, with the reason and the command that would fix it.
+  const refusal = page.getByTestId("arch-vac-refused-unknown_form");
+  await expect(refusal).toBeVisible();
+  await expect(refusal).toContainText("sign flip");
+  await expect(refusal).toContainText("uvicorn");
+  await expect(page.getByTestId("arch-vac-unknown_form")).toHaveCount(0);
+
+  // Refused: the absolute NLLs and every per-passage row.
+  await expect(page.getByTestId("arch-vac-refused-absolute")).toBeVisible();
+  await expect(page.getByTestId("arch-vac-refused-passages")).toBeVisible();
+  const english = page.getByTestId("arch-vac-row-english");
+  await expect(english).toContainText("—");
+
+  // Reported: the two pooled differences, each with the MEASURED quantization ±.
+  const wrong = page.getByTestId("arch-vac-wrong_content");
+  await expect(wrong).toContainText(/\d\.\d{3}/);
+  await expect(page.getByTestId("arch-vac-wrong_content-err")).toContainText("0.2 (quantization, measured)");
+
+  // The residual caveat is stated even where the number is refused: a reader must not
+  // have to earn the caveat by being shown a value.
+  await expect(page.getByTestId("arch-vac-honesty")).toContainText("UPPER BOUND");
+  await expect(page.getByTestId("arch-vac-honesty")).toContainText("higher entropy");
+
+  await panel.screenshot({
+    path: "tests/e2e/__screenshots__/static-arch-vacancy.png",
   });
 });

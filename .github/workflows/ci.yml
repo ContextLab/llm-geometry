@@ -17,6 +17,21 @@ concurrency:
 
 env:
   HF_HUB_DISABLE_TELEMETRY: "1"
+  # Authenticates every Hub call in this workflow. `huggingface_hub` and
+  # `transformers` both read HF_TOKEN from the environment, so nothing in the code
+  # needs to know about it.
+  #
+  # Why it is here: unauthenticated CI gets rate-limited hard, and three builds
+  # across two sessions died on 429s. The failure is not cosmetic — when
+  # `model_info` cannot resolve a revision to a commit sha, `export_static_assets.py`
+  # REFUSES to publish rather than emit weight URLs pinned to a moving `main`
+  # (issue #5). That refusal is correct, so the fix belongs here rather than in a
+  # looser guard.
+  #
+  # The secret is optional by design: forks and PRs from forks get an empty string,
+  # which `huggingface_hub` treats as anonymous — exactly today's behaviour, with
+  # today's retries. Nothing breaks without it; it is only more likely to succeed.
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
 jobs:
   backend:
@@ -162,8 +177,19 @@ jobs:
         run: |
           sh ../../scripts/npm-ci-retry.sh
           npx playwright install --with-deps chromium
-      - name: e2e (both projects — chromium against the real backend, static against the built Pages bundle)
+      - name: e2e (all three projects — chromium against the real backend, static against the built Pages bundle, webgpu against a real adapter when the runner has one)
         working-directory: code/frontend
+        # KNOWN GAP, stated so a green tick is not read as more than it is: the
+        # `webgpu` project needs a WebGPU adapter, and GitHub-hosted runners have no
+        # GPU (the software adapter they can offer advertises no shader-f16). It
+        # therefore SKIPS here, printing why, instead of passing vacuously on the WASM
+        # rung — so THIS JOB DOES NOT VERIFY THE WEBGPU PATH. It is verified by running
+        # `npx playwright test --project webgpu` on a machine with a real GPU.
+        # What this job does always verify about that defect: the non-degeneracy
+        # invariant and the dtype ladder (tests/unit/logitsSanity.test.ts, in the
+        # frontend job) and a real session passing the same load-time gate on the WASM
+        # rung (tests/e2e/static.spec.ts). Do not "fix" the skip by deleting the
+        # project — the absence of this coverage is what let webgpu/q4f16 ship.
         run: npm run test:e2e
       - name: Upload traces on failure
         if: failure()

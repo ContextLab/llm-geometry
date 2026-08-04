@@ -5,6 +5,11 @@ import { defineConfig, devices } from "@playwright/test";
 //   static   — tests/e2e/static.spec.ts against the BUILT static site (`npm run
 //              preview:static` on :4173, Pages base path, NO Python backend), proving
 //              the GitHub Pages build stands alone.
+//   webgpu   — tests/e2e/webgpu.spec.ts against the same static site, but launched with
+//              --enable-unsafe-webgpu so Chromium exposes the machine's REAL adapter.
+//              Without that flag headless Chromium has no adapter at all, which is how
+//              a broken WebGPU dtype (q4f16) shipped: the suite only ever ran WASM.
+//              Skips loudly where there is no adapter (e.g. Linux CI runners).
 // Playwright's webServer list is global (not per-project), so the servers to boot are
 // chosen from the --project filter on the command line: `--project static` must not
 // require a backend venv, and `--project chromium` must not pay for a static build.
@@ -18,6 +23,21 @@ argv.forEach((a, i) => {
 });
 const wants = (name: string): boolean =>
   projectFilters.length === 0 || projectFilters.includes(name);
+
+// Flags that make headless Chromium hand back the machine's REAL GPU adapter instead
+// of SwiftShader (measured on macOS arm64 with the harness in the q4f16 investigation):
+//   --enable-unsafe-webgpu alone            → google/swiftshader, no shader-f16
+//   --enable-unsafe-webgpu --use-angle=metal → apple/metal-3, shader-f16  ✔
+// The ANGLE backend name is platform-specific, so it is chosen per platform; where no
+// hardware adapter turns up, tests/e2e/webgpu.spec.ts skips loudly rather than
+// quietly measuring software.
+const isMac: boolean =
+  (globalThis as { process?: { platform?: string } }).process?.platform === "darwin";
+const WEBGPU_ARGS = [
+  "--enable-unsafe-webgpu",
+  "--ignore-gpu-blocklist",
+  ...(isMac ? ["--use-angle=metal"] : ["--enable-features=Vulkan"]),
+];
 
 export default defineConfig({
   testDir: "tests/e2e",
@@ -36,7 +56,7 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"], baseURL: "http://localhost:5173" },
-      testIgnore: /static\.spec\.ts/,
+      testIgnore: /(static|webgpu)\.spec\.ts/,
     },
     {
       name: "static",
@@ -44,6 +64,19 @@ export default defineConfig({
       // static suite also exercises FR-205 (BASE_URL-relative assets + deep links).
       use: { ...devices["Desktop Chrome"], baseURL: "http://localhost:4173" },
       testMatch: /static\.spec\.ts/,
+    },
+    {
+      name: "webgpu",
+      use: {
+        ...devices["Desktop Chrome"],
+        baseURL: "http://localhost:4173",
+        // See WEBGPU_ARGS. The suite-wide --enable-unsafe-swiftshader is deliberately
+        // NOT inherited here: with it, `requestAdapter()` hands back
+        // google/swiftshader, and software WebGPU is exactly what this project must
+        // not measure.
+        launchOptions: { args: WEBGPU_ARGS },
+      },
+      testMatch: /webgpu\.spec\.ts/,
     },
   ],
   webServer: [
@@ -65,7 +98,7 @@ export default defineConfig({
           },
         ]
       : []),
-    ...(wants("static")
+    ...(wants("static") || wants("webgpu")
       ? [
           {
             // Builds the static bundle first (same flags as the Pages deploy), then

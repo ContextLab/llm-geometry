@@ -31,6 +31,11 @@ Python backend's trace/field/finetune outputs to ≤1e-5.
 
 - Generation/chat: LIVE via transformers.js v4 (`device: "webgpu"`, `dtype:
   "q4f16"`; WASM+q8 fallback), per-token probabilities from real logits.
+  **AMENDED (2026-08-04, defect fix): `q4f16` is never requested. It builds a session
+  on WebGPU and returns logits identical at every position — measured on three of the
+  four curated models. The ladder is `webgpu/q8 → wasm/q8`, and every session must pass
+  a load-time non-degeneracy check (`staticClient/logitsSanity.ts`) before its numbers
+  are shown. Do not reinstate an fp16-activation dtype from this sentence.**
 - Tokenization strip: LIVE via transformers.js AutoTokenizer (vendored
   tokenizer.json, no model download).
 - Weight inspector: LIVE exact windows via safetensors HTTP **Range** reads from

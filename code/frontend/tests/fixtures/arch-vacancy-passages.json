@@ -1,0 +1,50 @@
+{
+  "note": "Digests of the default passage set of contract §8.3a. Written by scripts/export_arch_vacancy_golden.py from the real corpus; asserted against the browser's own cut in tests/unit/archVacancy.test.ts.",
+  "corpus_sha256": "d514f0fd2cd40967eb6cf35b140a6cddc11200126e07d76603fae3f88bf1e0ab",
+  "count": 6,
+  "words_per_passage": 250,
+  "passages": [
+    {
+      "index": 0,
+      "sha256": "31e1b77674aa4b0b3c599ddbfbfb33bb437716d2147cec7455d36fb9431c0452",
+      "n_words": 252,
+      "n_chars": 1396,
+      "head": "\"She is lamed, leaping over a stile.\" \"Alack! and I must ke"
+    },
+    {
+      "index": 1,
+      "sha256": "74d2d5a416328bb587c6767bdb5152f28b0d2e7f75414f33b9ff71138758f360",
+      "n_words": 255,
+      "n_chars": 1413,
+      "head": "ABOUT THE BUSH About the bush, Willie, About the beehiv"
+    },
+    {
+      "index": 2,
+      "sha256": "b4dc966fca010cc20a3a0473159206452252e2766d7538bb9b5422025ed119b6",
+      "n_words": 251,
+      "n_chars": 1285,
+      "head": "In a velvet coat, He kissed a maid And gave her a groat. The"
+    },
+    {
+      "index": 3,
+      "sha256": "3f0bb57d5f59ef4a2f964c89287ef7cf1cd9d748416d8b7389c7bd57bf947be5",
+      "n_words": 256,
+      "n_chars": 1370,
+      "head": "That kissed the maiden all forlorn, That milked the cow with"
+    },
+    {
+      "index": 4,
+      "sha256": "56237a4fd99b8c3cfc8ca3a8833e52929a21c544da94b89f75a643d2991eb114",
+      "n_words": 254,
+      "n_chars": 1410,
+      "head": "Saturday's child works hard for its living, But the child th"
+    },
+    {
+      "index": 5,
+      "sha256": "0f12a7366b1baa64d4bce99978c273200b98a7395a0e1238ef32b3c98f55af25",
+      "n_words": 253,
+      "n_chars": 1433,
+      "head": "And ne'er went up again. PETER PIPER Peter Piper pick"
+    }
+  ]
+}

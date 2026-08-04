@@ -1,4 +1,4 @@
-# API Contract: Lexicon Lab — `/api/lex/*` (feature 006)
+# API Contract: Lexicon Lab — `/api/lex/*` (features 006, 007)
 
 **Additive.** This file adds a new namespace; it does **not** change anything in the
 frozen feature-002 contract (`specs/002-interactive-model-explorer/contracts/api.md`).
@@ -25,8 +25,17 @@ byte-identical weights but different word lists are different models and get dif
 tokens: the vocabulary is this tab's independent variable, and a shared token would let
 a cache hit serve the wrong labels.
 
+**Feature 007 additions**, marked as such where they appear below:
+`POST /api/lex/vacancy` (new path) and an **optional** `vacancy` object on
+`POST /api/lex/train` (absent ⇒ the endpoint is byte for byte what it was). Their
+semantics are fixed by `specs/007-vacancy-transform-field/architecture.md`, which both
+stacks implement; this file specifies only what goes on the wire.
+
 Implementation: `code/backend/src/llm_geometry/api/routes_lex.py`.
 Contract tests: `code/backend/tests/contract/test_api_lex.py`.
+The static build serves the same surface from
+`code/frontend/src/lib/staticClient/lex.ts` — the Lexicon Lab computes in the browser
+in **both** modes, so nothing in this namespace is refused or approximated there.
 
 ---
 
@@ -140,6 +149,105 @@ Errors: `400 InvalidParamError` — `steps` outside `1..MAX_STEPS`, `lr <= 0`,
 a corpus with no word tokens, or a corpus shorter than one full context window.
 `404 NotFoundError` — unknown `base`. `500 TrainingFailedError` (via the job error
 event) — a real training failure, surfaced verbatim, never replaced by a partial result.
+
+### Feature 007: the optional `vacancy` object
+
+← `"vacancy": { "p", "seed", "consistent", "match_prosody", "reveal_after", "keep" }`
+
+**Optional and additive: absent, everything above is unchanged, byte for byte.**
+Present, the resolved corpus is vacated (`POST /api/lex/vacancy` below defines the
+parameters) *before* training, and the model is trained under the vocabulary
+`specs/007-vacancy-transform-field/architecture.md` §7.2 assigns it — **mapped** when
+`consistent` and `reveal_after = 0`, **rebuilt** from the vacated corpus otherwise.
+
+The transform runs server-side rather than in the client because `/api/lex/vacancy`
+deliberately returns an excerpt: sending the whole rewritten corpus back just to train
+on it would move ~86 kB per request in each direction.
+
+With `base` set the base model's vocabulary is used unchanged, as it always is; only
+the text is vacated.
+
+Under the mapped condition this is a **pure relabelling**: the token id stream is
+element-for-element identical, so `first_loss`, `final_loss` and `val_loss` are
+*bit-identical* to the same run on the English corpus. That is the tiny arm's result
+(architecture.md §7.3), not a caveat about it. The `model_token` still differs,
+because the vocabulary is part of it.
+
+The transform's parameters are in the cache key even though `(corpus, vocabulary)`
+already determines the run — so that a knob added to the transform later cannot land
+on an entry made before it existed.
+
+Errors: `400 InvalidParamError` — `vacancy` not an object, or any parameter outside
+the ranges given for `/api/lex/vacancy`.
+
+## POST /api/lex/vacancy
+
+**Feature 007.** The vacancy transform applied to a corpus, with the statistics of
+`specs/007-vacancy-transform-field/architecture.md` §10. Additive: it adds a path and
+changes nothing that existed. Same corpus-source and budget rules as
+`/api/lex/coverage`, because the interesting question about a vacated corpus is always
+"under which vocabulary?".
+
+← `{ "source", "budget", "size",                                   // as /coverage
+     "text" | "hf_dataset" (+ "hf_split", "max_samples"),          // as /coverage
+     "p": <float ∈ [0,1] = 0>, "seed": <int = 0>,
+     "consistent": <bool = true>, "match_prosody": <bool = true>,
+     "reveal_after": <int ≥ 0 = 0>, "keep": [<str>, …],
+     "preview_chars": <int ∈ 0..20000 = 2000> }`
+
+All fields optional. The five transform knobs are architecture.md §7.1's, in this
+API's `snake_case`; `keep` must be a **list**, since a bare string would be read
+letter by letter and quietly protect six single letters.
+
+→ `200 { "p", "seed", "consistent", "match_prosody", "reveal_after", "keep": [<str>, …],
+         "vocabulary_rule": "mapped" | "rebuilt",
+         "words": [<str>, …],
+         "budget": { "source", "budget", "size", "rows", "coverage": {…} },
+         "corpus": { "n_tokens", "n_distinct", "n_lines", "n_chars" },
+         "vacancy_stats": { …§10's 23 fields, camelCase… },
+         "bijective": <bool>, "remint_rounds": <int>,
+         "preview": <str>, "original_preview": <str>,
+         "preview_chars": <int>, "truncated": <bool>,
+         "vacated_chars": <int>, "vacated_sha256": "<64 hex>",
+         "original_chars": <int>, "original_sha256": "<64 hex>" }`
+
+**An excerpt and a digest, never the whole vacated corpus.** The shipped corpus is
+~86 kB of body text and the panel re-runs this on every tick of the `p` slider, so
+returning it whole would put megabytes on the wire across one sweep to show a reader a
+screenful. Nothing needs it whole: the panel shows an excerpt (the source's own figure
+is its first 400 characters), and a caller that wants to *train* on the vacated corpus
+sends the same parameters to `/api/lex/train`, which vacates in place. What an excerpt
+cannot do by itself is prove which text it came from, so `vacated_sha256` covers all of
+it in 64 characters — and that digest is the single value the static build's
+in-browser transform is checked against.
+
+`vacancy_stats` carries §10's field names **verbatim**, camelCase inside this API's
+snake_case envelope on purpose: they are a cross-language contract between
+`llm_geometry/lex/vacancy.py` and `lexEngine/vacancy.ts`, not this API's naming. An
+unprefixed `types*` is forbidden there; every count names its scope (`domainTypes*` vs
+`corpusTypes*`). `bijective` and `remint_rounds` also appear at the top level, because
+injectivity is the guarantee the mapped vocabulary rests on and a caller checking it
+should not have to reach into a statistics block.
+
+`vocabulary_rule` says which of §7.2's two rules produced `words`, and a client must
+not have to infer it from the parameters: `"mapped"` is the only condition under which
+the ids are the English ids, and that is the difference between an invariance result
+and a coverage collapse.
+
+Every number returned is measured on the corpus in the request. The source document's
+own prosody figures are its numbers on a corpus we do not have and are transcribed
+nowhere.
+
+Errors: `400 InvalidParamError` — `p` outside `[0, 1]` or not a number,
+`reveal_after < 0`, `preview_chars` outside `0..20000`, `keep` not a list of strings,
+`size` with `source="dolch"`, an unknown budget, a corpus with no word tokens, or both
+`text` and `hf_dataset`.
+
+Parity: `code/frontend/tests/fixtures/vacancy-api-golden.json` is a transcript of this
+route (`python scripts/export_vacancy_api_golden.py`, real app, real corpus, no mocks).
+`test_api_lex.py` asserts the live route still returns it and
+`tests/unit/staticVacancy.test.ts` asserts the browser's in-page implementation
+reproduces it field for field, so neither stack can drift alone.
 
 ## GET /api/lex/spectrum
 

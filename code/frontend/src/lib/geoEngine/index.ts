@@ -58,7 +58,27 @@ export interface ExportedWeightSet {
   weights: Record<string, string>; // tensor name -> base64 of float32-LE bytes
   sources: Record<string, string>;
   setSource: string;
+  /**
+   * The word list this set's token ids mean, for the sets that HAVE one of their own
+   * (`scratch`, `imported`). Absent for `edited` / `finetuned` sets, which keep the
+   * canonical vocabulary — for those, absence is the correct answer, not a gap.
+   *
+   * Omitting it for a set that owns a vocabulary is not a lossy shortcut, it is a
+   * corruption: the engine would fall back to the canonical tokenizer and `exportBundle`
+   * would then write a file pairing YOUR weights with Alice in Wonderland's words, under
+   * a `vocab_sha256` computed over that wrong list — internally consistent, so no
+   * integrity check could catch it. That is precisely the failure the three digests
+   * exist to prevent, committed by the writer. `restorePersistedSets` therefore drops a
+   * payload that lacks a vocabulary it needs rather than restoring it half-right.
+   */
+  vocabWords?: string[];
 }
+
+/**
+ * Weight-set kinds whose token ids mean words of their OWN, not the canonical model's.
+ * A set of this kind is only usable with its vocabulary beside it.
+ */
+const SET_SOURCES_WITH_OWN_VOCAB: ReadonlySet<string> = new Set(["scratch", "imported"]);
 
 function b64FromF32(arr: Float32Array): string {
   const bytes = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
@@ -318,10 +338,15 @@ export class GeoEngine {
     if (!ws) throw notFound(`weights_token '${token}' is unknown (nothing to export)`);
     const weights: Record<string, string> = {};
     for (const [name, arr] of Object.entries(ws)) weights[name] = b64FromF32(arr);
+    const vocab = this.vocabs.get(token);
     return {
       weights,
       sources: { ...(this.sourceMaps.get(token) ?? {}) },
       setSource: this.setSources.get(token) ?? "edited",
+      // The word list travels WITH the weights, exactly as the backend's
+      // `save_weight_set(..., vocab_json=…)` stores it beside them: a scratch or
+      // imported model's ids mean its own words, so weights alone do not describe it.
+      ...(vocab ? { vocabWords: [...vocab.words] } : {}),
     };
   }
 
@@ -334,9 +359,20 @@ export class GeoEngine {
       return false;
     }
     if (weightsToken(ws) !== token) return false; // hash mismatch — refuse
+    const words = payload.vocabWords;
+    const ownsVocab = SET_SOURCES_WITH_OWN_VOCAB.has(payload.setSource);
+    if (words !== undefined && (!Array.isArray(words) || words.some((w) => typeof w !== "string"))) {
+      return false;
+    }
+    // A set whose ids mean its own words is not restorable without them. Restoring the
+    // weights alone would leave `tokenizerFor` falling back to the canonical vocabulary
+    // and every later read — the sphere's labels, a trace, and above all a SAVED model
+    // file — would silently describe the wrong words. Refuse, and let the caller drop it.
+    if (ownsVocab && words === undefined) return false;
     this.weightSets.set(token, ws);
     this.sourceMaps.set(token, { ...payload.sources });
     this.setSources.set(token, payload.setSource);
+    if (words !== undefined) this.vocabs.set(token, new GeoTokenizer(words));
     return true;
   }
 
@@ -448,6 +484,19 @@ export class GeoEngine {
   exportBundle(token?: string | null): GeoModelBundle {
     const resolved = token && token !== "learned" ? token : this.canonicalToken;
     const ws = this.resolveWeightSet(resolved);
+    // `tokenizerFor` falls back to the canonical vocabulary, which is RIGHT for an
+    // edited or fine-tuned set (those keep the canonical words) and CATASTROPHIC for a
+    // scratch or imported one: the file would carry your weights under Alice in
+    // Wonderland's word list, with a `vocab_sha256` computed over that list, so no
+    // reader could ever detect it. Writing such a file is refused.
+    if (SET_SOURCES_WITH_OWN_VOCAB.has(this.setSources.get(resolved) ?? "") && !this.vocabs.has(resolved)) {
+      throw notFound(
+        `weights_token '${resolved}' has no vocabulary in this session, and its ids mean ` +
+          "its own words rather than the shipped model's — saving it now would pair these " +
+          "weights with the wrong word list. Load the model file again (or retrain) so its " +
+          "vocabulary is present.",
+      );
+    }
     const vocabJson = JSON.stringify({
       format: "geo-tokenizer-v1",
       specials: { [UNK_TOKEN]: UNK_ID, [EOS_TOKEN]: EOS_ID, [PAD_TOKEN]: PAD_ID },
