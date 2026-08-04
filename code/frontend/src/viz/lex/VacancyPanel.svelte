@@ -184,7 +184,42 @@
   // ---- the corpus view (ui.md §1.2 — the doc's Figure 5, live) -------------------------
 
   const WINDOW_LINES = 40;
+
+  /**
+   * The shipped corpus opens with 618 token-producing lines of front matter — a title page,
+   * a list of rhymes, and an index of first lines — before `LITTLE BO-PEEP` starts the verse
+   * at line 619. Opening the reader on a table of contents makes the transform look like it
+   * is rewriting an index, which is the least interesting thing it does.
+   *
+   * Pinned rather than detected, deliberately. Every general rule tried here picks the wrong
+   * boundary: the index of first lines has verse-length lines (median 6 tokens), so a
+   * line-length heuristic lands on line 320, still inside the front matter. Separating an
+   * index from a stanza needs to know the book. The corpus is committed and digest-verified,
+   * so a constant is the honest way to say that, and `vacancy.spec.ts` asserts the default
+   * page really opens on Bo-Peep.
+   *
+   * It applies ONLY to the shipped corpus. Pasted text and HuggingFace datasets have no front
+   * matter, so they open at line 1.
+   */
+  const SHIPPED_BODY_LINE = 619;
+  const SHIPPED_LINE_COUNT = 3071;
+
   let windowIndex = $state(0);
+  /** Once the reader pages, their choice wins over `defaultWindow`. */
+  let userPaged = $state(false);
+
+  /**
+   * Page by `delta`, reading the CURRENT window before taking ownership of it.
+   *
+   * The order matters and is not obvious: setting `userPaged` first makes `win` fall straight
+   * back to `windowIndex`, which is still 0 while the default is in force, so the first click
+   * would jump to line 1 instead of stepping. Capture, then assign.
+   */
+  function page(delta: number): void {
+    const from = win;
+    windowIndex = from + delta;
+    userPaged = true;
+  }
 
   type Seg = { text: string; cls: "gap" | "kept" | "open" | "minted" };
 
@@ -235,8 +270,18 @@
     return out;
   });
   const nWindows = $derived(Math.max(1, Math.ceil(wordLines.length / WINDOW_LINES)));
+  /**
+   * Where the view opens. The shipped corpus is recognised by its line count — it is
+   * digest-verified upstream, so this cannot be some other book of the same length — and
+   * opens on the verse; anything else opens at line 1.
+   */
+  const defaultWindow = $derived(
+    wordLines.length === SHIPPED_LINE_COUNT ? Math.floor(SHIPPED_BODY_LINE / WINDOW_LINES) : 0,
+  );
   /** Clamped rather than reset by an effect: a shorter corpus must not strand the view. */
-  const win = $derived(Math.min(Math.max(0, windowIndex), nWindows - 1));
+  const win = $derived(
+    Math.min(Math.max(0, userPaged ? windowIndex : defaultWindow), nWindows - 1),
+  );
   const shown = $derived.by(() => {
     const start = win * WINDOW_LINES;
     return wordLines.slice(start, start + WINDOW_LINES).map((i) => ({
@@ -595,7 +640,7 @@
           class="page"
           data-testid="lex-vacancy-prev"
           disabled={win === 0}
-          onclick={() => (windowIndex = win - 1)}>◀</button
+          onclick={() => page(-1)}>◀</button
         >
         <span class="range" data-testid="lex-vacancy-window">
           token-producing lines {n(win * WINDOW_LINES + 1)}–{n(
@@ -606,7 +651,7 @@
           class="page"
           data-testid="lex-vacancy-next"
           disabled={win >= nWindows - 1}
-          onclick={() => (windowIndex = win + 1)}>▶</button
+          onclick={() => page(1)}>▶</button
         >
       </div>
     </div>

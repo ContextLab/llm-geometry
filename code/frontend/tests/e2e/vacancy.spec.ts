@@ -305,3 +305,28 @@ test("no horizontal page overflow at 390px with the panel present", async ({ pag
   );
   expect(overflow).toBeLessThanOrEqual(0);
 });
+
+test("the corpus view opens on the verse, not on the book's table of contents", async ({
+  page,
+}) => {
+  const errors = watchErrors(page);
+
+  // The shipped corpus carries 618 token-producing lines of front matter -- a title page, a
+  // list of rhymes, and an index of first lines -- before LITTLE BO-PEEP starts the verse at
+  // line 619. Landing there makes the transform look like it rewrites an index, which is the
+  // least interesting thing it does. No general rule separates the two honestly: the index of
+  // first lines has verse-length lines, so a line-length heuristic stops inside the front
+  // matter. The panel therefore pins the boundary, and this is the assertion that it is right.
+  const windowLabel = page.getByTestId("lex-vacancy-window");
+  await expect(windowLabel).toContainText("601");
+
+  // At p = 0 the corpus is untransformed, so the real words must be on screen.
+  const corpus = page.getByTestId("lex-vacancy-corpus");
+  await expect(corpus).toContainText("Bo-Peep");
+
+  // Paging back must still work, and must reach the front matter it deliberately skipped.
+  await page.getByTestId("lex-vacancy-prev").click();
+  await expect(windowLabel).toContainText("561");
+
+  expect(errors, `console errors: ${errors.join(" | ")}`).toEqual([]);
+});
