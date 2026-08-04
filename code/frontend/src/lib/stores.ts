@@ -191,6 +191,21 @@ if (typeof window !== "undefined") {
     } finally {
       applyingFromUrl = false;
     }
+    // A fragment that RESOLVED but was not spelled canonically is corrected here too, not
+    // only on a cold load. `#Info` typed into the address bar of an open page is a
+    // same-document navigation: the module-level correction above ran once, at load, and
+    // never sees it, while the store below is suppressed by `applyingFromUrl` so it does
+    // not push a duplicate entry for a navigation the browser already made. Between the
+    // two, the address bar kept saying `#Info` (e2e caught this; the jsdom suite did not,
+    // because it exercises the cold path).
+    //
+    // replaceState, not push: this corrects the entry the reader is standing on rather
+    // than adding one, so Back/Forward still step through the tabs actually visited.
+    // Deliberately narrower than the cold-load rule — an UNRESOLVED fragment returned
+    // above, untouched, because rewriting it would also change what a reload lands on.
+    if (raw !== "" && raw !== next) {
+      window.history.replaceState(null, "", `#${next}`);
+    }
   };
   window.addEventListener("popstate", syncFromUrl);
   window.addEventListener("hashchange", syncFromUrl);

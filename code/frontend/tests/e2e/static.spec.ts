@@ -388,17 +388,28 @@ test("the vacancy panel reports only what q8 has a measured bound for", async ({
   const english = page.getByTestId("arch-vac-row-english");
   await expect(english).toContainText("—");
 
-  // Reported: the two pooled differences, each with the MEASURED quantization ±.
+  // Reported: the two pooled differences, each carrying the quantization ± as well as the
+  // sampling one. Two separate claims are pinned here, because the panel has now been wrong
+  // in BOTH directions:
+  //   (a) the term must be PRESENT — it rendered `0.879 ± 0.074` on the live site and
+  //       dropped the ±0.2 the same response carried, stating an interval that excludes the
+  //       float32 value (red team arch F4 / FR-720a); and
+  //   (b) it must not call itself "measured" — the swap rewrite invalidated the texts that
+  //       bound was measured on, and the q8 arm has not been re-measured since, so
+  //       architecture.md §8.3a forbids that word here (verify round 2, item 1).
+  // Asserting the substring alone would let (b) regress silently, which is how (a) shipped.
+  const QUANT = /±\s*0\.2 \(quantization, retained bound — not re-measured since the swap rewrite\)/;
   const wrong = page.getByTestId("arch-vac-wrong_content");
   await expect(wrong).toContainText(/\d\.\d{3}/);
-  await expect(page.getByTestId("arch-vac-wrong_content-err")).toContainText("0.2 (quantization, measured)");
-  // …INCLUDING the secondary row. It rendered `0.879 ± 0.074` on the live site and
-  // dropped the ±0.2 the same response carried, stating an interval that excludes the
-  // float32 value 0.9892 (red team F4 / FR-720a).
-  await expect(page.getByTestId("arch-vac-total-err")).toContainText("(sampling)");
-  await expect(page.getByTestId("arch-vac-total-err")).toContainText(
-    "0.2 (quantization, measured)",
-  );
+  await expect(page.getByTestId("arch-vac-wrong_content-err")).toContainText(QUANT);
+  await expect(page.getByTestId("arch-vac-total-err")).toContainText("(sampling,");
+  await expect(page.getByTestId("arch-vac-total-err")).toContainText(QUANT);
+  // The word the contract forbids, on every surface that carries the bound. The lookbehind
+  // is what makes this assertion do any work: "retained bound — not re-measured" contains
+  // the letters, so a plain /measured/ would fail on the CORRECT wording.
+  for (const id of ["arch-vac-wrong_content-err", "arch-vac-total-err"]) {
+    await expect(page.getByTestId(id)).not.toContainText(/(?<!re-)measured/);
+  }
 
   // The residual caveat is stated even where the number is refused: a reader must not
   // have to earn the caveat by being shown a value.
