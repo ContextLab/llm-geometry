@@ -17,6 +17,11 @@ declare module "node:path" {
   const path: {
     resolve(...parts: string[]): string;
     join(...parts: string[]): string;
+    // Consumed by tests/unit/staticTestUtils.ts and tests/e2e/static.spec.ts, both of
+    // which resolve a directory from `import.meta.url`. Declared here because this file
+    // is the project's only description of node:path — the tsconfig pins
+    // `types: ["vitest/globals"]`, so @types/node is deliberately absent.
+    dirname(p: string): string;
   };
   export default path;
 }
