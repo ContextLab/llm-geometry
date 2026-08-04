@@ -198,6 +198,24 @@ Note for anyone extending this: the pretrained arm's measured deltas are deliber
 in the Info tab. They depend on model, passage set and dtype, and the only honest pin would be a
 real Qwen run per CI job. The panel reports them from the run the reader triggers.
 
+## CI: HuggingFace rate limiting, third occurrence in two sessions
+
+Run 30929570326 failed in `Export static assets`. **Not our code.** The Hub returned 429 through
+all five retries on `get_safetensors_metadata` and `model_info`, so the export refused:
+
+> `gpt2: revision did not resolve to a commit sha (got 'main'). The HuggingFace API is probably
+> rate-limiting or down — rerun the export rather than publishing unpinned weight URLs.`
+
+That refusal is correct — it is the guard behind issue #5, and publishing a build whose weight
+URLs point at `main` rather than a pinned sha is exactly what it exists to prevent. Re-running
+succeeds, but this is now the third occurrence, so the two durable fixes are worth doing:
+
+1. **An `HF_TOKEN` repository secret.** Needs the repo owner; CI is unauthenticated today and is
+   rate-limited hard. This is the robust fix.
+2. **Pin the curated models to explicit commit shas** (issue #5). Removes the `main → sha`
+   resolution from the build path entirely, so a `model_info` 429 cannot block a build. Does not
+   need the owner, and shrinks the API surface even once a token exists.
+
 ## Status
 
 ### Contract defects found by BUILDING it (13, not one of which I caught by re-reading)
