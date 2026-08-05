@@ -109,6 +109,7 @@ import { sha256Hex, utf8Bytes } from "../geoEngine/hash";
 import type { StaticAssets } from "./assets";
 import { computeError, invalidParamError, notFoundError, staticModeError, toApiError } from "./errors";
 import { fetchDatasetText } from "./hfDatasets";
+import { asBool, asFloat, asInt, show } from "./params";
 import type { LocalJobRegistry, ProgressFn } from "./jobs";
 
 // --- contract payload shapes (specs/006-lexicon-lab-tiny/contracts/api-lex.md) ---------
@@ -780,79 +781,8 @@ function decodeF32(data: string, shape: number[]): Float32Array {
 }
 
 // --- parameter coercion (the backend's error envelope, verbatim) ------------------------
-
-/**
- * How a refused value is quoted back. `JSON.stringify` is not usable on its own here:
- * it renders `NaN`, `Infinity` and `-Infinity` all as the string `null`, so the three
- * numbers hardest to notice would be reported as the one value nobody sent.
- */
-function show(value: unknown): string {
-  if (typeof value === "number") return String(value);
-  if (typeof value === "bigint") return `${value}n`;
-  if (value === undefined) return "undefined";
-  try {
-    return JSON.stringify(value) ?? String(value);
-  } catch {
-    return String(value);
-  }
-}
-
-/**
- * A JSON integer, or a typed refusal — never a coercion. Mirrors `routes_lex._as_int`.
- *
- * `Number(value)` was the whole rule, and `Number` is the widest parser in the language:
- * it reads hexadecimal (`"0x10"` → 16), binary and octal literals (`"0b101"`, `"0o17"`),
- * exponent notation (`"1e3"` → 1000), a leading `+`, surrounding whitespace (`" 7 "`),
- * the empty string (`""` → 0), `null` (→ 0), `true` (→ 1), `[]` (→ 0) and `[7]` (→ 7).
- * Every one of those reached the engine as a number that is NOT the text that was sent,
- * and `0x10` is the sharpest: a field documented as "an integer", given `0x10`, ran with
- * 16. Python's `_as_int` answers all of them with a typed 400, so the static build — the
- * one the public site runs — was the lenient half of a two-stack disagreement.
- *
- * The rule is therefore the backend's: only a JSON number is a number. `7.0` IS accepted
- * as 7 (JSON cannot express the int/float distinction and Python reads it as 7 too); a
- * fractional or non-finite one is refused rather than truncated. An explicit `null` is
- * refused for the same reason it is refused in Python — `undefined` means "the key was
- * not sent", `null` means "the key was sent, carrying nothing", and only the first can
- * honestly take a default.
- */
-function asInt(value: unknown, name: string, fallback: number): number {
-  if (value === undefined) return fallback;
-  if (typeof value !== "number") {
-    throw invalidParamError(`${name} must be an integer, got ${show(value)}`);
-  }
-  if (!Number.isFinite(value)) {
-    throw invalidParamError(`${name} must be a finite integer, got ${show(value)}`);
-  }
-  if (!Number.isInteger(value)) {
-    throw invalidParamError(
-      `${name} must be an integer, got ${show(value)} — it is not rounded or truncated, ` +
-        "because a number that is not the number you asked for is worse than a refusal",
-    );
-  }
-  return value;
-}
-
-/** A finite JSON number, or a typed refusal. `asInt`'s rule, one type down. */
-function asFloat(value: unknown, name: string, fallback: number): number {
-  if (value === undefined) return fallback;
-  if (typeof value !== "number") {
-    throw invalidParamError(`${name} must be a number, got ${show(value)}`);
-  }
-  if (!Number.isFinite(value)) {
-    throw invalidParamError(`${name} must be a finite number, got ${show(value)}`);
-  }
-  return value;
-}
-
-function asBool(value: unknown, name: string, fallback: boolean): boolean {
-  if (value === undefined) return fallback;
-  if (typeof value === "boolean") return value;
-  if (typeof value === "string" && ["true", "false", "1", "0"].includes(value.toLowerCase())) {
-    return value.toLowerCase() === "true" || value === "1";
-  }
-  throw invalidParamError(`${name} must be a boolean, got ${show(value)}`);
-}
+// `asInt` / `asFloat` / `asBool` / `show` live in `./params` so the Geometry Lab's static
+// client holds to the identical rule — it held to none, and truncated `steps: 7.5` to 7.
 
 function oneOf(value: unknown, choices: readonly number[], name: string, fallback: number): number {
   const n = asInt(value, name, fallback);

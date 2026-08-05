@@ -509,3 +509,215 @@ describe("an edit's seed is the seed you asked for [round 5, item 6]", () => {
     expect(edit(1)()).toHaveProperty("weights_token");
   });
 });
+
+describe("a model file written before the identity change opens [round 5, F10]", () => {
+  let engine: GeoEngine;
+  let scratchToken: string;
+
+  beforeAll(() => {
+    engine = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    scratchToken = engine.registerScratchModel(scratchRun.weights, scratchWords);
+  });
+
+  /**
+   * The model FILE the pre-identity build wrote: format version 2, and a `weights_token`
+   * over the WEIGHTS ALONE, beside a word list of the model's own.
+   */
+  function preIdentityFile(current: ReturnType<GeoEngine["exportBundle"]>) {
+    return { ...current, version: 2, weights_token: weightsToken(scratchRun.weights, null) };
+  }
+
+  it("is read and re-identified instead of being called corrupt", () => {
+    // `BUNDLE_VERSION` stayed at 2 when `weightsToken` started hashing the word list, so
+    // the field's meaning changed under a version that promised it had not. Every file the
+    // previous build saved for a model with its own words then failed the re-hash and was
+    // refused as "this model file is corrupt" — an accusation against an intact file, and
+    // against the exact file the cache's schema-bump message tells the user to open.
+    const file = preIdentityFile(engine.exportBundle(scratchToken));
+    expect(file.weights_token).not.toBe(scratchToken);
+
+    const fresh = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    const { weights_token: token } = fresh.importBundle(file);
+
+    expect(token).toBe(weightsToken(scratchRun.weights, canonicalVocabJson(scratchWords)));
+    expect(fresh.tokenizerFor(token).words).toEqual(scratchWords);
+    // Re-saved, it is a current-format file.
+    expect(fresh.exportBundle(token).version).toBe(3);
+    expect(fresh.exportBundle(token).weights_token).toBe(token);
+  });
+
+  it("is still checked against the hash its own format put in it", () => {
+    const file = preIdentityFile(engine.exportBundle(scratchToken));
+    const tampered = { ...file, weights_token: "0".repeat(32) };
+    expect(() => GeoEngine.fromAssets(src.checkpoint, src.vocab).importBundle(tampered)).toThrowError(
+      /corrupt/,
+    );
+  });
+
+  it("names both readable versions when it refuses one it cannot read", () => {
+    const file = engine.exportBundle(scratchToken);
+    for (const version of [1, 4]) {
+      const wrong = { ...file, version };
+      expect(() =>
+        GeoEngine.fromAssets(src.checkpoint, src.vocab).importBundle(wrong),
+      ).toThrowError(/is not supported \(this build reads versions 2 and 3\)/);
+    }
+  });
+
+  it("holds a file that DECLARES version 3 to version 3", () => {
+    // Weights + an own word list + a weights-only token is what a version-2 writer
+    // produced AND what swapping a version-3 file's word list produces. Indistinguishable,
+    // so the declared version decides, and version 3 means the current rule.
+    const mislabelled = { ...preIdentityFile(engine.exportBundle(scratchToken)), version: 3 };
+    expect(() =>
+      GeoEngine.fromAssets(src.checkpoint, src.vocab).importBundle(mislabelled),
+    ).toThrowError(/corrupt/);
+  });
+});
+
+describe("a model that claims a word list it has not got is refused by readers too [round 5, F1]", () => {
+  /**
+   * `tokenizerFor` returned the SHIPPED tokenizer for a set whose `ownsVocab` is set and
+   * whose word list is gone — the state `exportBundle` refuses, calling the substitution
+   * catastrophic. So `tokenize`, `trace` and `vectorField` answered under Alice in
+   * Wonderland's words while the writer refused the identical state, and because the
+   * answer really was the canonical tokenizer, `GeometryLab`'s verification probe agreed
+   * with it and reported the vocabulary VERIFIED.
+   */
+  function engineWithAmnesia(): { engine: GeoEngine; token: string } {
+    const engine = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    const token = engine.registerScratchModel(scratchRun.weights, scratchWords);
+    const vocabs = (engine as unknown as { vocabs: Map<string, unknown> }).vocabs;
+    expect(vocabs.delete(token)).toBe(true);
+    return { engine, token };
+  }
+
+  it("refuses to READ it, with the sentence the writer refuses it by", () => {
+    const { engine, token } = engineWithAmnesia();
+    expect(() => engine.tokenizerFor(token)).toThrowError(
+      /its ids mean its own words rather than the shipped model's/,
+    );
+    expect(() => engine.tokenize("alice said the queen", token)).toThrowError(
+      /its ids mean its own words rather than the shipped model's/,
+    );
+    expect(() => engine.trace("alice said", token)).toThrowError(
+      /its ids mean its own words rather than the shipped model's/,
+    );
+  });
+
+  it("gives the reader and the writer the same error type", () => {
+    // The frozen contract: "Where a model's vocabulary cannot be recovered, this endpoint
+    // returns 400 InvalidParamError rather than substituting the shipped one."
+    const { engine, token } = engineWithAmnesia();
+    const types = [
+      (() => {
+        try {
+          engine.exportBundle(token);
+        } catch (e) {
+          return (e as { type: string }).type;
+        }
+      })(),
+      (() => {
+        try {
+          engine.tokenizerFor(token);
+        } catch (e) {
+          return (e as { type: string }).type;
+        }
+      })(),
+    ];
+    expect(types).toEqual(["InvalidParamError", "InvalidParamError"]);
+  });
+});
+
+describe("the unk bound is a bound, and it is AT 90 % [round 5, F4]", () => {
+  /**
+   * `unkRate >= FINETUNE_MAX_UNK_RATE` in `geoEngine.finetune` and in
+   * `staticClient/geo.ts` was `>` until 0d23123, so a stream that is EXACTLY 90 % <unk>
+   * was accepted and announced as "loss 3.06 → 2.57" one token below a refusal that
+   * printed the same "(90%)". Reverting BOTH TypeScript sites to `>` broke no test in the
+   * whole 815-case suite while the identical Python mutation was caught, so the two
+   * stacks' agreement rested on nothing. This is the case that kills it.
+   */
+  const KNOWN = "the"; // in the shipped Alice vocabulary
+  const UNKNOWN = "zzqxvv"; // in no vocabulary
+
+  /** A stream of exactly `nUnk + nKnown` tokens, `nUnk` of them unknown. */
+  const stream = (nUnk: number, nKnown: number): string =>
+    [...Array(nUnk).fill(UNKNOWN), ...Array(nKnown).fill(KNOWN)].join(" ");
+
+  it("refuses a stream that sits exactly on the limit", () => {
+    const engine = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    const text = stream(90, 10);
+    expect(engine.tokenizerFor("learned").encode(text, { truncate: false }).n_unk / 100).toBe(
+      FINETUNE_MAX_UNK_RATE,
+    );
+    expect(() => engine.finetune({ text, steps: 1 })).toThrowError(/the limit is 90%/);
+  });
+
+  it("still accepts one just below it", () => {
+    // The other direction: a bound that refuses everything would pass the case above.
+    const engine = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    const ft = engine.finetune({ text: stream(89, 11), steps: 1 });
+    expect(ft.unk_rate).toBeCloseTo(0.89, 12);
+    expect(ft.weights_token).toMatch(/^[0-9a-f]{32}$/);
+  });
+});
+
+describe("the engine's fine-tune parameters are the parameters you asked for [round 5, F3]", () => {
+  const engine = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+  const text = "alice was beginning to get very tired of sitting by her sister";
+
+  it("refuses a fractional step count instead of truncating it", () => {
+    // `Math.trunc(body.steps ?? …)` made 7.5 into 7 and reported a 7-step run as though 7
+    // were what was asked for; `POST /api/geo/finetune` answers the same body with a typed
+    // 400 saying it is "not rounded or truncated". This is the reference implementation
+    // the backend is golden-tested against, so it may not disagree.
+    expect(() => engine.finetune({ text, steps: 7.5 })).toThrowError(/not rounded or truncated/);
+    expect(() => engine.finetune({ text, steps: "7" as never })).toThrowError(
+      /steps must be an integer/,
+    );
+    expect(() => engine.finetune({ text, seed: 1.5 })).toThrowError(/seed must be an integer/);
+  });
+
+  it("refuses an infinite learning rate instead of starting a run of NaNs", () => {
+    // `lr > 0` is TRUE for Infinity: the run started and every parameter was NaN by step 1.
+    expect(() => engine.finetune({ text, lr: Infinity })).toThrowError(/lr must be a finite/);
+    expect(() => engine.finetune({ text, lr: NaN })).toThrowError(/lr must be a finite/);
+    expect(() => engine.finetune({ text, lr: "1e-3" as never })).toThrowError(
+      /lr must be a number/,
+    );
+  });
+});
+
+describe("a geo model file cannot smuggle a tensor past the weight set [round 5, F5 mirror]", () => {
+  /**
+   * The same defect class as `lexEngine/bundle.ts`, one engine over. `importBundle`
+   * accumulated into a `{}`, and `ws["__proto__"] = arr` on a plain object sets the
+   * object's PROTOTYPE instead of adding a key: `Object.keys` never reports it,
+   * `validateWeightSet` therefore sees nothing extra, and the `weights_token` re-hash is
+   * computed over the tensors that survived. The file loads as though it held exactly the
+   * tensors its config implies while carrying one nobody looked at — and its prototype is
+   * now a Float32Array. `validateWeightSet`'s `in` test had the mirror-image hole.
+   */
+  it("refuses a file carrying a weight named __proto__", () => {
+    const engine = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    // As JSON TEXT, which is what a file on disk is: assigning the key in JavaScript would
+    // set the prototype and create no key, so an object-literal fixture cannot reach it.
+    const text = JSON.stringify(engine.exportBundle("learned"));
+    const file = JSON.parse(
+      text.replace('"weights":{', '"weights":{"__proto__":{"shape":[1],"data":"AAAAAA=="},'),
+    );
+    expect(Object.hasOwn(file.weights, "__proto__")).toBe(true);
+    expect(() => engine.importBundle(file)).toThrowError(/Weight set mismatch/);
+  });
+
+  it("refuses a persisted payload carrying one too, instead of losing it", () => {
+    const engine = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    const saved = engine.exportWeightSet(engine.canonicalToken);
+    const payload = JSON.parse(
+      JSON.stringify(saved).replace('"weights":{', '"weights":{"__proto__":"AAAAAA==",'),
+    );
+    const fresh = GeoEngine.fromAssets(src.checkpoint, src.vocab);
+    expect(fresh.importWeightSet("0".repeat(32), payload)).toBe(false);
+  });
+});

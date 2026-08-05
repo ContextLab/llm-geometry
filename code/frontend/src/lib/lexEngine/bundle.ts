@@ -510,16 +510,24 @@ function readWeights(cfg: LexConfig, raw: unknown): Record<string, Float32Array>
   }
   const entries = raw as Record<string, { shape?: unknown; data?: unknown }>;
   const shapes = lexWireShapes(cfg);
-  const wire: Record<string, Float32Array> = {};
+  // A NULL-PROTOTYPE accumulator, and `Object.hasOwn` for the slot test. `shapes[name]`
+  // walked `Object.prototype`, so a file carrying a weight called `toString` (or
+  // `constructor`, or `__proto__`) sailed past "has no slot for" holding a JavaScript
+  // builtin, and died two lines later as an untyped `TypeError: shape.reduce is not a
+  // function` — outside the `ApiError` surface the file dialog prints. This is the
+  // UNFIXED MIRROR of the same defect round 5 fixed in `staticClient/lex.ts`; only the
+  // static path got it. And `wire["__proto__"] = …` on a `{}` sets the prototype instead
+  // of adding a key, so a declared tensor would vanish with nothing thrown.
+  const wire: Record<string, Float32Array> = Object.create(null);
   for (const [name, payload] of Object.entries(entries)) {
-    const shape = shapes[name];
-    if (shape === undefined) {
+    if (!Object.hasOwn(shapes, name)) {
       throw invalidParam(
         `model file carries a weight ${JSON.stringify(name)} that a ` +
           `${cfg.tied ? "tied" : "untied"} ${cfg.nLayers}-layer model has no slot for — ` +
           "refusing to load a file this build does not fully understand",
       );
     }
+    const shape = shapes[name];
     if (
       payload === null ||
       typeof payload !== "object" ||
@@ -539,7 +547,7 @@ function readWeights(cfg: LexConfig, raw: unknown): Record<string, Float32Array>
   }
   // Exact key equality is also the TIED check: a tied bundle carrying `head_w`, or an
   // untied one missing it, is refused rather than reloaded as a different model.
-  const missing = Object.keys(shapes).filter((n) => !(n in wire));
+  const missing = Object.keys(shapes).filter((n) => !Object.hasOwn(wire, n));
   if (missing.length > 0) {
     throw invalidParam(
       `model file is missing ${missing.join(", ")} — a ${cfg.tied ? "tied" : "untied"} model ` +

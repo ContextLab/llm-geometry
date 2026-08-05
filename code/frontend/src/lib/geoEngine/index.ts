@@ -32,11 +32,21 @@ import type {
   GeoWeightsPostResult,
 } from "../dataClient";
 import { GeoEngineError, computeError, invalidParam, notFound } from "./errors";
+import { asFloat, asInt } from "./params";
 
 /** Serialized minted weight set for external persistence (sessionStorage). */
 /** The portable model-file format — the same one GET /api/geo/model emits. */
 export const BUNDLE_FORMAT = "llm-geometry/geo-model";
-export const BUNDLE_VERSION = 2; // v1 had no vocabulary integrity check
+/**
+ * v1 had no vocabulary integrity check; v2 named a model by a hash of its WEIGHTS ALONE.
+ * `weightsToken` now hashes the word list too, which changes what the file's
+ * `weights_token` FIELD means, so the format moved with it. Leaving it at 2 made every
+ * pre-change file with its own word list fail the re-hash and be reported as "this model
+ * file is corrupt" — an accusation against an intact file. Mirrors `geo/bundle.py`.
+ */
+export const BUNDLE_VERSION = 3;
+/** The version whose `weights_token` covers the weights only — READ, not refused. */
+export const LEGACY_WEIGHTS_ONLY_BUNDLE_VERSION = 2;
 
 export interface GeoModelBundle {
   format: string;
@@ -335,6 +345,20 @@ export class GeoEngine {
     // Not "no own vocabulary" unless the set is actually here: resolveWeightSet throws
     // the one refusal (including the pre-identity-format explanation) if it is not.
     this.resolveWeightSet(token);
+    // A set that CLAIMS its own word list and has none is the state `exportBundle`
+    // refuses, calling the substitution catastrophic. Reading it here returned the
+    // shipped tokenizer — so `tokenize`, `trace`, `vectorField` and the fine-tune probe
+    // answered with Alice in Wonderland's words while the writer refused the identical
+    // state, and the tab's verification probe (which compares against exactly that
+    // vocabulary) then reported it VERIFIED. Same refusal, same words.
+    if (this.ownsVocab.has(token)) {
+      throw invalidParam(
+        `weights_token '${token}' has no vocabulary in this session, and its ids mean its ` +
+          "own words rather than the shipped model's — reading them under the shipped word " +
+          "list would label every token wrongly. Load the model file again (or retrain) so " +
+          "its vocabulary is present.",
+      );
+    }
     return this.tokenizer;
   }
 
@@ -451,7 +475,10 @@ export class GeoEngine {
   }
 
   importWeightSet(token: string, payload: ExportedWeightSet): boolean {
-    const ws: WeightSet = {};
+    // Null-prototype for the same reason as `importBundle`: sessionStorage is a file the
+    // user's machine hands us, and `ws["__proto__"] = …` on a `{}` sets the prototype
+    // instead of adding a key, dropping a declared tensor with nothing thrown.
+    const ws: WeightSet = Object.create(null);
     try {
       for (const [name, b64] of Object.entries(payload.weights)) ws[name] = f32FromB64(b64);
     } catch {
@@ -488,7 +515,17 @@ export class GeoEngine {
     }
     // And the claim is CHECKED, not believed: the token covers the word list, so a
     // payload cannot pair one model's weights with another's words and still hash right.
-    if (this.tokenFor(ws, words ?? null) !== token) {
+    // `weightsToken` REFUSES a tensor name it does not know, and this method's contract is
+    // to refuse a payload by returning false — never to throw. It is called from
+    // `restorePersistedSets` while the engine is booting, so a throw here would take the
+    // whole tab down over one bad sessionStorage entry.
+    let hashed: string;
+    try {
+      hashed = this.tokenFor(ws, words ?? null);
+    } catch (e) {
+      return this.refuseSet(token, `its weights could not be hashed (${(e as Error).message})`);
+    }
+    if (hashed !== token) {
       // One of those mismatches is not tampering: a payload written when the token
       // covered the WEIGHTS ALONE hashes to `weightsToken(ws, null)`, and that is
       // decidable, so it gets its own explanation rather than "corrupt".
@@ -563,9 +600,13 @@ export class GeoEngine {
     const text = body.text;
     if (text == null) throw invalidParam("exactly one of text/hf_dataset must be provided");
     if (text.trim().length === 0) throw invalidParam("fine-tuning text is empty");
-    const steps = Math.trunc(body.steps ?? FINETUNE_DEFAULT_STEPS);
-    const lr = body.lr ?? FINETUNE_DEFAULT_LR;
-    const seed = Math.trunc(body.seed ?? 0);
+    // `asInt`/`asFloat`, not `Math.trunc` and `??`: this is the reference implementation
+    // the Python backend is golden-tested against, so it may not accept `steps: 7.5` as 7
+    // (the backend answers a typed 400 saying it is "not rounded or truncated") nor
+    // `lr: Infinity`, which passes `lr > 0` and makes every parameter NaN by step 1.
+    const steps = asInt(body.steps, "steps", FINETUNE_DEFAULT_STEPS);
+    const lr = asFloat(body.lr, "lr", FINETUNE_DEFAULT_LR);
+    const seed = asInt(body.seed, "seed", 0);
     const base = body.base ?? "learned";
     const baseWs = this.resolveWeightSet(base);
     // The base's IDENTITY (vocabulary included), not a re-hash of its weights: two
@@ -689,7 +730,13 @@ export class GeoEngine {
     // list, with a `vocab_sha256` computed over that list, so no reader could ever
     // detect it. Writing such a file is refused.
     if (this.ownsVocab.has(resolved) && !this.vocabs.has(resolved)) {
-      throw notFound(
+      // `invalidParam`, not `notFound`: the model IS here, and the frozen contract states
+      // this case explicitly — "Where a model's vocabulary cannot be recovered, this
+      // endpoint returns 400 InvalidParamError rather than substituting the shipped one"
+      // (`specs/002-interactive-model-explorer/contracts/api.md`, GET /api/geo/model).
+      // The backend raises `InvalidParamError` here; this threw a 404-shaped error, so one
+      // user action produced two different statuses depending on which build served it.
+      throw invalidParam(
         `weights_token '${resolved}' has no vocabulary in this session, and its ids mean ` +
           "its own words rather than the shipped model's — saving it now would pair these " +
           "weights with the wrong word list. Load the model file again (or retrain) so its " +
@@ -748,11 +795,13 @@ export class GeoEngine {
           `${JSON.stringify(BUNDLE_FORMAT)})`,
       );
     }
-    if (b.version !== BUNDLE_VERSION) {
+    const version = b.version;
+    if (version !== BUNDLE_VERSION && version !== LEGACY_WEIGHTS_ONLY_BUNDLE_VERSION) {
       throw invalidParam(
-        `model file version ${JSON.stringify(b.version)} is not supported ` +
-          `(this build reads version ${BUNDLE_VERSION}). Version 1 files carried no ` +
-          "vocabulary integrity check; re-export the model to get a v2 file.",
+        `model file version ${JSON.stringify(version)} is not supported ` +
+          `(this build reads versions ${LEGACY_WEIGHTS_ONLY_BUNDLE_VERSION} and ` +
+          `${BUNDLE_VERSION}). Version 1 files carried no vocabulary integrity check; ` +
+          `re-export the model to get a v${BUNDLE_VERSION} file.`,
       );
     }
     const cfg = b.config as Record<string, unknown> | undefined;
@@ -779,7 +828,12 @@ export class GeoEngine {
     if (!rawWeights || typeof rawWeights !== "object" || Object.keys(rawWeights).length === 0) {
       throw invalidParam("model file carries no weights");
     }
-    const ws: WeightSet = {};
+    // NULL-PROTOTYPE: `ws["__proto__"] = arr` on a `{}` sets the object's PROTOTYPE rather
+    // than adding a key, so a file declaring a tensor by that name lost it silently —
+    // `Object.keys` never reports it, `validateWeightSet` sees nothing extra, and the
+    // re-hash below is computed over the tensors that survived. The file loads as if it
+    // held exactly the tensors its config implies while carrying one nobody looked at.
+    const ws: WeightSet = Object.create(null);
     for (const [name, payload] of Object.entries(rawWeights)) {
       if (!payload || typeof payload.data !== "string" || !Array.isArray(payload.shape)) {
         throw invalidParam(`weight ${JSON.stringify(name)} is malformed (need shape + data)`);
@@ -834,7 +888,29 @@ export class GeoEngine {
     }
     const own = this.ownVocabJson(tokenizer.words);
     const actual = this.tokenFor(ws, tokenizer.words);
-    if (b.weights_token !== actual) {
+    const legacy = weightsToken(ws, null);
+    if (version === LEGACY_WEIGHTS_ONLY_BUNDLE_VERSION) {
+      // MIGRATION, not a refusal — the mirror of `geo/bundle.py`. A v2 file names itself
+      // by a hash of its weights alone, so it is checked against that hash and the current
+      // identity is re-derived from the (weights, word list) pair it carries. Refusing
+      // would strand an intact file and buy nothing: the binding a v3 token gives is
+      // absent from EVERY v2 file, including the ones that load today only because their
+      // word list is the shipped one and so takes no part in either hash. What this
+      // format cannot prove — that these words are the words these weights were trained
+      // with — it never could; that is what the bump records, not something introduced
+      // by reading it.
+      if (b.weights_token !== legacy) {
+        throw invalidParam(
+          `this model file is corrupt: its weights hash to ${legacy} but it declares ` +
+            `${b.weights_token}. Loading it would pair the wrong vocabulary with these ` +
+            "weights, so it is refused.",
+        );
+      }
+    } else if (b.weights_token !== actual) {
+      // Deliberately NOT special-cased when `b.weights_token === legacy`: a file carrying
+      // weights, an own word list and a weights-only token is what a version-2 writer
+      // produced AND what swapping a version-3 file's word list produces. The two are
+      // indistinguishable, so a file that DECLARES version 3 is held to version 3.
       throw invalidParam(
         `this model file is corrupt: its weights and vocabulary hash to ${actual} but it ` +
           `declares ${b.weights_token}. Loading it would pair the wrong vocabulary with ` +

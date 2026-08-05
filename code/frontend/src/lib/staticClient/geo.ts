@@ -37,6 +37,7 @@ import { FINETUNE_MAX_UNK_RATE } from "../geoEngine/model";
 import type { ScratchWorkerRequest, ScratchWorkerResponse } from "../geoEngine/scratchWorker";
 import { GeoTokenizer } from "../geoEngine/tokenizer";
 import { fetchDatasetText } from "./hfDatasets";
+import { asFloat, asInt } from "./params";
 import type { FinetuneWorkerRequest, FinetuneWorkerResponse } from "../geoEngine";
 import type { StaticAssets } from "./assets";
 import { computeError, invalidParamError, staticModeError, toApiError } from "./errors";
@@ -244,12 +245,17 @@ export class GeoSection {
     if (text == null || text.trim().length === 0) {
       throw invalidParamError("Provide non-empty fine-tuning text (exactly one of text/hf_dataset).");
     }
-    const steps = Math.trunc(body.steps ?? FINETUNE_DEFAULT_STEPS);
+    // `asInt`, not `Math.trunc`: 7.5 became 7 and the run reported 7 steps as though 7
+    // were what was asked for, while `POST /api/geo/finetune` answers the same body with
+    // a typed 400 saying it is "not rounded or truncated". Same for `lr`, where the old
+    // guard was `!(lr > 0)` — and `Infinity > 0` is `true`, so an infinite learning rate
+    // started a run whose every parameter is NaN by step 1. See `./params`.
+    const steps = asInt(body.steps, "steps", FINETUNE_DEFAULT_STEPS);
     if (!(steps >= 1 && steps <= FINETUNE_MAX_STEPS)) {
-      throw invalidParamError(`steps must be in 1..${FINETUNE_MAX_STEPS}, got ${body.steps}`);
+      throw invalidParamError(`steps must be in 1..${FINETUNE_MAX_STEPS}, got ${steps}`);
     }
-    const lr = body.lr ?? FINETUNE_DEFAULT_LR;
-    if (!(lr > 0)) throw invalidParamError(`lr must be > 0, got ${body.lr}`);
+    const lr = asFloat(body.lr, "lr", FINETUNE_DEFAULT_LR);
+    if (!(lr > 0)) throw invalidParamError(`lr must be > 0, got ${lr}`);
     const base = body.base ?? "learned";
 
     const engine = await this.engine();
@@ -318,9 +324,10 @@ export class GeoSection {
    * second) and reports through the same job protocol as the backend's SSE.
    */
   async geoTrainScratch(body: GeoTrainScratchBody): Promise<GeoTrainScratchResult> {
-    const epochs = Math.trunc(body.epochs ?? SCRATCH_DEFAULT_EPOCHS);
+    // `asInt`, not `Math.trunc` — see `geoFinetune` above and `./params`.
+    const epochs = asInt(body.epochs, "epochs", SCRATCH_DEFAULT_EPOCHS);
     if (!(epochs >= 1 && epochs <= SCRATCH_MAX_EPOCHS)) {
-      throw invalidParamError(`epochs must be in 1..${SCRATCH_MAX_EPOCHS}, got ${body.epochs}`);
+      throw invalidParamError(`epochs must be in 1..${SCRATCH_MAX_EPOCHS}, got ${epochs}`);
     }
     const sources = [body.text, body.hf_dataset].filter((v) => v != null && String(v).trim() !== "");
     if (sources.length !== 1) {

@@ -101,7 +101,11 @@ export function numel(shape: number[]): number {
 
 /** Throws unless `ws` has exactly the expected tensors with the expected sizes. */
 export function validateWeightSet(ws: WeightSet): void {
-  const missing = weightNames().filter((n) => !(n in ws));
+  // `Object.hasOwn`, not `in`: `in` walks `Object.prototype`, so this test answers "yes,
+  // present" for any weight name that happens to collide with a builtin. None do today —
+  // and none did in `staticClient/lex.ts` either, until a file supplied one. The rule is
+  // uniform so no later reader has to work out which names happen to be safe.
+  const missing = weightNames().filter((n) => !Object.hasOwn(ws, n));
   const extra = Object.keys(ws).filter((n) => !WEIGHT_SHAPES.has(n));
   if (missing.length > 0 || extra.length > 0) {
     throw invalidParam(

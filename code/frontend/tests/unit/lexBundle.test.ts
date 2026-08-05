@@ -499,3 +499,65 @@ describe("the weights-only token behaves like an identity", () => {
     );
   });
 });
+
+describe("a weight named after a JavaScript builtin is refused, typed [round 5, F5]", () => {
+  /**
+   * `const shape = shapes[name]` in `readWeights` walked `Object.prototype`, so a file
+   * carrying a weight called `toString` (or `constructor`, or `__proto__`) got a
+   * JavaScript builtin instead of `undefined`, sailed past the "has no slot for" refusal,
+   * and died two lines later as `TypeError: shape.reduce is not a function` — an UNTYPED
+   * throw, outside the `ApiError` surface `viz/lex/ModelFile.svelte` prints. Measured:
+   *
+   *     bogus_weight   -> GeoEngineError: … has no slot for   (the correct refusal)
+   *     toString       -> TypeError: shape.reduce is not a function
+   *     constructor    -> TypeError: shape.join is not a function
+   *     __proto__      -> TypeError: shape.join is not a function
+   *
+   * This is the UNFIXED MIRROR of the defect round 5 fixed one file over, in
+   * `staticClient/lex.ts` — the static path got `Object.hasOwn`, the engine did not.
+   */
+  /** A real saved file, as TEXT, carrying one extra weight called `name`. */
+  function fileWithWeight(name: string): unknown {
+    const text = JSON.stringify(freshBundle());
+    const entry = `${JSON.stringify(name)}:{"shape":[1],"data":"AAAAAA=="},`;
+    return JSON.parse(text.replace('"weights":{', `"weights":{${entry}`));
+  }
+
+  const INHERITED = [
+    "constructor",
+    "toString",
+    "toLocaleString",
+    "valueOf",
+    "hasOwnProperty",
+    "isPrototypeOf",
+    "propertyIsEnumerable",
+    "__proto__",
+    "__defineGetter__",
+    "__lookupGetter__",
+  ];
+
+  for (const name of INHERITED) {
+    it(`refuses a weight called ${name} the way it refuses any other stranger`, () => {
+      // Injected as JSON TEXT, which is what a file on disk is: assigning
+      // `weights["__proto__"] = …` in JavaScript sets the prototype and creates no key at
+      // all, so an object-literal fixture cannot reach this case. `JSON.parse` does.
+      const b = fileWithWeight(name);
+      let thrown: unknown;
+      try {
+        importLexBundle(b);
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown, `${name} loaded`).toBeInstanceOf(Error);
+      // TYPED, and by the same sentence a made-up name gets — not a TypeError from
+      // arithmetic on a builtin.
+      expect((thrown as { type?: string }).type).toBe("InvalidParamError");
+      expect((thrown as Error).message).toMatch(/has no slot for/);
+    });
+  }
+
+  it("still refuses an ordinary unknown weight, and still loads a real file", () => {
+    expect(() => importLexBundle(fileWithWeight("bogus_weight"))).toThrow(/has no slot for/);
+    expect(importLexBundle(throughFile(freshBundle())).vocabWords).toEqual(trained.vocab.words);
+  });
+});

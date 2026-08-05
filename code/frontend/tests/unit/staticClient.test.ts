@@ -386,3 +386,50 @@ describe("geo delegation + job emulation", () => {
     sessionStorage.removeItem(KEY);
   });
 });
+
+describe("the public build's geo parameters are the backend's geo parameters [round 5, F3/F4]", () => {
+  /**
+   * `staticClient/geo.ts` truncated `steps`/`epochs` with `Math.trunc` and guarded `lr`
+   * with `!(lr > 0)`, which `Infinity` passes. The backend answers both with a typed 400.
+   * So the same request body produced a 7-step run on the deployed site and a refusal on
+   * the full stack — a run that is not the run you asked for, reported as though it were.
+   * Round 5 applied exactly this rule to `staticClient/lex.ts` and did not carry it here.
+   */
+  const TEXT = "Alice was beginning to get very tired of sitting by her sister on the bank";
+
+  it("refuses a fractional steps/epochs instead of truncating it", async () => {
+    const c = makeClient();
+    await expect(c.geoFinetune({ text: TEXT, steps: 7.5 })).rejects.toMatchObject({
+      type: "InvalidParamError",
+    });
+    await expect(c.geoFinetune({ text: TEXT, steps: 7.5 })).rejects.toThrowError(
+      /not rounded or truncated/,
+    );
+    await expect(c.geoTrainScratch({ text: TEXT, epochs: 7.5 })).rejects.toThrowError(
+      /not rounded or truncated/,
+    );
+  });
+
+  it("refuses a non-finite learning rate instead of starting a run of NaNs", async () => {
+    const c = makeClient();
+    for (const lr of [Infinity, -Infinity, NaN]) {
+      await expect(c.geoFinetune({ text: TEXT, lr })).rejects.toThrowError(/lr must be a finite/);
+    }
+    await expect(c.geoFinetune({ text: TEXT, lr: "1e-3" as never })).rejects.toThrowError(
+      /lr must be a number/,
+    );
+  });
+
+  it("refuses a stream that is EXACTLY 90 % unknown, and accepts one just below", async () => {
+    // The boundary mutation (`>=` → `>`) survived all 815 frontend tests while the same
+    // Python mutation was caught. 90 of 100 tokens is the case that separates them.
+    const c = makeClient();
+    const stream = (nUnk: number, nKnown: number) =>
+      [...Array(nUnk).fill("zzqxvv"), ...Array(nKnown).fill("the")].join(" ");
+    await expect(c.geoFinetune({ text: stream(90, 10), steps: 1 })).rejects.toThrowError(
+      /the limit is 90%/,
+    );
+    const ok = await c.geoFinetune({ text: stream(89, 11), steps: 1 });
+    expect(ok.job_id).toBeTruthy();
+  });
+});
