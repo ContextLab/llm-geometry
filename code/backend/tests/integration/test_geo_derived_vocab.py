@@ -27,6 +27,7 @@ from llm_geometry.errors import InvalidParamError
 from llm_geometry.geo.bundle import (
     BUNDLE_FORMAT,
     BUNDLE_VERSION,
+    LEGACY_WEIGHTS_ONLY_VERSION,
     _b64,
     _EXPECTED_CONFIG,
     export_bundle,
@@ -733,6 +734,198 @@ def test_a_cache_from_before_the_identity_change_says_what_happened(
     # place that can say so.
     assert "SAVED MODEL FILE" in message.upper()
     assert "corrupt" not in message
+
+
+def test_a_model_that_claims_a_word_list_it_has_not_got_is_refused_by_every_reader(
+    scratch_model: dict,
+) -> None:
+    """ROUND 5 F1: `owns_vocab=True` with nothing stored beside it read as CANONICAL.
+
+    `export_bundle` refuses this state and calls the substitution catastrophic; four
+    readers performed it and answered 200 — `/tokenize`, `/trace`, `/vector_field` and the
+    fine-tune's own encoding — with the user's ids under Alice in Wonderland's words. It
+    reaches the screen: `GeometryLab.verifyVocab` probes `/tokenize` against the canonical
+    vocabulary, so the probe AGREES and the tab reports the word list verified.
+
+    The state is written here the way `save_weight_set`'s docstring says it is preserved
+    ("`owns_vocab=True` with nothing to store … is preserved as written"). Whether a
+    shipped path reaches it is not the point: two readers of one state must not disagree,
+    and the one that answers must not answer confidently and wrongly.
+    """
+    ws = load_weight_set(scratch_model["result"]["weights_token"], store=scratch_model["store"])
+    # The DEFAULT store, so the HTTP routes below resolve the same entry (conftest points
+    # LLM_GEOMETRY_CACHE_DIR at a throwaway directory for the whole run).
+    token = save_weight_set(ws, source="scratch", owns_vocab=True)
+    assert weight_set_owns_vocab(token) is True
+    from llm_geometry.geo.weights import load_weight_set_vocab
+
+    assert load_weight_set_vocab(token) is None, "fixture is not exercising the empty claim"
+
+    with pytest.raises(InvalidParamError) as writer:
+        export_bundle(token)
+    with pytest.raises(InvalidParamError) as reader:
+        tokenizer_for(token)
+    assert "its own words rather than the shipped model's" in writer.value.message
+    assert "its own words rather than the shipped model's" in reader.value.message
+
+    # The routes, which is where the wrong answer was visible: all of them, one status.
+    for url in (
+        f"/api/geo/tokenize?text=alice&weights_token={token}",
+        f"/api/geo/trace?prompt=alice&weights_token={token}",
+        f"/api/geo/vector_field?prompt=alice&weights_token={token}",
+    ):
+        res = client.get(url)
+        assert res.status_code == 400, f"{url} answered {res.status_code}: {res.text[:200]}"
+        assert res.json()["error"]["type"] == "InvalidParamError"
+    ft = client.post("/api/geo/finetune", json={"text": "alice said", "steps": 1, "base": token})
+    assert ft.status_code == 400, ft.text
+    assert ft.json()["error"]["type"] == "InvalidParamError"
+
+
+def _pre_identity_bundle(ws: dict, vocab_json: str) -> dict:
+    """The model FILE the pre-identity build wrote, byte-for-byte in shape.
+
+    Format version 2, and a ``weights_token`` over the WEIGHTS ALONE — the identity that
+    build computed (`git show 0d23123`: ``real_token = weights_token(ws)``) — beside a word
+    list of the model's own and an honest ``vocab_sha256`` over it.
+    """
+    return {
+        "format": BUNDLE_FORMAT,
+        "version": LEGACY_WEIGHTS_ONLY_VERSION,
+        "weights_token": weights_token(ws),
+        "config": dict(_EXPECTED_CONFIG),
+        "vocab": vocab_json,
+        "vocab_sha256": vocab_digest(vocab_json),
+        "weights": {
+            name: {"shape": list(np.asarray(arr).shape), "data": _b64(arr)}
+            for name, arr in sorted(ws.items())
+        },
+    }
+
+
+def test_a_pre_identity_model_file_opens_instead_of_being_called_corrupt(
+    scratch_model: dict, tmp_path
+) -> None:
+    """ROUND 5 F10: `BUNDLE_VERSION` stayed at 2 when the identity changed, so a file
+    saved by the previous build — the user's only copy of a scratch-trained model, and
+    the recovery the cache's schema-bump refusal names — was rejected with
+
+        this model file is corrupt: its weights and vocabulary hash to … but it declares …
+
+    It is not corrupt: it names itself the way its format says it does. The format is
+    versioned now, and a version-2 payload is READ and re-identified.
+    """
+    ws = load_weight_set(scratch_model["result"]["weights_token"], store=scratch_model["store"])
+    vocab_json = tokenizer_for(
+        scratch_model["result"]["weights_token"], store=scratch_model["store"]
+    ).to_json()
+    assert own_vocab_json(vocab_json) is not None, "fixture must own a word list"
+
+    store = CacheStore(tmp_path / "v2-open")
+    result = import_bundle(_pre_identity_bundle(ws, vocab_json), store=store)
+
+    # Re-identified under the CURRENT rule, not stored under the weights-only hash.
+    assert result["weights_token"] == weights_token(ws, own_vocab_json(vocab_json))
+    assert result["weights_token"] != weights_token(ws)
+    # And it kept its own words — the whole point of opening it at all.
+    assert tokenizer_for(result["weights_token"], store=store).words != get_tokenizer().words
+    assert weight_set_owns_vocab(result["weights_token"], store=store)
+    # Re-exported, it is a current-format file that round-trips.
+    again = export_bundle(result["weights_token"], store=store)
+    assert again["version"] == BUNDLE_VERSION
+    assert again["weights_token"] == result["weights_token"]
+
+
+def test_a_pre_identity_file_with_tampered_weights_is_still_refused(
+    scratch_model: dict, tmp_path
+) -> None:
+    """Reading version 2 is a migration, not an amnesty: the weights are still checked
+    against the hash that format put in the file, so tampering is caught exactly as before.
+    """
+    ws = load_weight_set(scratch_model["result"]["weights_token"], store=scratch_model["store"])
+    vocab_json = tokenizer_for(
+        scratch_model["result"]["weights_token"], store=scratch_model["store"]
+    ).to_json()
+    bundle = _pre_identity_bundle(ws, vocab_json)
+    bumped = ws["embedding"] + np.float32(1.0)
+    bundle["weights"]["embedding"] = {"shape": list(bumped.shape), "data": _b64(bumped)}
+
+    with pytest.raises(InvalidParamError) as exc:
+        import_bundle(bundle, store=CacheStore(tmp_path / "v2-tampered"))
+    assert "corrupt" in exc.value.message
+
+
+def test_a_version_this_build_cannot_read_names_the_versions_it_can(
+    scratch_model: dict, tmp_path
+) -> None:
+    """A version bump is only honest if the refusal for other versions is accurate."""
+    ws = load_weight_set(scratch_model["result"]["weights_token"], store=scratch_model["store"])
+    vocab_json = tokenizer_for(
+        scratch_model["result"]["weights_token"], store=scratch_model["store"]
+    ).to_json()
+    for version in (1, BUNDLE_VERSION + 1):
+        bundle = {**_bundle_for(ws, vocab_json), "version": version}
+        with pytest.raises(InvalidParamError) as exc:
+            import_bundle(bundle, store=CacheStore(tmp_path / f"v{version}"))
+        assert f"version {version!r} is not supported" in exc.value.message
+        assert str(LEGACY_WEIGHTS_ONLY_VERSION) in exc.value.message
+        assert str(BUNDLE_VERSION) in exc.value.message
+        assert "corrupt" not in exc.value.message
+
+
+def test_a_weights_only_token_under_the_current_version_is_still_refused(
+    scratch_model: dict, tmp_path
+) -> None:
+    """The version is part of what a file DECLARES, and it is held to it.
+
+    A payload carrying weights, a word list of its own, and a weights-only token is what a
+    version-2 writer produced — and it is also what swapping a version-3 file's word list
+    and recomputing `vocab_sha256` produces. The two are byte-indistinguishable, so
+    "actually this is just an old file, load it" is not a claim this reader can make about
+    something that says version 3 on it. Version 2 is read because a file that SAYS
+    version 2 is asking to be read under version 2's weaker rules.
+    """
+    ws = load_weight_set(scratch_model["result"]["weights_token"], store=scratch_model["store"])
+    vocab_json = tokenizer_for(
+        scratch_model["result"]["weights_token"], store=scratch_model["store"]
+    ).to_json()
+    mislabelled = {**_pre_identity_bundle(ws, vocab_json), "version": BUNDLE_VERSION}
+
+    with pytest.raises(InvalidParamError) as exc:
+        import_bundle(mislabelled, store=CacheStore(tmp_path / "mislabelled"))
+    assert "corrupt" in exc.value.message
+    # ...and the identical payload declaring the version it was written under is read.
+    honest = {**mislabelled, "version": LEGACY_WEIGHTS_ONLY_VERSION}
+    assert import_bundle(honest, store=CacheStore(tmp_path / "honest"))[
+        "weights_token"
+    ] == weights_token(ws, own_vocab_json(vocab_json))
+
+
+def test_the_schema_bump_message_names_a_recovery_that_actually_works(
+    scratch_model: dict, tmp_path
+) -> None:
+    """ROUND 5 F10, end to end: the v15 cache refusal tells the user "a SAVED MODEL FILE
+    still loads: open it again". For the models the message is about — the ones with their
+    own word list, which is the whole reason a v14 entry is unreadable — it did not. The
+    promise and the behaviour are asserted together here so neither can drift alone.
+    """
+    ws = load_weight_set(scratch_model["result"]["weights_token"], store=scratch_model["store"])
+    vocab_json = tokenizer_for(
+        scratch_model["result"]["weights_token"], store=scratch_model["store"]
+    ).to_json()
+    store = CacheStore(tmp_path / "recovery")
+    token = _write_pre_identity_entry(store, ws, vocab_json)
+
+    with pytest.raises(Exception) as exc:
+        load_weight_set(token, store=store)
+    assert "SAVED MODEL FILE" in str(exc.value).upper()
+
+    # Now do exactly what it says, with the file that build would have written.
+    recovered = import_bundle(_pre_identity_bundle(ws, vocab_json), store=store)
+    assert tokenizer_for(recovered["weights_token"], store=store).words != get_tokenizer().words
+    assert np.array_equal(
+        load_weight_set(recovered["weights_token"], store=store)["embedding"], ws["embedding"]
+    )
 
 
 def test_a_cache_from_before_the_identity_change_does_not_wedge_the_lab(tmp_path) -> None:

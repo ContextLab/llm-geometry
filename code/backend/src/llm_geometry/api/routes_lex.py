@@ -30,7 +30,6 @@ from __future__ import annotations
 import base64
 import dataclasses
 import hashlib
-import math
 import threading
 from functools import lru_cache
 from typing import Any
@@ -96,6 +95,7 @@ from ..lex.spectrum import (
 from ..lex.vocab import LexVocab, build_vocab, tokenize
 from ..torchstate import TORCH_GLOBAL_LOCK
 from .encoding import jsonable_6sig
+from .params import as_bool, as_float, as_int
 
 router = APIRouter(prefix="/lex", tags=["lex"])
 
@@ -302,83 +302,22 @@ def _load_model(
 def _as_int(value: Any, name: str) -> int:
     """A JSON integer, or a typed refusal — never a coercion.
 
-    ``int(value)`` accepted, and silently rewrote, everything JSON can express: ``1.5``
-    became ``1``, ``"7"`` became ``7``, ``true`` became ``1``, and ``Infinity`` escaped as
-    an untyped 500 (``OverflowError: cannot convert float infinity to integer``). The
-    TypeScript engine refuses all four, so the two stacks disagreed on the whole
-    non-integer domain — and in the direction where Python computes with a *different
-    seed than it was asked for*, echoes it back, and nothing says it happened. Raise,
-    never truncate; that is the same rule ``lex.vacancy.MAX_SEED`` follows one level down.
-
-    ``7.0`` IS accepted as 7: JSON cannot express the int/float distinction, and the TS
-    engine reads it as the integer 7, so refusing it here would be a divergence of its
-    own. A float with a fractional part, or a non-finite one, is refused.
+    THE implementation, shared with ``routes_geo``, lives in :mod:`api.params`; the rule
+    and the measurements that justify it are documented there. It was a copy in each
+    module until the copies were observed to disagree — ``routes_geo._as_float`` still
+    called ``float(value)`` and accepted ``lr: "\u0660.\u0665"`` with a 202 while this one
+    refused it with a 400.
     """
-    if isinstance(value, bool):
-        raise InvalidParamError(f"{name} must be an integer, got {value!r}")
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise InvalidParamError(f"{name} must be a finite integer, got {value!r}")
-        if not value.is_integer():
-            raise InvalidParamError(
-                f"{name} must be an integer, got {value!r} — it is not rounded or "
-                "truncated, because a number that is not the number you asked for is "
-                "worse than a refusal"
-            )
-        return int(value)
-    raise InvalidParamError(f"{name} must be an integer, got {value!r}")
+    return as_int(value, name)
 
 
 def _as_float(value: Any, name: str) -> float:
-    """A FINITE JSON number, or a typed refusal — the float half of ``_as_int``'s rule.
-
-    ``float(value)`` was left in place when ``_as_int`` was rewritten, and it accepts the
-    same silent rewrites one type down. Measured against the running route by the red
-    team:
-
-        {"p": Infinity}   500  InternalError: Out of range float values are not JSON compliant
-        {"p": NaN}        — every comparison against it is False, so a range check passes
-        {"lr": "1e-3"}    202, and the string never appears again
-        {"lr": true}      202 with lr = 1.0
-        {"dropout": "٧"}  Python reads Arabic-Indic digits; JavaScript's `Number` does not
-
-    ``Infinity`` is the worst of them: it survives ``0 <= p <= 1``-style checks by being
-    unordered or by passing them outright, reaches a response, and dies in the JSON
-    encoder as an untyped 500 — the exact ``OverflowError``-shaped leak the ``_as_int``
-    rewrite removed one type up. ``NaN`` is worse still because nothing at all throws:
-    every ``<`` and ``>`` against it is ``False``, so a range guard written as
-    ``if lr <= 0: raise`` waves it through and the run diverges at step 1.
-
-    Strings are refused rather than parsed for the same reason ``_as_int`` refuses them:
-    the TypeScript engine's ``Number`` and Python's ``float`` do not agree about what a
-    numeric string is (``"٧"``, ``"０.５"``, ``"1_0"``, ``"0x10"``), so the two stacks
-    would compute with different numbers from one request body. Every caller here reads
-    a JSON body, never a query string, so nothing legitimate arrives as text.
-    """
-    if isinstance(value, bool):
-        raise InvalidParamError(f"{name} must be a number, got {value!r}")
-    if isinstance(value, (int, float)):
-        try:
-            number = float(value)
-        except OverflowError:  # an int too large for a double, e.g. 10**400
-            raise InvalidParamError(
-                f"{name} must be a number a float64 can represent exactly enough to use, "
-                f"got {value!r}"
-            )
-        if not math.isfinite(number):
-            raise InvalidParamError(f"{name} must be a finite number, got {value!r}")
-        return number
-    raise InvalidParamError(f"{name} must be a number, got {value!r}")
+    """A FINITE JSON number, or a typed refusal — :func:`_as_int`'s rule, one type down."""
+    return as_float(value, name)
 
 
 def _as_bool(value: Any, name: str) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str) and value.lower() in ("true", "false", "1", "0"):
-        return value.lower() in ("true", "1")
-    raise InvalidParamError(f"{name} must be a boolean, got {value!r}")
+    return as_bool(value, name)
 
 
 def _one_of(value: Any, choices: tuple[int, ...], name: str) -> int:

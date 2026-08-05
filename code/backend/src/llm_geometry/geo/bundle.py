@@ -35,7 +35,17 @@ from .weights import (
 )
 
 BUNDLE_FORMAT = "llm-geometry/geo-model"
-BUNDLE_VERSION = 2  # v1 had no vocabulary integrity check (see import_bundle)
+# v1 had no vocabulary integrity check; v2 named a model by a hash of its WEIGHTS ALONE.
+# `weights_token` now hashes the word list too (see `weights.weights_token`), which is a
+# change to what the `weights_token` FIELD IN THE FILE means, so the file format moved with
+# it. Leaving it at 2 made every pre-change file with its own word list fail the re-hash and
+# be reported as "this model file is corrupt" — an accusation against an intact file, and
+# against the exact file the cache's schema-bump message tells the user to open.
+BUNDLE_VERSION = 3
+# The version whose `weights_token` covers the weights only. Such a file is READ, not
+# refused: see the migration in `import_bundle`.
+LEGACY_WEIGHTS_ONLY_VERSION = 2
+SUPPORTED_VERSIONS = (LEGACY_WEIGHTS_ONLY_VERSION, BUNDLE_VERSION)
 
 _EXPECTED_CONFIG = {
     "d_model": D_MODEL,
@@ -128,11 +138,13 @@ def import_bundle(bundle: Any, store: CacheStore | None = None) -> dict[str, Any
             f"not a Geometry Lab model file (format={bundle.get('format')!r}, "
             f"expected {BUNDLE_FORMAT!r})"
         )
-    if bundle.get("version") != BUNDLE_VERSION:
+    version = bundle.get("version")
+    if version not in SUPPORTED_VERSIONS:
         raise InvalidParamError(
-            f"model file version {bundle.get('version')!r} is not supported "
-            f"(this build reads version {BUNDLE_VERSION}). Version 1 files carried no "
-            "vocabulary integrity check; re-export the model to get a v2 file."
+            f"model file version {version!r} is not supported (this build reads versions "
+            f"{LEGACY_WEIGHTS_ONLY_VERSION} and {BUNDLE_VERSION}). Version 1 files carried "
+            f"no vocabulary integrity check; re-export the model to get a v{BUNDLE_VERSION} "
+            "file."
         )
 
     config = bundle.get("config")
@@ -210,7 +222,28 @@ def import_bundle(bundle: Any, store: CacheStore | None = None) -> dict[str, Any
         )
     owned = own_vocab_json(canonical_vocab)
     actual = weights_token(ws, owned)
-    if declared != actual:
+    legacy = weights_token(ws, None)
+    if version == LEGACY_WEIGHTS_ONLY_VERSION:
+        # MIGRATION, not a refusal. A v2 file names itself by a hash of its weights alone,
+        # so it is checked against that hash and the current identity is re-derived from
+        # the (weights, word list) pair it carries. Refusing instead would strand an intact
+        # file — the user's only copy — and would buy nothing: the binding a v3 token gives
+        # is absent from EVERY v2 file, including the ones that load today only because
+        # their word list happens to be the shipped one and so takes no part in either
+        # hash. What this format cannot prove — that these words are the words these
+        # weights were trained with — it never could; that is what the bump records, not
+        # something introduced by reading it.
+        if declared != legacy:
+            raise InvalidParamError(
+                "this model file is corrupt: its weights hash to "
+                f"{legacy} but it declares {declared}. Loading it would pair the wrong "
+                "vocabulary with these weights, so it is refused."
+            )
+    elif declared != actual:
+        # Deliberately NOT special-cased when ``declared == legacy``: a file carrying
+        # weights, an own word list and a weights-only token is what a version-2 writer
+        # produced AND what swapping a version-3 file's word list produces. The two are
+        # indistinguishable, so a file that DECLARES version 3 is held to version 3.
         raise InvalidParamError(
             "this model file is corrupt: its weights and vocabulary hash to "
             f"{actual} but it declares {declared}. Loading it would pair the wrong "

@@ -281,10 +281,27 @@ def tokenizer_for(weights_token: str | None, store: Any = None) -> GeoTokenizer:
     ids read under Alice in Wonderland's word list, while ``GET /api/geo/trace`` answered
     404 for the identical request — so the two routes disagreed about whether the model
     existed, and the one that said yes was the one that was wrong.
+
+    A stored entry that CLAIMS its own word list and carries none raises for the same
+    reason, and with the same sentence ``bundle.export_bundle`` refuses it by. The two
+    disagreed: ``export_bundle`` called the substitution catastrophic and refused, while
+    ``/tokenize``, ``/trace``, ``/vector_field`` and ``/finetune`` performed it and
+    answered 200 — and because the answer really was the canonical tokenizer, the tab's
+    own verification probe agreed with it and reported the vocabulary VERIFIED. An
+    inconsistent state must not resolve to a confident wrong label anywhere.
     """
     if not weights_token or weights_token == "learned":
         return get_tokenizer()
-    from .weights import load_weight_set_vocab
+    from .weights import load_weight_set_vocab, weight_set_owns_vocab
 
     payload = load_weight_set_vocab(weights_token, store=store)
-    return GeoTokenizer.from_json(payload) if payload else get_tokenizer()
+    if payload:
+        return GeoTokenizer.from_json(payload)
+    if weight_set_owns_vocab(weights_token, store=store):
+        raise InvalidParamError(
+            f"weights_token {weights_token!r} has no vocabulary stored beside it, and its "
+            "ids mean its own words rather than the shipped model's — reading them under "
+            "the shipped word list would label every token wrongly. Load the model file "
+            "again (or retrain) so its vocabulary is present."
+        )
+    return get_tokenizer()

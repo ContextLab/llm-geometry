@@ -393,7 +393,9 @@ def _missing_entry_error(token: str, store: CacheStore) -> NotFoundError:
             f"v{stale} entry's word list cannot be checked against the token naming it — "
             "it may belong to a different model, which is exactly how a model came to be "
             "labelled with another model's words. Nothing was deleted, and a SAVED MODEL "
-            "FILE still loads: open it again, or train the model again."
+            "FILE still loads — including one written before this change, which this build "
+            "reads as a version-2 file and re-identifies: open it again, or train the "
+            "model again."
         )
     return NotFoundError(
         f"weights_token {token!r} is unknown (never minted here, or evicted); "

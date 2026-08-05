@@ -10,7 +10,6 @@ phase labels. Every numeric array in a response is plain nested lists rounded to
 
 from __future__ import annotations
 
-import math
 import re
 from typing import Any
 
@@ -51,6 +50,7 @@ from ..geo.tokenizer import tokenizer_for
 from ..geo.train import canonical_cache_key, resolve_weight_set
 from ..geo.weights import EDITABLE_MATRICES
 from .encoding import jsonable_6sig
+from .params import as_float, as_int
 
 router = APIRouter(prefix="/geo", tags=["geo"])
 
@@ -256,37 +256,15 @@ def weights_post(body: WeightsBody) -> dict[str, Any]:
 def _as_int(value: Any, name: str) -> int:
     """A JSON integer, or a typed refusal — never a coercion.
 
-    ``int(value)`` accepted, and silently rewrote, everything JSON can express: ``1.5``
-    became ``1``, ``"7"`` became ``7``, ``true`` became ``1``, ``"٧"`` (Arabic-Indic
-    seven) became ``7``, and ``Infinity`` escaped as an untyped 500
-    (``OverflowError: cannot convert float infinity to integer``). The TypeScript engine
-    refuses all of them, so the two stacks disagreed over the whole non-integer domain —
-    in the direction where Python trains for a *different number of steps than it was
-    asked for*, reports the run, and nothing says it happened.
-
-    ``7.0`` IS accepted as 7: JSON cannot express the int/float distinction and the TS
-    engine reads it as 7, so refusing it would be a divergence of its own. Identical rule,
-    and identical wording, to ``api.routes_lex._as_int``; duplicated rather than shared so
-    the two tabs' route modules stay independent.
+    THE implementation, shared with ``routes_lex``, lives in :mod:`api.params`; the rule
+    and the reasons are documented there. It used to be a copy in each module, and the
+    copies drifted (``_as_float`` here still called ``float(value)`` long after the lex
+    one stopped, so ``lr: "٠.٥"`` trained at 0.5 on this tab and 400'd on the other).
 
     Multipart form fields arrive as strings (there is no other wire encoding for them), so
     a decimal string is parsed there and only there — see :func:`_form_int`.
     """
-    if isinstance(value, bool):
-        raise InvalidParamError(f"{name} must be an integer, got {value!r}")
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise InvalidParamError(f"{name} must be a finite integer, got {value!r}")
-        if not value.is_integer():
-            raise InvalidParamError(
-                f"{name} must be an integer, got {value!r} — it is not rounded or "
-                "truncated, because a number that is not the number you asked for is "
-                "worse than a refusal"
-            )
-        return int(value)
-    raise InvalidParamError(f"{name} must be an integer, got {value!r}")
+    return as_int(value, name)
 
 
 def _form_int(value: Any, name: str) -> int:
@@ -306,22 +284,15 @@ def _form_int(value: Any, name: str) -> int:
 
 
 def _as_float(value: Any, name: str) -> float:
-    """A finite JSON number, or a typed refusal.
+    """A FINITE JSON number, or a typed refusal — :func:`_as_int`'s rule, one type down.
 
-    ``float(value)`` mapped ``Infinity``/``NaN`` straight through, and an infinite ``lr``
-    passes ``lr > 0``: the job then starts, every parameter becomes NaN on the first step,
-    and the failure surfaces (if at all) as a late job error rather than as a 422 on the
-    request that caused it.
+    THE implementation is :func:`api.params.as_float`, shared with ``routes_lex``. This
+    was the drifted copy: a bare ``float(value)`` inside a ``try``, which read Python's
+    idea of a numeric string (``"٧"``, ``"７"``, ``"७"``, ``"٠.٥"``, ``"1_000"``, ``"1e3"``
+    — all ``NaN`` to JavaScript's ``Number``) and answered 202, and leaked ``10**400`` as
+    an untyped 500. See :mod:`api.params` for the measurements.
     """
-    if isinstance(value, bool):
-        raise InvalidParamError(f"{name} must be a number, got {value!r}")
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        raise InvalidParamError(f"{name} must be a number, got {value!r}")
-    if not math.isfinite(number):
-        raise InvalidParamError(f"{name} must be a finite number, got {value!r}")
-    return number
+    return as_float(value, name)
 
 
 def _as_seed(value: Any, name: str = "seed") -> int:
