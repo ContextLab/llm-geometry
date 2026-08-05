@@ -15,14 +15,20 @@ Three things are pinned here, and each of them is a defect that shipped:
    read one committed table, so the assertions here are about the TABLE being the authority —
    a revert to :mod:`unicodedata` fails them on this interpreter.
 
-3. **The false refusal the joiner fix introduced.** ``legs--upon`` — the Gutenberg em-dash
-   convention, present in this project's own corpus — is written entirely in ``WORD_RE``'s
-   own alphabet, so refusing it told the reader to do the thing they had already done.
+3. **The false refusal the joiner fix introduced, and the false ACCEPTANCE its first fix
+   introduced.** ``legs--upon`` — the Gutenberg em-dash convention, present in this
+   project's own corpus — is written entirely in ``WORD_RE``'s own alphabet, so refusing it
+   told the reader to do the thing they had already done. The exemption that closed it
+   tested the run's alphabet, which admitted ``don''t``: also pure ``WORD_RE`` alphabet,
+   also two matches, and this time with a character stranded inside a rewritten word
+   (``little''t``, HTTP 200). The exemption is now a whole-match test after cutting at the
+   dash, and both properties are pinned on runs that differ in exactly one of them.
 """
 
 from __future__ import annotations
 
 import json
+import string
 import unicodedata
 from pathlib import Path
 
@@ -146,21 +152,42 @@ def test_connector_punctuation_is_in_the_class() -> None:
             check_word_alphabet(f"the cat don{ch}t sit")
 
 
-def test_a_run_written_in_word_res_own_alphabet_is_not_refused() -> None:
-    """The false refusal the joiner fix introduced.
+def test_the_em_dash_exemption_is_a_whole_match_test_not_an_alphabet_test() -> None:
+    """The exemption, and the defect the FIRST version of it reopened.
 
     `--` is the Gutenberg em-dash convention and this project's own corpus carries
     `ba--are`, `hea--art`, `Lady--loves`, `legs--upon`. The refusal told the reader to "use a
     passage written in the ASCII alphabet, with straight apostrophes and hyphens", which is
     what they had done — there was no way to comply.
+
+    The first exemption (2026-08-04) asked whether the run was WRITTEN IN that alphabet, and
+    that admitted `don''t`: pure ASCII, pure WORD_RE alphabet, and still `don` + `t` with a
+    character stranded between two halves of a word the transform rewrote. It scored 200 and
+    vacated to `little''t` — the `don’t` → `big’t` defect, restored.
+
+    So the two properties are separated here, on runs that differ in exactly one of them.
+    `legs--upon` and `don''t` are both written entirely in WORD_RE's alphabet; cutting at
+    the dash makes WORD_RE match every piece of the first whole and cannot do that for the
+    second.
     """
-    for text in ("legs--upon", "ba--are", "hea--art", "Lady--loves", "don''t", "a---b"):
+    # Written in the alphabet AND whole after cutting at the dash → scored.
+    for text in ("legs--upon", "ba--are", "hea--art", "Lady--loves", "a---b", "legs--upon's"):
         assert fragmented_words(text) == [], text
         check_word_alphabet(text)
-    # …and the escape hatch is ASCII-only: a repeated INVISIBLE joiner still refuses.
+        assert set(text.replace("--", "")) <= set(string.ascii_letters + "'-"), text
+    # Written in the SAME alphabet, not whole after any cut → refused. This is the
+    # distinction; an ASCII-alphabet test cannot make it.
+    for text in ("don''t", "don-'t", "don'-t", "don''''t"):
+        assert set(text) <= set(string.ascii_letters + "'-"), text
+        assert fragmented_words(text) == [text], text
+        with pytest.raises(InvalidParamError, match="word alphabet"):
+            check_word_alphabet(f"the cat {text} sat")
+    # …and the exemption is ASCII-only: a repeated INVISIBLE joiner still refuses.
     assert fragmented_words("co­­operate") == ["co­­operate"]
     assert fragmented_words("don’’t") == ["don’’t"]
-    # …and it is about the alphabet, not about length: one curly apostrophe still refuses.
+    # …and cutting at the dash exempts nothing on the letter half of the alphabet.
+    assert fragmented_words("café--x") == ["café--x"]
+    # …and it is about the whole match, not about length: one curly apostrophe still refuses.
     assert fragmented_words("don’t") == ["don’t"]
 
 

@@ -1,0 +1,39 @@
+{
+  "format": "vacancy-fp32-reference-v1",
+  "note": "A RECORDING of one real run, written by scripts/measure_vacancy_fp32.py. Both stacks are pinned to it: the backend integration test re-runs the real model and asserts these numbers, and the frontend unit test asserts VACANCY_FP32_REFERENCE (staticClient/arch.ts) rounds to them. Editing this file without re-running the model makes the backend test fail against gpt2.",
+  "model": "gpt2",
+  "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e",
+  "dtype": "float32",
+  "params": {
+    "passages": "default",
+    "p": 1.0,
+    "seed": 0
+  },
+  "tokens": {
+    "english": 2754,
+    "swap": 2766,
+    "nonce": 3792
+  },
+  "preserved": {
+    "english": 856,
+    "swap": 856,
+    "nonce": 856
+  },
+  "differences": {
+    "wrong_content": {
+      "nats": 0.6904174945163003,
+      "se": 0.05389436515855508,
+      "nPairs": 856
+    },
+    "unknown_form": {
+      "nats": 0.28721050610900456,
+      "se": 0.04496363720801029,
+      "nPairs": 856
+    },
+    "total": {
+      "nats": 0.9776280006253049,
+      "se": 0.05903211085957414,
+      "nPairs": 856
+    }
+  }
+}

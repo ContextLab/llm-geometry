@@ -106,7 +106,7 @@
   {
    "text": "legs--upon",
    "fragmented": [],
-   "why": "the Gutenberg em-dash convention, present in this project's own corpus. Written entirely in WORD_RE's alphabet, so refusing it offered the reader no way to comply. Each piece is a whole ASCII word the transform vacates AS a word"
+   "why": "the Gutenberg em-dash convention, present in this project's own corpus. Two or more ASCII hyphens are a dash BETWEEN words, so the run is cut there and WORD_RE matches 'legs' and 'upon' whole — each piece is a whole ASCII word the transform vacates AS a word. This is the only exemption there is"
   },
   {
    "text": "ba--are hea--art Lady--loves",
@@ -115,13 +115,28 @@
   },
   {
    "text": "don''t",
+   "fragmented": ["don''t"],
+   "why": "the reopened defect, and the reason the rule is a WHOLE-MATCH test rather than an alphabet test. A doubled ASCII apostrophe is written in nothing but WORD_RE's own alphabet, and is still 'don' + 't' with a character stranded between two halves of a word the transform rewrote: it scored 200 and vacated to \"little''t\", character-for-character the 'don’t' → 'big’t' defect above. It was pinned here as NOT fragmented on 2026-08-04, by an escape hatch that asked what characters the run was written in"
+  },
+  {
+   "text": "don-'t",
+   "fragmented": ["don-'t"],
+   "why": "adjacent ASCII joiners that are not the em-dash convention: WORD_RE matches 'don' + 't', and no cut at a dash leaves pieces it matches whole"
+  },
+  {
+   "text": "café--x",
+   "fragmented": ["café--x"],
+   "why": "the em-dash cut is not a licence: after cutting, 'café' is still not matched whole, so the LETTER half of the alphabet is refused through a dash too"
+  },
+  {
+   "text": "legs--upon's",
    "fragmented": [],
-   "why": "the apostrophe half of the same rule: a doubled ASCII apostrophe is still WORD_RE's own alphabet"
+   "why": "cutting at the dash leaves 'legs' and \"upon's\", both matched whole — WORD_RE's own apostrophe survives the exemption"
   },
   {
    "text": "co­­operate",
    "fragmented": ["co­­operate"],
-   "why": "a RUN of joiners still joins when the joiners are not WORD_RE's own — the ASCII escape hatch above must not become a hole for repeated invisible characters"
+   "why": "a RUN of joiners still joins when the joiners are not WORD_RE's own — the em-dash exemption above must not become a hole for repeated invisible characters"
   },
   {
    "text": "don‿ t",

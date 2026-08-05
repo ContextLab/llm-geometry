@@ -179,11 +179,18 @@ const WORDLIKE_RE = new RegExp(
 );
 
 /**
- * The joiners `WORD_RE` itself accepts. A run built only from these and ASCII letters is
- * written entirely in the alphabet the refusal message tells the reader to use, so it is
- * not an alphabet problem — see `fragmentedWords`.
+ * The Gutenberg em-dash convention: two or more ASCII hyphens, which a reader reads as a
+ * dash BETWEEN two words rather than as a joiner inside one. `WORDLIKE_RE` cannot tell the
+ * two apart (its grammar accepts any run of joiners), so `fragmentedWords` cuts a run here
+ * before asking whether `wordRe` matches each piece whole. MIRROR of `EM_DASH_RE`
+ * (`llm_geometry/arch/vacancy_score.py`).
  */
-const WORD_RE_ALPHABET = /^[A-Za-z'-]+$/;
+const EM_DASH_RE = /-{2,}/;
+
+/** `wordRe`, anchored, for "does it match this piece WHOLE?" — never a `.test` on flags. */
+function wholeWordRe(wordRe: RegExp): RegExp {
+  return new RegExp(`^(?:${wordRe.source})$`, wordRe.flags.replace(/[gy]/g, ""));
+}
 
 /**
  * Words of `text` that `wordRe` splits or truncates, in order of appearance.
@@ -197,28 +204,36 @@ const WORD_RE_ALPHABET = /^[A-Za-z'-]+$/;
  * touches (CJK, emoji): those are never vacated, are byte-identical in all three variants,
  * and are attributed to no word — the same treatment punctuation gets.
  *
- * A run written ENTIRELY in `wordRe`'s own alphabet is not an alphabet problem, even when
- * `wordRe` splits it. The Gutenberg em-dash convention `legs--upon` is one run under the
- * grammar above (`J+` accepts a run of joiners) and two matches under `WORD_RE` (which
- * accepts exactly one), so it was refused — while the refusal message tells the reader to
- * "use a passage written in the ASCII alphabet, with straight apostrophes and hyphens",
- * which `legs--upon` already is. There was no way to comply, and this project's own corpus
- * contains `ba--are`, `hea--art`, `Lady--loves` and `legs--upon`. The split is real but
- * harmless there: each piece is a whole ASCII word the transform vacates AS a word, and no
- * character survives inside a rewritten fragment. That is exactly what does NOT hold for
- * `don’t` or `co<SHY>operate`, where a character `WORD_RE` cannot see is left sitting
- * between two halves of a word it rewrote — so those still refuse.
+ * ONE exemption, and it is narrow: the Gutenberg em-dash convention `legs--upon`. Two or
+ * more ASCII hyphens between letters are a DASH — punctuation a reader reads as a gap
+ * between two words — not a joiner inside one word. `WORDLIKE_RE` cannot know that (`J+`
+ * accepts any run of joiners), so it yields one run, `wordRe` finds two matches, and this
+ * used to refuse — while the refusal message told the reader to "use a passage written in
+ * the ASCII alphabet, with straight apostrophes and hyphens", which `legs--upon` already
+ * is. There was no way to comply, and this project's own corpus contains `ba--are`,
+ * `hea--art`, `Lady--loves` and `legs--upon`. So the run is cut at each dash and the
+ * exemption holds only when `wordRe` matches EVERY resulting piece WHOLE.
+ *
+ * The test is that whole-match, NOT "the run is written in ASCII characters". Those two
+ * differ, and the difference is the original defect: `don''t` is pure ASCII, and pure
+ * `WORD_RE` alphabet, and it is still `don` + `t` with a character `wordRe` cannot see
+ * stranded between two halves of a word it rewrote — it vacated to `little''t` and scored
+ * 200, character-for-character the `don’t` → `big’t` defect. An ASCII-alphabet test
+ * admitted it (2026-08-04, while closing the `--` false positive); the whole-match test
+ * refuses it, and refuses `don-'t` and `co<SHY>operate` with it.
  */
 export function fragmentedWords(text: string, wordRe: RegExp): string[] {
   const runs = new RegExp(WORDLIKE_RE.source, "gu");
   const inner = new RegExp(wordRe.source, wordRe.flags.includes("g") ? wordRe.flags : `${wordRe.flags}g`);
+  const whole = wholeWordRe(wordRe);
   const out: string[] = [];
   let m: RegExpExecArray | null;
   while ((m = runs.exec(text)) !== null) {
     const run = m[0];
     const parts = run.match(inner) ?? [];
     if (parts.length === 0 || (parts.length === 1 && parts[0] === run)) continue;
-    if (WORD_RE_ALPHABET.test(run)) continue;
+    const pieces = run.split(EM_DASH_RE).filter((piece) => piece !== "");
+    if (pieces.length > 0 && pieces.every((piece) => whole.test(piece))) continue;
     out.push(run);
   }
   return out;
@@ -241,8 +256,11 @@ export function checkWordAlphabet(text: string, wordRe: RegExp, index?: number):
       "Refusing rather than scoring text the transform mangles — 'a café' vacates to " +
       "'a washé' and 'don’t' (curly apostrophe) to 'big’t', and a single BPE piece can " +
       "then cover both a preserved and a vacated fragment. Use a passage written in the " +
-      "ASCII alphabet, with straight apostrophes and hyphens (emoji and CJK are fine: " +
-      "they are never vacated and are identical in all three variants). Widening the " +
+      "ASCII alphabet, with ONE straight apostrophe or hyphen between letters — \"don't\" " +
+      "and \"good-bye\" are matched whole, and so is the Gutenberg dash \"legs--upon\", " +
+      "which is two words with punctuation between them; \"don''t\" is not, and is the " +
+      "same stranded-character defect as the curly apostrophe. (Emoji and CJK are fine: " +
+      "they are never vacated and are identical in all three variants.) Widening the " +
       "alphabet is a change to the shared transform and its contract, not to this panel.",
   );
 }

@@ -14,6 +14,8 @@
  */
 
 import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import { AutoTokenizer } from "@huggingface/transformers";
 
 import { WORD_RE } from "../../src/lib/lexEngine";
@@ -29,6 +31,11 @@ import {
   VACANCY_PER_PASSAGE_REFUSAL,
   VACANCY_PRE_REWRITE_Q8,
   VACANCY_UNKNOWN_FORM_REFUSAL,
+  VACANCY_MIN_POOLED_PRESERVED,
+  VACANCY_ONNX_TORCH_AGREEMENT_NATS,
+  assertPooledPreservedBoundable,
+  onnxRepo,
+  onnxRepoIds,
 } from "../../src/lib/staticClient/arch";
 import {
   checkWordAlphabet,
@@ -41,6 +48,16 @@ import {
 import type { ApiError } from "../../src/lib/dataClient";
 import { readStaticJson } from "./staticTestUtils";
 import golden from "../fixtures/arch-vacancy-passages.json";
+
+/** tests/unit -> tests -> frontend -> code -> repo root. */
+const REPO_ROOT = path.resolve(__dirname, "../../../..");
+/** The recording of one real gpt2 run, written by `scripts/measure_vacancy_fp32.py`. */
+const FP32_RECORD = path.join(REPO_ROOT, "specs/007-vacancy-transform-field/fp32-reference.json");
+
+/** A number as it appears in an interpolated sentence, safe to put in a RegExp. */
+function esc(value: number): string {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 const TEXTS = [
   "The cow jumped over the moon, and the little dog laughed.",
@@ -301,19 +318,79 @@ describe("what the quantized static build may say (§8.3a, FR-720a)", () => {
    * of "this very configuration" taken on a different one. Round 3 fixed the *label*
    * (`QUANTIZATION_TERM`) and left the *prose*.
    *
-   * The fix is structural: the sentence is interpolated from `VACANCY_FP32_REFERENCE` and
-   * `VACANCY_PRE_REWRITE_Q8`, the fp32 constant is pinned to a real gpt2 run by
-   * `test_the_fp32_arm_quoted_in_the_static_client`, and this test pins the sentence to the
-   * constants. Changing either without the other now fails somewhere.
+   * The first repair was called structural and was not: the sentence interpolated the
+   * constants, and this test then asserted the sentence CONTAINED them — which it must,
+   * having just interpolated them. Two mutants proved it (round 5, 815/815 green each):
+   * changing `unknownForm` from 0.2872 to 0.4872, and EXCHANGING the two interpolation
+   * slots, which restored the exact original defect — "on the configuration that ships …
+   * it is 0.2726" — because both numbers were still somewhere in the string.
+   *
+   * So the assertions below pin each figure to the CLAUSE it belongs to, and the constant
+   * itself is pinned, in the test after this one, to a recorded real run.
    */
-  it("quotes the CURRENT float32 arm, from the constant that is pinned to a real run", () => {
+  it("puts each figure in the clause it belongs to, not merely somewhere in the message", () => {
     const msg = byId.unknown_form.refused!.message;
-    expect(msg).toContain(String(VACANCY_FP32_REFERENCE.unknownForm));
-    expect(msg).toContain(String(VACANCY_FP32_REFERENCE.unknownFormSe));
-    expect(msg).toContain(String(VACANCY_FP32_REFERENCE.pairedPreserved));
+    const fp32 = VACANCY_FP32_REFERENCE;
+    const pre = VACANCY_PRE_REWRITE_Q8;
+    // The two values must differ, or the clause test below could not tell them apart.
+    expect(fp32.unknownForm).not.toBe(pre.unknownForm.fp32);
+    // THE SHIPPED CONFIGURATION -> the re-measured float32 figure, its se and its n.
+    expect(msg).toMatch(
+      new RegExp(
+        `configuration that ships — ${fp32.model}, float32, the six default passages, ` +
+          `p = 1, seed = 0 — it is ${esc(fp32.unknownForm)} ± ${esc(fp32.unknownFormSe)} ` +
+          `nats over ${fp32.pairedPreserved} paired tokens`,
+      ),
+    );
+    // HISTORY -> the pre-rewrite pair, and only there.
+    expect(msg).toMatch(
+      new RegExp(
+        `variant texts that no longer exist: there float32 read ${esc(pre.unknownForm.fp32)} ` +
+          `and q8 read ${esc(pre.unknownForm.q8)}, a ${pre.unknownForm.errorPercent} % error`,
+      ),
+    );
+    // …and neither number appears in the other's clause. Exchanging the slots must fail.
+    expect(msg).not.toMatch(
+      new RegExp(`configuration that ships[^.]*${esc(pre.unknownForm.fp32)}`),
+    );
+    expect(msg).not.toMatch(new RegExp(`no longer exist[^.]*${esc(fp32.unknownForm)}`));
     // The stale pair, and the stale range that excluded the value that ships.
     expect(msg).not.toContain("0.16–0.27");
     expect(msg).not.toMatch(/Measured on this very configuration/);
+  });
+
+  /**
+   * The other half of the pin, and the one the mutation survived: the CONSTANT.
+   *
+   * `VACANCY_FP32_REFERENCE` is a literal in TypeScript because the browser build cannot
+   * run gpt2 at build time. Its claim to be "pinned to a real run" was, until now, a
+   * Python test asserting its own separately-typed literal. The chain is now
+   *
+   *     the real gpt2 run -> specs/007-vacancy-transform-field/fp32-reference.json
+   *                       -> VACANCY_FP32_REFERENCE
+   *
+   * with `test_the_fp32_arm_quoted_in_the_static_client` (backend, real model) asserting
+   * the first arrow, and this test the second. Neither end restates a number.
+   */
+  it("ships fp32 constants that equal the recorded run of the real model", () => {
+    const record = JSON.parse(fs.readFileSync(FP32_RECORD, "utf-8")) as {
+      format: string;
+      model: string;
+      params: { p: number; seed: number; passages: string };
+      preserved: Record<string, number>;
+      differences: Record<string, { nats: number; se: number; nPairs: number }>;
+    };
+    expect(record.format).toBe("vacancy-fp32-reference-v1");
+    expect(record.model).toBe(VACANCY_FP32_REFERENCE.model);
+    expect(record.params).toEqual({ passages: "default", p: 1, seed: 0 });
+    expect(VACANCY_FP32_REFERENCE.pairedPreserved).toBe(record.differences.unknown_form.nPairs);
+    expect(VACANCY_FP32_REFERENCE.pairedPreserved).toBe(record.preserved.english);
+    // Four decimal places is the precision the sentences quote; `toBeCloseTo(x, 3)` is
+    // |Δ| < 5e-4, the same tolerance the backend test applies to the same numbers.
+    expect(VACANCY_FP32_REFERENCE.wrongContent).toBeCloseTo(record.differences.wrong_content.nats, 3);
+    expect(VACANCY_FP32_REFERENCE.unknownForm).toBeCloseTo(record.differences.unknown_form.nats, 3);
+    expect(VACANCY_FP32_REFERENCE.total).toBeCloseTo(record.differences.total.nats, 3);
+    expect(VACANCY_FP32_REFERENCE.unknownFormSe).toBeCloseTo(record.differences.unknown_form.se, 3);
   });
 
   it("labels the retained q8 figures as pre-rewrite wherever it quotes them", () => {
@@ -346,6 +423,88 @@ describe("what the quantized static build may say (§8.3a, FR-720a)", () => {
         expect(msg, msg).toMatch(/before the swap|pre-rewrite|retained|no longer exist/);
       }
     }
+  });
+
+  /**
+   * The quantization floor, at the unit level.
+   *
+   * `VACANCY_MIN_POOLED_PRESERVED` could be lowered from 700 to 7 with the whole unit
+   * suite green (round 5): the only gate was `tests/e2e/docs.spec.ts`, which compares it
+   * to the Info tab's prose. The static build would then print pooled q8 differences on
+   * samples two orders of magnitude below the size the retained bound was taken at — the
+   * regime where a single-passage delta was wrong by 115 % of its own value.
+   *
+   * The sizes below are not invented: they come from the recorded real run (856 preserved
+   * tokens over the six default passages) and from the study the bound is retained from.
+   */
+  it("refuses a pool smaller than the size the retained q8 bound was measured at", () => {
+    const record = JSON.parse(fs.readFileSync(FP32_RECORD, "utf-8")) as {
+      preserved: Record<string, number>;
+    };
+    // One default passage's worth of preserved tokens — what a reader who pastes a single
+    // passage gets. It must NOT be enough for a q8 number.
+    const onePassage = Math.round(record.preserved.english / golden.count);
+    expect(onePassage).toBeLessThan(VACANCY_MIN_POOLED_PRESERVED);
+    expect(() => assertPooledPreservedBoundable(onePassage)).toThrow(/below the/);
+    expect(() => assertPooledPreservedBoundable(onePassage)).toThrow(
+      new RegExp(`Pooled over ${onePassage} preserved tokens`),
+    );
+    // …and the boundary itself is where the constant says it is.
+    expect(() =>
+      assertPooledPreservedBoundable(VACANCY_MIN_POOLED_PRESERVED - 1),
+    ).toThrow(/below the/);
+    expect(() => assertPooledPreservedBoundable(VACANCY_MIN_POOLED_PRESERVED)).not.toThrow();
+    // …and the floor is the size §8.3a says the bound was taken at, read from §8.3a.
+    const architecture = fs.readFileSync(
+      path.join(REPO_ROOT, "specs/007-vacancy-transform-field/architecture.md"),
+      "utf-8",
+    );
+    const measuredAt = architecture.match(/~(\d+) preserved\s+closed-class tokens per condition/);
+    expect(measuredAt, "§8.3a no longer states the size the bound was measured at").not.toBeNull();
+    expect(VACANCY_MIN_POOLED_PRESERVED).toBe(Number(measuredAt![1]));
+  });
+
+  /**
+   * "Two exported constants now hold the figures, and every sentence is interpolated from
+   * them" was said while `−0.19`, `+0.40`, `0.65`, `0.28` and `5.3e-4` were still typed by
+   * hand into these very messages (round 5, F5). All five were correct at the time, which
+   * is exactly how the earlier stale numbers survived too.
+   *
+   * So the claim is checked instead of repeated: every DECIMAL a reader can be shown by
+   * this module must be derivable from a constant. A new hand-typed figure fails here.
+   */
+  it("hand-types no decimal figure in any refusal it can emit", () => {
+    const pre = VACANCY_PRE_REWRITE_Q8;
+    const fp32 = VACANCY_FP32_REFERENCE;
+    const allowed = new Set(
+      [
+        Math.abs(pre.absoluteShiftNats.gpt2).toFixed(2),
+        Math.abs(pre.absoluteShiftNats.smollm2).toFixed(2),
+        String(pre.study.perPassageWorstNats),
+        String(pre.study.unknownFormWorstPassageNats),
+        String(pre.study.pooledBoundNats),
+        String(pre.unknownForm.fp32),
+        String(pre.unknownForm.q8),
+        String(fp32.unknownForm),
+        String(fp32.unknownFormSe),
+        ...pre.study.unknownFormRange.split(/[–-]/),
+        VACANCY_ONNX_TORCH_AGREEMENT_NATS.toExponential(1),
+      ].map((s) => s.trim()),
+    );
+    for (const msg of [
+      VACANCY_ABSOLUTE_REFUSAL.message,
+      VACANCY_PER_PASSAGE_REFUSAL.message,
+      VACANCY_UNKNOWN_FORM_REFUSAL.message,
+    ]) {
+      for (const token of msg.match(/\d+\.\d+(?:e-?\d+)?/g) ?? []) {
+        expect(allowed, `${token} in: ${msg}`).toContain(token);
+      }
+    }
+    // …and the two figures that are not decimals but are quoted as measurements.
+    expect(VACANCY_UNKNOWN_FORM_REFUSAL.message).toContain(String(fp32.pairedPreserved));
+    expect(VACANCY_PER_PASSAGE_REFUSAL.message).toContain(
+      `${pre.study.perPassageWorstPercent} %`,
+    );
   });
 
   it("reports the two pooled differences it has a bound for", () => {

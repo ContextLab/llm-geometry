@@ -55,13 +55,35 @@ const EXACT_CELLS_HARD_CAP = 65536; // bound the number/size of range reads
 const TRACE_EXPORT_MAX_CONTEXT = 64; // the exporter ran the backend default
 
 /** Community ONNX exports for the curated models (repos verified on the Hub; all ship
- * the `model_quantized.onnx` the runtime's q8 ladder loads — see transformersRuntime). */
-const ONNX_REPOS: Record<string, string> = {
-  "HuggingFaceTB/SmolLM2-135M-Instruct": "onnx-community/SmolLM2-135M-Instruct-ONNX",
-  "HuggingFaceTB/SmolLM2-360M-Instruct": "onnx-community/SmolLM2-360M-Instruct-ONNX",
-  gpt2: "onnx-community/gpt2-ONNX",
-  "Qwen/Qwen2.5-0.5B-Instruct": "onnx-community/Qwen2.5-0.5B-Instruct",
-};
+ * the `model_quantized.onnx` the runtime's q8 ladder loads — see transformersRuntime).
+ *
+ * NULL-PROTOTYPE, and read only through `onnxRepo`. A plain object literal inherits
+ * `Object.prototype`, so `ONNX_REPOS["constructor"]` is the `Object` FUNCTION and
+ * `ONNX_REPOS["toString"]` is a method — both truthy, so a `if (!repo)` guard passes them
+ * straight to the ONNX runtime as a repo id. That is a wrong answer with nothing thrown,
+ * which is the defect class this campaign is about; a model id is user input in the URL
+ * hash. Frozen too, so a caller cannot add a repo at run time. */
+const ONNX_REPOS: Readonly<Record<string, string>> = Object.freeze(
+  Object.assign(Object.create(null) as Record<string, string>, {
+    "HuggingFaceTB/SmolLM2-135M-Instruct": "onnx-community/SmolLM2-135M-Instruct-ONNX",
+    "HuggingFaceTB/SmolLM2-360M-Instruct": "onnx-community/SmolLM2-360M-Instruct-ONNX",
+    gpt2: "onnx-community/gpt2-ONNX",
+    "Qwen/Qwen2.5-0.5B-Instruct": "onnx-community/Qwen2.5-0.5B-Instruct",
+  }),
+);
+
+/** The ONNX repo wired up for `modelId`, or `undefined` — never an inherited property.
+ *
+ * Exported because the two call sites are inside `async` methods that need a real model
+ * to reach, and this is the part a unit test can hold still. */
+export function onnxRepo(modelId: string): string | undefined {
+  return Object.hasOwn(ONNX_REPOS, modelId) ? ONNX_REPOS[modelId] : undefined;
+}
+
+/** The model ids that have a browser export, for the "covers: …" half of the refusals. */
+export function onnxRepoIds(): string[] {
+  return Object.keys(ONNX_REPOS);
+}
 
 interface ArchMeta {
   model_id: string;
@@ -203,11 +225,21 @@ const VACANCY_Q8_UNCERTAINTY_NATS = 0.2;
  * Three user-facing strings on this panel quote these figures. They used to quote them as
  * literals inside the sentences, and when the swap rewrite moved the run the sentences kept
  * the old values while calling them "measured on this very configuration" — the third
- * instance of that failure in one campaign. So the sentences are now BUILT from these
- * constants, and the constants are pinned to a real run of the real model by
- * `test_the_fp32_arm_quoted_in_the_static_client`
- * (`code/backend/tests/integration/test_arch_vacancy_score.py`) and to the sentences by
- * `tests/unit/staticVacancy.test.ts`. A number cannot move without both failing.
+ * instance of that failure in one campaign. So the sentences are BUILT from these constants.
+ *
+ * That alone was not a pin, and was described as one: the backend test asserted its own
+ * separately-typed literals and never read this file, and the frontend test interpolated a
+ * constant into a sentence and then asserted the sentence contained it. Changing
+ * `unknownForm` from 0.2872 to 0.4872 passed all 815 tests. The chain is now
+ *
+ *     the real gpt2 run  ->  specs/007-vacancy-transform-field/fp32-reference.json
+ *                        ->  this constant  ->  the clause of the sentence it belongs in
+ *
+ * written by `scripts/measure_vacancy_fp32.py` and asserted, arrow by arrow, by
+ * `test_the_fp32_arm_quoted_in_the_static_client` (backend, real model — it re-runs gpt2
+ * AND parses this constant out of this file) and `tests/unit/archVacancy.test.ts` (which
+ * compares this constant with the record, and pins each figure to its clause). No number
+ * here is a literal typed in two places.
  *
  * gpt2, float32, the six default passages, `p = 1, seed = 0`; 2754/2766/3792 tokens and 856
  * paired preserved tokens in every variant.
@@ -244,9 +276,37 @@ export const VACANCY_PRE_REWRITE_Q8 = {
   wrongContent: { fp32: 0.7166, q8: 0.644 },
   total: { fp32: 0.9892, q8: 0.879 },
   unknownForm: { fp32: 0.2726, q8: 0.235, errorPercent: 14 },
+  /**
+   * What q8 did to ABSOLUTE log-likelihoods, per model — the reason none is reportable.
+   * The magnitudes are pre-rewrite like everything else here; what they establish is that
+   * the shift does not even keep its SIGN across two models, which no re-measurement can
+   * undo. Quoted in `VACANCY_ABSOLUTE_REFUSAL`.
+   */
+  absoluteShiftNats: { gpt2: -0.19, smollm2: 0.4 },
   /** The independent six-passage study of §8.3a, on its own passage cut and its own swap. */
-  study: { pooledBoundNats: 0.054, unknownFormRange: "0.06–0.21", perPassageWorstPercent: 115 },
+  study: {
+    pooledBoundNats: 0.054,
+    unknownFormRange: "0.06–0.21",
+    perPassageWorstPercent: 115,
+    /** The same worst case in nats, quoted by `VACANCY_PER_PASSAGE_REFUSAL`. */
+    perPassageWorstNats: 0.65,
+    /** q8's worst error on `nonce − swap` for a single passage (§8.3a). */
+    unknownFormWorstPassageNats: 0.28,
+  },
 } as const;
+
+/**
+ * ONNX fp32 ≡ torch, measured across the §8.3a texts. This is the reason the full stack is
+ * offered as the answer in every refusal on this panel: the disagreement between the two
+ * runtimes at float32 is three orders of magnitude below the effect. Not a q8 figure, and
+ * not affected by the swap rewrite — it is a property of the two runtimes.
+ */
+export const VACANCY_ONNX_TORCH_AGREEMENT_NATS = 5.3e-4;
+
+/** `−0.19` / `+0.40`: a signed shift, with the typographic minus the prose uses. */
+function signedNats(value: number): string {
+  return (value < 0 ? "−" : "+") + Math.abs(value).toFixed(2);
+}
 
 /**
  * Preserved tokens that must be pooled before a q8 number may be shown. The bound above
@@ -261,8 +321,35 @@ export const VACANCY_PRE_REWRITE_Q8 = {
  * they need; they differ in the number because they differ in the reason. (This gate also
  * subsumes the sampling floor here: 700 ≫ 2, which is why `pairedDifference`'s `se = NaN`
  * branch is unreachable in this build.)
+ *
+ * EXPORTED so a unit test can hold it against both the measurement it cites
+ * (`architecture.md` §8.3a, "~700 preserved closed-class tokens per condition") and the
+ * real run: 856 preserved tokens over the six default passages means one passage is ~143,
+ * far below this floor, which is the case the gate exists for. Lowering it to 7 used to
+ * pass every unit test — only the e2e docs check noticed — see `assertPooledPreservedBoundable`.
  */
-const VACANCY_MIN_POOLED_PRESERVED = 700;
+export const VACANCY_MIN_POOLED_PRESERVED = 700;
+
+/**
+ * The pooled-size gate itself, as a function, so it can be exercised without a browser.
+ *
+ * `archVacancyScore` cannot be unit-tested end to end — it needs a real ONNX runtime — so
+ * the one statement in it that decides between "a number" and "a refusal" is here, where a
+ * test can drive it at the boundary and one token below it.
+ */
+export function assertPooledPreservedBoundable(pooledPreserved: number): void {
+  if (pooledPreserved >= VACANCY_MIN_POOLED_PRESERVED) return;
+  throw staticModeError(
+    `Pooled over ${pooledPreserved} preserved tokens, this is below the ` +
+      `${VACANCY_MIN_POOLED_PRESERVED} at which q8's error on the pooled difference ` +
+      `was bounded (≤ ${VACANCY_PRE_REWRITE_Q8.study.pooledBoundNats} nats, on the ` +
+      "pre-rewrite variant texts — the bound is retained, not re-measured since). " +
+      "Below it the only honest answer is no number: a single-passage delta under q8 " +
+      `was wrong by up to ${VACANCY_PRE_REWRITE_Q8.study.perPassageWorstPercent} % of ` +
+      "its own value. Add more passages, or run the full stack, which scores at " +
+      "float32 and reports every per-passage number.",
+  );
+}
 
 /** MIRROR of `TINY_ARM` (Python) — the other half of the 2×2, restated for the panel. */
 const VACANCY_TINY_ARM = {
@@ -490,7 +577,9 @@ export const VACANCY_ABSOLUTE_REFUSAL: ArchVacancyRefusal = {
   type: "StaticModeError",
   message:
     "Absolute log-likelihoods are not reportable from a quantized model: q8 shifted " +
-    "nllPreserved by −0.19 nats on gpt2 and +0.40 on SmolLM2-135M — the sign is not " +
+    `nllPreserved by ${signedNats(VACANCY_PRE_REWRITE_Q8.absoluteShiftNats.gpt2)} nats on ` +
+    `gpt2 and ${signedNats(VACANCY_PRE_REWRITE_Q8.absoluteShiftNats.smollm2)} on ` +
+    "SmolLM2-135M — the sign is not " +
     "even stable across models. Those two figures were measured before the swap " +
     "transform was rewritten and have not been re-taken since, because a q8 run needs a " +
     "real browser; what they establish is the refusal, not a magnitude for today. The " +
@@ -503,7 +592,8 @@ export const VACANCY_PER_PASSAGE_REFUSAL: ArchVacancyRefusal = {
   type: "StaticModeError",
   message:
     "A per-passage delta is not reportable under q8: the worst discrepancy on record was " +
-    `0.65 nats, ${VACANCY_PRE_REWRITE_Q8.study.perPassageWorstPercent} % of that ` +
+    `${VACANCY_PRE_REWRITE_Q8.study.perPassageWorstNats} nats, ` +
+    `${VACANCY_PRE_REWRITE_Q8.study.perPassageWorstPercent} % of that ` +
     "passage's own float32 delta, caused by q8 compressing the 16–18 nat line-initial " +
     "function words this measurement is precisely about. The pooled figure is the only " +
     "one carrying a bound at all, and even that bound is retained from a measurement " +
@@ -514,8 +604,11 @@ export const VACANCY_PER_PASSAGE_REFUSAL: ArchVacancyRefusal = {
 /**
  * Refusal: `nonce − swap`, the contrast quantization destroys.
  *
- * Every figure in this message is interpolated from `VACANCY_FP32_REFERENCE` or
- * `VACANCY_PRE_REWRITE_Q8`, and each is labelled with the configuration it belongs to. The
+ * Every figure in this message is interpolated — from `VACANCY_FP32_REFERENCE`,
+ * `VACANCY_PRE_REWRITE_Q8` or `VACANCY_ONNX_TORCH_AGREEMENT_NATS`; the claim used to be
+ * made while `0.28` and `5.3e-4` were still hand-typed here, so it is now checked by
+ * `tests/unit/archVacancy.test.ts` rather than asserted in a comment. Each figure is
+ * labelled with the configuration it belongs to, and pinned to that CLAUSE. The
  * previous wording asserted "Measured on this very configuration: float32 says 0.273 for
  * gpt2 and q8 says 0.235" — both pre-rewrite values, both presented as current, on a
  * configuration that no longer existed. The float32 arm has been re-derived (it is
@@ -536,14 +629,19 @@ export const VACANCY_UNKNOWN_FORM_REFUSAL: ArchVacancyRefusal = {
     `variant texts that no longer exist: there float32 read ${VACANCY_PRE_REWRITE_Q8.unknownForm.fp32} ` +
     `and q8 read ${VACANCY_PRE_REWRITE_Q8.unknownForm.q8}, a ` +
     `${VACANCY_PRE_REWRITE_Q8.unknownForm.errorPercent} % error on the quantity the whole ` +
-    "result turns on, with q8's error reaching 0.28 nats on a single passage and a sign " +
+    `result turns on, with q8's error reaching ` +
+    `${VACANCY_PRE_REWRITE_Q8.study.unknownFormWorstPassageNats} nats on a single passage ` +
+    "and a sign " +
     "flip in one passage of six per model. Re-running the q8 arm needs a real browser, so " +
     "until then this difference has no error bound at this dtype — and subtracting a " +
     "pre-rewrite q8 number from today's float32 one would compare two different passage " +
     "sets and invent one. The two pooled numbers shown here do differ by it; that " +
     "arithmetic is not a measurement. Run the full stack (uvicorn " +
     "llm_geometry.api.app:app), which scores at float32, where ONNX and torch agree to " +
-    "5.3e-4 nats.",
+    // `.toExponential(1)`, because `${5.3e-4}` stringifies as "0.00053": JavaScript only
+    // switches to exponential notation below 1e-6, and the sentence is about a bound the
+    // reader is meant to compare with 0.28 at a glance.
+    `${VACANCY_ONNX_TORCH_AGREEMENT_NATS.toExponential(1)} nats.`,
 };
 
 /**
@@ -910,12 +1008,12 @@ export class ArchSection {
    */
   async archVacancyScore(body: ArchVacancyScoreBody): Promise<ArchVacancyScoreResult> {
     const m = await this.model(body.model_id);
-    const repo = ONNX_REPOS[m.model_id];
+    const repo = onnxRepo(m.model_id);
     if (!repo) {
       throw staticModeError(
         `No browser (ONNX) export is wired up for ${m.model_id}, so this measurement ` +
           "cannot be run on it here — it covers: " +
-          Object.keys(ONNX_REPOS).join(", ") +
+          onnxRepoIds().join(", ") +
           ". Run the full stack (see the README) for other models.",
       );
     }
@@ -998,18 +1096,7 @@ export class ArchSection {
     }
 
     const pooledPreserved = preservedIdx.english.reduce((n, list) => n + list.length, 0);
-    if (pooledPreserved < VACANCY_MIN_POOLED_PRESERVED) {
-      throw staticModeError(
-        `Pooled over ${pooledPreserved} preserved tokens, this is below the ` +
-          `${VACANCY_MIN_POOLED_PRESERVED} at which q8's error on the pooled difference ` +
-          `was bounded (≤ ${VACANCY_PRE_REWRITE_Q8.study.pooledBoundNats} nats, on the ` +
-          "pre-rewrite variant texts — the bound is retained, not re-measured since). " +
-          "Below it the only honest answer is no number: a single-passage delta under q8 " +
-          `was wrong by up to ${VACANCY_PRE_REWRITE_Q8.study.perPassageWorstPercent} % of ` +
-          "its own value. Add more passages, or run the full stack, which scores at " +
-          "float32 and reports every per-passage number.",
-      );
-    }
+    assertPooledPreservedBoundable(pooledPreserved);
 
     const differences = staticVacancyDifferences(
       pairedDifference(scored.english, preservedIdx.english, scored.swap, preservedIdx.swap),
@@ -1070,12 +1157,12 @@ export class ArchSection {
   /** LIVE generation on the model's community ONNX export. */
   async archGenerate(body: ArchGenerateBody): Promise<ArchGenerateResult> {
     const m = await this.model(body.model_id);
-    const repo = ONNX_REPOS[m.model_id];
+    const repo = onnxRepo(m.model_id);
     if (!repo) {
       throw staticModeError(
         `No browser (ONNX) export is wired up for ${m.model_id} — live chat in the ` +
           "static demo covers: " +
-          Object.keys(ONNX_REPOS).join(", ") +
+          onnxRepoIds().join(", ") +
           ". Run the full stack (see the README) for other models.",
       );
     }

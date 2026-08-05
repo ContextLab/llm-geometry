@@ -15,7 +15,12 @@
  *    9 993 letters and marks and 11 joiners, U+0890 among them (a real `Cf`). One stack
  *    refused a passage the other scored;
  *  - `legs--upon` was refused although it is written entirely in `WORD_RE`'s own alphabet,
- *    so the refusal's own advice could not be followed.
+ *    so the refusal's own advice could not be followed;
+ *  - and the exemption that closed THAT tested the run's alphabet, which admitted
+ *    `don''t` — also pure `WORD_RE` alphabet, also two matches, this time with a character
+ *    stranded inside a rewritten word (`little''t`, HTTP 200). The exemption is a
+ *    whole-match test after cutting at the em dash, and the two properties are pinned
+ *    below on runs that differ in exactly one of them.
  */
 
 import { describe, expect, it } from "vitest";
@@ -130,17 +135,33 @@ describe("the pinned Unicode word classes", () => {
     }
   });
 
-  it("does not refuse a run written entirely in WORD_RE's own alphabet", () => {
+  it("exempts the em dash by WHOLE MATCH, not by the alphabet the run is written in", () => {
     // The Gutenberg em-dash convention, in this project's own corpus. The refusal told the
     // reader to use straight ASCII hyphens, which is what they had done.
-    for (const text of ["legs--upon", "ba--are", "hea--art", "Lady--loves", "don''t", "a---b"]) {
+    //
+    // The first exemption tested the run's ALPHABET, and that admitted `don''t`: pure
+    // ASCII, pure WORD_RE alphabet, and still `don` + `t` with a character stranded
+    // between two halves of a word the transform rewrote (`little''t`, HTTP 200) — the
+    // `don’t` → `big’t` defect restored. Both groups below are written in nothing but
+    // WORD_RE's alphabet; they differ only in whether WORD_RE matches every
+    // dash-separated piece WHOLE, which is the property that makes the rewrite safe.
+    const asciiAlphabet = /^[A-Za-z'-]+$/;
+    for (const text of ["legs--upon", "ba--are", "hea--art", "Lady--loves", "a---b", "legs--upon's"]) {
+      expect(asciiAlphabet.test(text), text).toBe(true);
       expect(fragmentedWords(text, WORD_RE), text).toEqual([]);
       expect(() => checkWordAlphabet(text, WORD_RE)).not.toThrow();
     }
-    // …and the escape hatch is ASCII-only: repeated INVISIBLE joiners still refuse.
+    for (const text of ["don''t", "don-'t", "don'-t", "don''''t"]) {
+      expect(asciiAlphabet.test(text), text).toBe(true);
+      expect(fragmentedWords(text, WORD_RE), text).toEqual([text]);
+      expect(() => checkWordAlphabet(`the cat ${text} sat`, WORD_RE)).toThrow(/word alphabet/);
+    }
+    // …and the exemption is ASCII-only: repeated INVISIBLE joiners still refuse.
     expect(fragmentedWords("co­­operate", WORD_RE)).toEqual(["co­­operate"]);
     expect(fragmentedWords("don’’t", WORD_RE)).toEqual(["don’’t"]);
     expect(fragmentedWords("don’t", WORD_RE)).toEqual(["don’t"]);
+    // …and cutting at the dash exempts nothing on the letter half of the alphabet.
+    expect(fragmentedWords("café--x", WORD_RE)).toEqual(["café--x"]);
   });
 
   it("answers the shared case table exactly, as the backend does", () => {

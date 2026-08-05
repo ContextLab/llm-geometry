@@ -8,7 +8,10 @@ assert every structural property, and the six-passage run is what the panel does
 
 from __future__ import annotations
 
+import json
 import math
+import re
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +24,37 @@ from llm_geometry.arch.vacancy_score import (
 from llm_geometry.errors import InvalidParamError
 
 MODEL = "gpt2"  # the smallest curated model, and one of the two §8.3a measured
+
+#: tests/integration/<this file> -> tests -> backend -> code -> repo root.
+REPO_ROOT = Path(__file__).resolve().parents[4]
+#: The recording of one real run of the configuration the static build quotes, written by
+#: `scripts/measure_vacancy_fp32.py`. Both stacks are pinned to THIS file.
+FP32_RECORD = REPO_ROOT / "specs" / "007-vacancy-transform-field" / "fp32-reference.json"
+STATIC_CLIENT = REPO_ROOT / "code" / "frontend" / "src" / "lib" / "staticClient" / "arch.ts"
+
+
+def _static_client_fp32_reference() -> dict[str, float | str]:
+    """`VACANCY_FP32_REFERENCE`, read out of the TypeScript source the browser ships.
+
+    Parsed rather than transcribed: the whole point is that no human retypes the number in
+    the second language. A missing or renamed constant fails here rather than passing
+    vacuously.
+    """
+    source = STATIC_CLIENT.read_text(encoding="utf-8")
+    body = re.search(r"export const VACANCY_FP32_REFERENCE = \{(.*?)\n\} as const;", source, re.S)
+    assert body, "VACANCY_FP32_REFERENCE is gone or renamed in staticClient/arch.ts"
+    fields: dict[str, float | str] = {}
+    for key, value in re.findall(r"^\s{2}(\w+):\s*(\"[^\"]*\"|[-\d.eE]+),", body.group(1), re.M):
+        fields[key] = value.strip('"') if value.startswith('"') else float(value)
+    assert set(fields) >= {
+        "model",
+        "pairedPreserved",
+        "wrongContent",
+        "unknownForm",
+        "unknownFormSe",
+        "total",
+    }, fields
+    return fields
 
 
 @pytest.fixture(scope="module")
@@ -271,31 +305,63 @@ def test_the_fp32_arm_quoted_in_the_static_client() -> None:
     stale the day the swap transform was rewritten, and nothing failed — the comment simply
     stopped describing the code beside it, which is the defect FR-720a exists to prevent.
 
-    So the comment's fp32 arm is pinned here, against the real model. The q8 arm cannot be:
-    it needs a browser, and `VACANCY_MEASURED_DTYPES` says why. If this test fails, the
-    transform moved; update the comment in the SAME commit, and treat the constant's
-    justification as open until a browser run re-measures the q8 side.
+    The first repair moved the figures out of the prose into `VACANCY_FP32_REFERENCE` and
+    said they were "pinned to a real run" here. They were not: this test asserted its OWN
+    literals and never read the TypeScript file, and the TypeScript test interpolated the
+    constant into the sentence and then checked the sentence contained the constant. Both
+    are tautologies — ``unknownForm`` could be changed from 0.2872 to 0.4872 with the whole
+    suite green (verified, round 5).
+
+    The chain is now three real links, and no link is a literal typed twice:
+
+        the real gpt2 run  ->  specs/007-vacancy-transform-field/fp32-reference.json
+                           ->  VACANCY_FP32_REFERENCE (staticClient/arch.ts)
+
+    This test asserts BOTH arrows — the live model against the recorded run, and the
+    shipped TypeScript constant against the same record — so a number cannot move in the
+    browser build, in the record, or in the model without a failure here.
+    `tests/unit/archVacancy.test.ts` asserts the second arrow again from the other side,
+    and pins each figure to the CLAUSE of the refusal it belongs to.
+
+    Re-record with ``python scripts/measure_vacancy_fp32.py`` when the transform legitimately
+    moves, and change the record, the constant and the sentences in one commit. The q8 arm
+    cannot be pinned at all: it needs a browser, and `VACANCY_MEASURED_DTYPES` says why.
 
     Six passages × three variants = 18 real forward passes of ~300 tokens on gpt2/CPU.
     """
+    record = json.loads(FP32_RECORD.read_text(encoding="utf-8"))
+    assert record["format"] == "vacancy-fp32-reference-v1"
+    assert record["model"] == MODEL and record["params"] == {
+        "passages": "default",
+        "p": 1.0,
+        "seed": 0,
+    }
+
     result = vacancy_score(MODEL, default_passages(), p=1.0, seed=0)
 
+    # (1) the recorded run IS this run. Editing the record without re-running gpt2 fails.
     tokens = {v["id"]: v["pooled"]["nTokens"] for v in result["variants"]}
-    assert tokens == {"english": 2754, "swap": 2766, "nonce": 3792}
+    assert tokens == record["tokens"]
     preserved = {v["id"]: v["pooled"]["nPreservedTokens"] for v in result["variants"]}
-    assert preserved == {"english": 856, "swap": 856, "nonce": 856}
-
+    assert preserved == record["preserved"]
     diffs = {d["id"]: d for d in result["differences"]}
-    assert diffs["wrong_content"]["nPairs"] == 856
-    assert diffs["wrong_content"]["nats"] == pytest.approx(0.6904, abs=5e-4)
-    assert diffs["wrong_content"]["se"] == pytest.approx(0.0539, abs=5e-4)
-    assert diffs["total"]["nats"] == pytest.approx(0.9776, abs=5e-4)
-    assert diffs["total"]["se"] == pytest.approx(0.0590, abs=5e-4)
-    # `unknown_form` is quoted BY NAME in the static build's `nonce − swap` refusal, which
-    # is the one place a reader is told what this contrast is worth at float32. It was left
-    # unpinned, and the refusal went on asserting the pre-rewrite 0.273 as "measured on this
-    # very configuration" for as long as the rewrite had been in. Pinned now, to the same
-    # tolerance as the two above, against `VACANCY_FP32_REFERENCE` in
-    # `code/frontend/src/lib/staticClient/arch.ts`.
-    assert diffs["unknown_form"]["nats"] == pytest.approx(0.2872, abs=5e-4)
-    assert diffs["unknown_form"]["se"] == pytest.approx(0.0450, abs=5e-4)
+    for name, measured in record["differences"].items():
+        assert diffs[name]["nPairs"] == measured["nPairs"], name
+        assert diffs[name]["nats"] == pytest.approx(measured["nats"], abs=1e-9), name
+        assert diffs[name]["se"] == pytest.approx(measured["se"], abs=1e-9), name
+
+    # (2) the TypeScript constant the browser build ships IS that record, to the precision
+    # it quotes. Read out of the file, not restated here: a literal restated in a second
+    # language is exactly the failure this test exists to catch.
+    shipped = _static_client_fp32_reference()
+    assert shipped["model"] == MODEL
+    assert shipped["pairedPreserved"] == record["differences"]["unknown_form"]["nPairs"]
+    for key, name in (
+        ("wrongContent", "wrong_content"),
+        ("unknownForm", "unknown_form"),
+        ("total", "total"),
+    ):
+        assert shipped[key] == pytest.approx(record["differences"][name]["nats"], abs=5e-4), key
+    assert shipped["unknownFormSe"] == pytest.approx(
+        record["differences"]["unknown_form"]["se"], abs=5e-4
+    )

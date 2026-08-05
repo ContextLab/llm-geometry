@@ -748,16 +748,24 @@ Two corrections, both from measured wrong answers (2026-08-04, round 5):
   commit that moves both stacks together. Reverting either stack to `\p{…}` or to
   `unicodedata.category` re-opens the divergence and fails those tests.
 
-**A run written entirely in `WORD_RE`'s own alphabet is not refused, even when `WORD_RE`
-splits it.** `J+` accepts a run of joiners where `WORD_RE` accepts exactly one, so the
-Gutenberg em-dash convention `legs--upon` was refused — while the refusal's own advice is
-"use a passage written in the ASCII alphabet, with straight apostrophes and hyphens", which
-`legs--upon` already is. There was no way to comply, and this project's corpus contains
-`ba--are`, `hea--art`, `Lady--loves`, `legs--upon`. The split is harmless there: each piece is
-a whole ASCII word the transform vacates *as* a word, and no character survives inside a
-rewritten fragment. That is exactly what fails for `don’t` and `co<SHY>operate`, where a
-character `WORD_RE` cannot see is left between two halves of a word it rewrote — so those
-still refuse. The escape hatch is ASCII-only: `co<SHY><SHY>operate` is still refused.
+**The em-dash convention is exempt, and it is the only exemption.** `J+` accepts a run of
+joiners where `WORD_RE` accepts exactly one, so the Gutenberg convention `legs--upon` was
+refused — while the refusal's own advice is "use a passage written in the ASCII alphabet,
+with straight apostrophes and hyphens", which `legs--upon` already is. There was no way to
+comply, and this project's corpus contains `ba--are`, `hea--art`, `Lady--loves`,
+`legs--upon`. Two or more ASCII hyphens between letters are a **dash**, i.e. punctuation
+between two words, so a wordlike run is cut at each such dash and the run is exempt only
+when `WORD_RE` matches **every resulting piece whole**. The pieces are then whole ASCII
+words the transform vacates *as* words, and no character survives inside a rewritten
+fragment.
+
+> The first version of this exemption tested whether the run was *written in* `WORD_RE`'s
+> alphabet, and that is a different property. It admitted `don''t` — pure ASCII, pure
+> `WORD_RE` alphabet, still `don` + `t`, and it scored 200 and vacated to `little''t`,
+> character-for-character the `don’t` → `big’t` defect this section exists to prevent
+> (introduced and pinned as correct on 2026-08-04; fixed the same day). `don-'t`, `'`-runs
+> and `café--x` refuse for the same reason: no cut at a dash leaves pieces `WORD_RE`
+> matches whole. The exemption is ASCII-only too: `co<SHY><SHY>operate` is still refused.
 
 `word-alphabet-cases.json` in this directory is the shared case table; both suites run it and
 must return the listed runs exactly.
@@ -937,10 +945,22 @@ content — the doc's T4 prediction that field ≫ location, on a model it did n
   > figure has a measured bound"*, of a bound that is retained. The figures now live in two
   > named constants, `VACANCY_FP32_REFERENCE` (0.6904 / **0.2872** / 0.9776 over 856 paired
   > tokens) and `VACANCY_PRE_REWRITE_Q8` (the 0.2726 / 0.235 pair, labelled as history), and
-  > the sentences are interpolated from them. `unknown_form` is the number the `nonce − swap`
-  > refusal quotes and was the one figure of the three that `test_the_fp32_arm_quoted_in_the_static_client`
-  > did not pin; it is pinned now. `archVacancy.test.ts` fails if a refusal claims a current
-  > q8 measurement or drops the constants.
+  > the sentences are interpolated from them. `archVacancy.test.ts` fails if a refusal claims a
+  > current q8 measurement or drops the constants.
+  >
+  > **And the pin is now a real one** (2026-08-04, round 7). Constants plus interpolation were
+  > described as a structural fix and were not: `test_the_fp32_arm_quoted_in_the_static_client`
+  > asserted its *own* literals and never read the TypeScript file, and the frontend test
+  > interpolated a constant into a sentence and then asserted the sentence contained it. Both
+  > mutants passed all 815 tests — `unknownForm` 0.2872 → 0.4872, and **exchanging** the fp32
+  > and pre-rewrite interpolation slots, which restored the original defect verbatim ("on the
+  > configuration that ships … it is 0.2726"). The chain is now
+  > **real gpt2 run → `fp32-reference.json` (this directory) → `VACANCY_FP32_REFERENCE` → the
+  > clause of the sentence**: the record is written by `scripts/measure_vacancy_fp32.py`, the
+  > backend test re-runs gpt2 against the record *and parses the TypeScript constant out of the
+  > shipped source*, and `archVacancy.test.ts` compares the constant with the record and pins
+  > each figure to its clause with an anchored pattern. Every decimal in the three refusals is
+  > checked against a constant, so a hand-typed figure fails too.
   >
   > **The rendered label now complies** (2026-08-04, round 3). Both error-bar renderers printed
   > `± 0.2 (quantization, measured)` on the two numbers the static panel reports — the one

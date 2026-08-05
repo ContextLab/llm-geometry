@@ -68,6 +68,7 @@ reported.
 from __future__ import annotations
 
 import math
+import re
 import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
@@ -158,10 +159,18 @@ MIN_PAIRED_PRESERVED = 2
 #:
 #: Widening ``WORD_RE`` to accept these instead is a change to the shared transform and its
 #: contract (§8.2); refusing is what this module may do on its own.
-#: The joiners ``WORD_RE`` itself accepts. A run built only from these and ASCII letters is
-#: written entirely in the alphabet the refusal message tells the reader to use, so it is not
-#: an alphabet problem — see :func:`fragmented_words`.
+#: The joiners ``WORD_RE`` itself accepts — one between two ASCII letters, which is what
+#: makes ``don't`` and ``good-bye`` single matches. Being written in these characters is NOT
+#: on its own a licence to score a run: ``don''t`` is written in nothing else and is still
+#: two matches with a character stranded between them (see :func:`fragmented_words`).
 WORD_RE_JOINERS = frozenset("'-")
+
+#: The Gutenberg em-dash convention: two or more ASCII hyphens, which a reader reads as a
+#: dash BETWEEN two words rather than as a joiner inside one. :func:`wordlike_runs` cannot
+#: tell the two apart (its grammar accepts any run of joiners), so :func:`fragmented_words`
+#: cuts a run here before asking whether ``WORD_RE`` matches each piece whole. MIRROR of
+#: ``EM_DASH_RE`` in ``staticClient/byteSpans.ts``.
+EM_DASH_RE = re.compile(r"-{2,}")
 
 
 def wordlike_runs(text: str) -> list[str]:
@@ -389,25 +398,34 @@ def fragmented_words(text: str) -> list[str]:
     variants, and are attributed to no word — which is the same treatment punctuation gets
     and is correct.
 
-    A run written ENTIRELY in ``WORD_RE``'s own alphabet is not an alphabet problem, even
-    when ``WORD_RE`` splits it. The Gutenberg em-dash convention ``legs--upon`` is one run
-    under the grammar of :func:`wordlike_runs` (``J+`` accepts a run of joiners) and two
-    matches under ``WORD_RE`` (which accepts exactly one), so it was refused — while the
-    refusal message tells the reader to "use a passage written in the ASCII alphabet, with
-    straight apostrophes and hyphens", which ``legs--upon`` already is. There was no way to
-    comply, and this project's own corpus contains ``ba--are``, ``hea--art``,
-    ``Lady--loves`` and ``legs--upon``. The split is real but harmless there: each piece is
-    a whole ASCII word the transform vacates AS a word, and no character survives inside a
-    rewritten fragment. That is exactly what does NOT hold for ``don’t`` or
-    ``co<SHY>operate``, where a character ``WORD_RE`` cannot see is left sitting between two
-    halves of a word it rewrote — so those still refuse.
+    ONE exemption, and it is narrow: the Gutenberg em-dash convention ``legs--upon``. Two
+    or more ASCII hyphens between letters are a DASH — punctuation a reader reads as a gap
+    between two words — not a joiner inside one word. :func:`wordlike_runs` cannot know
+    that (``J+`` accepts any run of joiners), so it hands over one run, ``WORD_RE`` finds
+    two matches, and this used to refuse — while telling the reader to "use a passage
+    written in the ASCII alphabet, with straight apostrophes and hyphens", which
+    ``legs--upon`` already is. There was no way to comply, and this project's own corpus
+    contains ``ba--are``, ``hea--art``, ``Lady--loves`` and ``legs--upon``. So the run is
+    cut at each dash and the exemption holds only when ``WORD_RE`` matches EVERY resulting
+    piece *whole* — the pieces are then whole ASCII words the transform vacates AS words,
+    and no character survives inside a rewritten fragment.
+
+    The test is that whole-match, NOT "the run is written in ASCII characters". Those two
+    differ, and the difference is the original defect: ``don''t`` is pure ASCII, and pure
+    ``WORD_RE`` alphabet, and it is still ``don`` + ``t`` with a character ``WORD_RE``
+    cannot see left sitting between two halves of a word it rewrote — it vacated to
+    ``little''t``, scored 200, and was character-for-character the ``don’t`` → ``big’t``
+    defect this refusal exists to prevent. An ASCII-alphabet test admitted it (2026-08-04,
+    while closing the ``--`` false positive); the whole-match test refuses it, and refuses
+    ``don-'t``, ``'tis`` and ``co<SHY>operate`` with it.
     """
     out: list[str] = []
     for run in wordlike_runs(text):
         parts = WORD_RE.findall(run)
         if not parts or (len(parts) == 1 and parts[0] == run):
             continue
-        if all(ch.isascii() and (ch.isalpha() or ch in WORD_RE_JOINERS) for ch in run):
+        pieces = [piece for piece in EM_DASH_RE.split(run) if piece]
+        if pieces and all(WORD_RE.fullmatch(piece) for piece in pieces):
             continue
         out.append(run)
     return out
@@ -439,10 +457,13 @@ def check_word_alphabet(text: str, index: int | None = None) -> None:
         f"{shown}. Refusing rather than scoring text the transform mangles — 'a café' "
         "vacates to 'a washé' and 'don’t' (curly apostrophe) to 'big’t', and a "
         "single BPE piece can then cover both a preserved and a vacated fragment. Use a "
-        "passage written in the ASCII alphabet, with straight apostrophes and hyphens "
-        "(emoji and CJK are fine: they are never vacated and are identical in all three "
-        "variants). Widening the alphabet is a change to the shared transform and its "
-        "contract, not to this endpoint.",
+        "passage written in the ASCII alphabet, with ONE straight apostrophe or hyphen "
+        'between letters — "don\'t" and "good-bye" are matched whole, and so is the '
+        'Gutenberg dash "legs--upon", which is two words with punctuation between them; '
+        "\"don''t\" is not, and is the same stranded-character defect as the curly "
+        "apostrophe. (Emoji and CJK are fine: they are never vacated and are identical in "
+        "all three variants.) Widening the alphabet is a change to the shared transform "
+        "and its contract, not to this endpoint.",
         {"words": list(dict.fromkeys(bad)), **({} if index is None else {"passage": index})},
     )
 
