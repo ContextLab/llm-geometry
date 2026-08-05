@@ -40,7 +40,11 @@ where = ["src"]
 # Both labs' training corpora ship with the package (public domain), so pip installs /
 # containers / CI never re-download them. geo/ = Alice (PG #11); lex/ = The Real Mother
 # Goose (PG #10607), committed whole with its licence footer intact.
-llm_geometry = ["geo/data/*.txt", "lex/data/*.txt"]
+#
+# arch/data/word-classes.json is the PINNED Unicode table `wordlike_runs` classifies code
+# points from. It is package data rather than a module constant because the browser stack
+# carries a byte-identical copy and a test compares the two: the file is the contract.
+llm_geometry = ["geo/data/*.txt", "lex/data/*.txt", "arch/data/*.json"]
 
 [tool.ruff]
 line-length = 100

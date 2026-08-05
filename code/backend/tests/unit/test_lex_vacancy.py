@@ -785,6 +785,44 @@ def test_meter_score_is_a_fraction_and_rejects_unknown_feet():
         meter_score("cat", "spondee")
 
 
+def test_meter_score_rejects_the_keys_a_javascript_object_would_inherit():
+    """The Python half of a TS↔Python divergence, kept honest from this side.
+
+    ``METER_FEET`` in ``lexEngine/vacancy.ts`` was a plain object literal, so
+    ``METER_FEET["constructor"]`` was ``Object`` rather than ``undefined``: the guard did not
+    fire and ``meterScore(line, "constructor")`` RETURNED ``0`` — a number, for a foot that
+    does not exist, with nothing thrown. ``"spondee"`` above threw correctly, which is
+    exactly why one example was not enough.
+
+    ``FEET`` is a dict and ``foot not in FEET`` is a real key test, so this stack was never
+    wrong. It is asserted anyway: the two stacks must refuse the same inputs, and this is the
+    list ``tests/unit/inheritedKeys.test.ts`` runs against the browser engine.
+    """
+    inherited = [
+        "constructor",
+        "toString",
+        "toLocaleString",
+        "valueOf",
+        "hasOwnProperty",
+        "isPrototypeOf",
+        "propertyIsEnumerable",
+        "__proto__",
+        "__defineGetter__",
+        "__defineSetter__",
+        "__lookupGetter__",
+        "__lookupSetter__",
+        # …and Python's own, which a dict would never confuse with a key but which cost
+        # nothing to pin beside them.
+        "__class__",
+        "__init__",
+        "keys",
+        "get",
+    ]
+    for key in inherited:
+        with pytest.raises(InvalidParamError, match="unknown foot"):
+            meter_score("the cat sat on the mat", key)
+
+
 # --- statistics, contract §10 -----------------------------------------------------------
 
 
@@ -1424,6 +1462,47 @@ def test_the_singleton_merge_boundary_is_exactly_one_member():
     vmap = build_vacancy_map(bare + ing[:2], VacancyParams(p=1.0, seed=0, mint="swap"), counts)
     assert {vmap.mapping[ing[0]], vmap.mapping[ing[1]]} == {ing[0], ing[1]}
     assert vmap.mapping[ing[0]] == ing[1] and vmap.mapping[ing[1]] == ing[0]
+
+
+def test_the_merge_boundary_is_class_SIZE_and_nothing_else():
+    """The merge condition is a statement about size, so it is asserted over every suffix.
+
+    The test above pins the boundary on one axis only — its domain is ``bare + ing[:k]``, so
+    no other suffix class is ever present. A class-SELECTIVE over-merge therefore survives
+    it. Mutation-verified (round 5): rewriting §8.3's condition as
+
+        if suffix and (len(grouped[suffix]) < 2 or suffix == "s"):
+
+    swallows every ``-s`` class at any size, and
+    ``test_the_singleton_merge_boundary_is_exactly_one_member`` still passes, because an
+    ``s``-class rule can never fire inside its domain. Every word in a swallowed class comes
+    back uninflected, so the swap arm stops controlling for inflection while still claiming
+    to — the exact harm the boundary exists to prevent, made invisible by testing one suffix.
+
+    So: for EVERY suffix the corpus produces, a class of one merges and a class of two does
+    not. Nothing about which suffix it is may enter the decision.
+    """
+    keep = VacancyParams().keep_set
+    tokens = tokenize(load_corpus_text())
+    counts = type_counts(tokens)
+    by_suffix: dict[str, list[str]] = {}
+    for t in vacancy_domain(tokens):
+        lower = t.lower()
+        if is_vacatable(lower, keep):
+            by_suffix.setdefault(stem_and_suffix(lower)[1], []).append(lower)
+    bare = sorted(by_suffix[""])[:50]
+
+    suffixes = sorted(s for s in by_suffix if s and len(by_suffix[s]) >= 2)
+    assert len(suffixes) >= 4, f"corpus no longer has enough suffix classes to test: {suffixes}"
+    assert "s" in suffixes, "the `-s` class is the one the surviving mutant selected"
+
+    for suffix in suffixes:
+        members = sorted(by_suffix[suffix])
+        alone = swap_pools(bare + members[:1], counts, keep)
+        assert set(alone) == {""}, f"a `-{suffix}` class of ONE was not merged into bare"
+        pair = swap_pools(bare + members[:2], counts, keep)
+        assert set(pair) == {"", suffix}, f"a `-{suffix}` class of TWO was merged into bare"
+        assert sorted(pair[suffix]) == members[:2]
 
 
 # --- §4: the seed's domain ---------------------------------------------------------------

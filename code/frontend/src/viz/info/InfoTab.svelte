@@ -947,8 +947,9 @@
     The full stack scores in float32 and reports everything. The static build runs a quantized ONNX
     export in your browser, and quantization moves absolute log-likelihoods by tenths of a nat —
     in a direction that is not even the same across two models. It may therefore state a number
-    only where an error bound has actually been measured for the dtype it ran, and it refuses the
-    rest <i>by name</i> rather than printing a value with a plausible-looking margin:
+    only where an error bound exists for the dtype it ran — measured, or retained from a
+    measurement and labelled as retained — and it refuses the rest <i>by name</i> rather than
+    printing a value with a plausible-looking margin:
   </p>
   <ul class="para">
     <li>
@@ -963,7 +964,8 @@
     </li>
     <li>
       <b>Per-passage rows: refused.</b> Pooled differences cancel; a single passage's does not,
-      and one measured case was wrong by more than its own value.
+      and one case on record was wrong by more than its own value. That figure, like every
+      other <code>q8</code> figure here, was taken before the swap rewrite.
     </li>
     <li>
       <b>A pool below 700 preserved tokens: refused</b> — that is the size at which the retained
@@ -1149,7 +1151,13 @@
       to it and <code>naïvely</code> is the two words <code>na</code> and <code>vely</code> —
       vacating those would rewrite a fragment of a word and score the result. A passage containing
       such a word is refused by name rather than mangled. Emoji and CJK are fine: they are never
-      vacated, so they are byte-identical in all three variants, exactly like punctuation.
+      vacated, so they are byte-identical in all three variants, exactly like punctuation. The
+      refusal covers a <i>class</i> — dash punctuation, invisible format characters, connector
+      punctuation and the named apostrophes — and both stacks read that class from one
+      <b>committed Unicode table</b> rather than from their own runtimes, which carry Unicode
+      13.0 and 16.0 respectively and disagree about 9 993 letters and marks. A doubled ASCII
+      hyphen is <i>not</i> refused: <code>legs--upon</code> is written entirely in the alphabet
+      the message asks for, and each half is a whole word the transform vacates as a word.
     </li>
     <li>
       <b>The static build refuses most of the pretrained arm's numbers</b>, and states ±0.2 nats of

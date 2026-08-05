@@ -169,26 +169,21 @@ const VACANCY_MEASURED_DTYPES: readonly string[] = ["q8"];
  *     cut and its own swap implementation) bounded the pooled q8-vs-fp32 discrepancy at
  *     **≤ 0.054 nats** on every contrast, and recommended stating ~2× that. That study
  *     used a swap this build no longer has, and `architecture.md` §8.3a says so.
- *  2. This build's own two-stack comparison on the SHIPPED default passage set with gpt2
- *     read, before the rewrite — identical tokenization (2754/2858/3810 tokens, 847
- *     preserved) in both stacks, so the only difference was the dtype:
+ *  2. This build's own two-stack comparison on the SHIPPED default passage set with gpt2,
+ *     before the rewrite — identical tokenization in both stacks (847 preserved), so the
+ *     only difference was the dtype. Those figures are `VACANCY_PRE_REWRITE_Q8`, and they
+ *     are the newest like-for-like pair that exists: |Δ| = 0.073 on `swap − english` and
+ *     0.110 on `nonce − english`.
  *
- *         swap  − english :  fp32 0.7166   q8 0.6440   |Δ| = 0.073
- *         nonce − english :  fp32 0.9892   q8 0.8790   |Δ| = 0.110
- *
- *     **The fp32 arm has since moved and the q8 arm has not been re-run.** Re-measured
- *     on the shipped transform (gpt2, float32, the six default passages, `p = 1,
- *     seed = 0`; 2754/2766/3792 tokens, 856 preserved in every variant):
- *
- *         swap  − english :  fp32 0.6904 ± 0.0539 (sampling)
- *         nonce − english :  fp32 0.9776 ± 0.0590 (sampling)
- *
- *     — pinned against a real run by `test_the_fp32_arm_quoted_in_the_static_client`
+ *     **The fp32 arm has since moved and the q8 arm has not been re-run.** The re-measured
+ *     fp32 arm is `VACANCY_FP32_REFERENCE`, pinned against a real gpt2 run by
+ *     `test_the_fp32_arm_quoted_in_the_static_client`
  *     (`tests/integration/test_arch_vacancy_score.py`), so this comment cannot rot again
- *     without a test failing. The q8 figures above belong to texts that no longer exist,
- *     so **no |Δ| can be computed for the configuration that ships**: subtracting the old
- *     q8 number from the new fp32 one would compare two different passages and produce
- *     exactly the fabricated bound FR-720a forbids.
+ *     without a test failing — and the two sets of figures live in named constants rather
+ *     than inside sentences, because the sentences ARE what rotted. The q8 figures belong
+ *     to texts that no longer exist, so **no |Δ| can be computed for the configuration
+ *     that ships**: subtracting the old q8 number from the new fp32 one would compare two
+ *     different passages and produce exactly the fabricated bound FR-720a forbids.
  *
  * So: **0.2 is currently NOT a like-for-like measurement of the shipped configuration.**
  * It is retained rather than changed because it is strictly larger than every q8-vs-fp32
@@ -201,6 +196,57 @@ const VACANCY_MEASURED_DTYPES: readonly string[] = ["q8"];
  * Until it happens, do not quote this constant as "measured on the shipped swap".
  */
 const VACANCY_Q8_UNCERTAINTY_NATS = 0.2;
+
+/**
+ * The float32 reference run, as numbers rather than as prose.
+ *
+ * Three user-facing strings on this panel quote these figures. They used to quote them as
+ * literals inside the sentences, and when the swap rewrite moved the run the sentences kept
+ * the old values while calling them "measured on this very configuration" — the third
+ * instance of that failure in one campaign. So the sentences are now BUILT from these
+ * constants, and the constants are pinned to a real run of the real model by
+ * `test_the_fp32_arm_quoted_in_the_static_client`
+ * (`code/backend/tests/integration/test_arch_vacancy_score.py`) and to the sentences by
+ * `tests/unit/staticVacancy.test.ts`. A number cannot move without both failing.
+ *
+ * gpt2, float32, the six default passages, `p = 1, seed = 0`; 2754/2766/3792 tokens and 856
+ * paired preserved tokens in every variant.
+ */
+export const VACANCY_FP32_REFERENCE = {
+  model: "gpt2",
+  pairedPreserved: 856,
+  /** `nll(swap) − nll(english)` */
+  wrongContent: 0.6904,
+  /** `nll(nonce) − nll(swap)`, the contrast q8 destroys */
+  unknownForm: 0.2872,
+  unknownFormSe: 0.045,
+  /** `nll(nonce) − nll(english)` */
+  total: 0.9776,
+} as const;
+
+/**
+ * The last like-for-like q8-versus-float32 comparison that exists, and the reason no newer
+ * one does.
+ *
+ * Both arms were measured in this build, on the SHIPPED default passage set, with identical
+ * tokenization in the two stacks (847 preserved) so the only difference was the dtype. Then
+ * the swap transform was rewritten (2026-08-04) and the variant texts changed. The float32
+ * arm was re-measured — that is `VACANCY_FP32_REFERENCE` — and the q8 arm cannot be, because
+ * it needs a real browser (`VACANCY_MEASURED_DTYPES`).
+ *
+ * These figures are therefore RETAINED HISTORY. They may be quoted as what q8 did to texts
+ * that no longer exist; they may not be described as a measurement of what ships, and they
+ * may not be subtracted from `VACANCY_FP32_REFERENCE` — that would compare two different
+ * passage sets and produce exactly the fabricated bound FR-720a forbids.
+ */
+export const VACANCY_PRE_REWRITE_Q8 = {
+  pairedPreserved: 847,
+  wrongContent: { fp32: 0.7166, q8: 0.644 },
+  total: { fp32: 0.9892, q8: 0.879 },
+  unknownForm: { fp32: 0.2726, q8: 0.235, errorPercent: 14 },
+  /** The independent six-passage study of §8.3a, on its own passage cut and its own swap. */
+  study: { pooledBoundNats: 0.054, unknownFormRange: "0.06–0.21", perPassageWorstPercent: 115 },
+} as const;
 
 /**
  * Preserved tokens that must be pooled before a q8 number may be shown. The bound above
@@ -433,39 +479,69 @@ export function defaultVacancyPassages(
 }
 
 /**
- * Refusal: absolute log-likelihoods, from a quantized model. MEASURED, not cautious.
+ * Refusal: absolute log-likelihoods, from a quantized model.
+ *
+ * The two shifts quoted are real measurements, and they are measurements of the PROTOTYPE
+ * configuration — the sentence says so, because it cannot say anything stronger until a
+ * browser re-runs the q8 arm. What they support is the refusal itself, which does not
+ * depend on the exact magnitudes: the sign is not stable across two models.
  */
 export const VACANCY_ABSOLUTE_REFUSAL: ArchVacancyRefusal = {
   type: "StaticModeError",
   message:
-    "Absolute log-likelihoods are not reportable from a quantized model: q8 shifts " +
+    "Absolute log-likelihoods are not reportable from a quantized model: q8 shifted " +
     "nllPreserved by −0.19 nats on gpt2 and +0.40 on SmolLM2-135M — the sign is not " +
-    "even stable across models. The pooled DIFFERENCES below survive quantization; " +
-    "these numbers do not. The full stack reports them at float32.",
+    "even stable across models. Those two figures were measured before the swap " +
+    "transform was rewritten and have not been re-taken since, because a q8 run needs a " +
+    "real browser; what they establish is the refusal, not a magnitude for today. The " +
+    "pooled DIFFERENCES below cancel most of the shift; these numbers do not. The full " +
+    "stack reports them at float32.",
 };
 
 /** Refusal: any single-passage delta, from a quantized model. */
 export const VACANCY_PER_PASSAGE_REFUSAL: ArchVacancyRefusal = {
   type: "StaticModeError",
   message:
-    "A per-passage delta is not reportable under q8: the worst measured discrepancy was " +
-    "0.65 nats, 115 % of that passage's own float32 delta, caused by q8 compressing the " +
-    "16–18 nat line-initial function words this measurement is precisely about. Only the " +
-    "pooled figure has a measured bound. Run the full stack for the per-passage table.",
+    "A per-passage delta is not reportable under q8: the worst discrepancy on record was " +
+    `0.65 nats, ${VACANCY_PRE_REWRITE_Q8.study.perPassageWorstPercent} % of that ` +
+    "passage's own float32 delta, caused by q8 compressing the 16–18 nat line-initial " +
+    "function words this measurement is precisely about. The pooled figure is the only " +
+    "one carrying a bound at all, and even that bound is retained from a measurement " +
+    "taken before the swap transform was rewritten rather than re-measured on the texts " +
+    "that ship — see the note beside it. Run the full stack for the per-passage table.",
 };
 
-/** Refusal: `nonce − swap`, the contrast quantization destroys. */
+/**
+ * Refusal: `nonce − swap`, the contrast quantization destroys.
+ *
+ * Every figure in this message is interpolated from `VACANCY_FP32_REFERENCE` or
+ * `VACANCY_PRE_REWRITE_Q8`, and each is labelled with the configuration it belongs to. The
+ * previous wording asserted "Measured on this very configuration: float32 says 0.273 for
+ * gpt2 and q8 says 0.235" — both pre-rewrite values, both presented as current, on a
+ * configuration that no longer existed. The float32 arm has been re-derived (it is
+ * 0.2872, pinned against a real gpt2 run); the q8 arm cannot be, and the sentence now says
+ * that in as many words instead of implying otherwise.
+ */
 export const VACANCY_UNKNOWN_FORM_REFUSAL: ArchVacancyRefusal = {
   type: "StaticModeError",
   message:
     "This is the contrast the quantized model destroys, and it is the one the result " +
-    "rests on. It is a small number — 0.16–0.27 nats across the curated models at " +
-    "float32, 0.06–0.21 in the independent study — and q8's error on it is 14–23 % of " +
-    "that, up to 0.28 nats on a single passage, with a sign flip in one passage of six " +
-    "per model. Measured on this very configuration: float32 says 0.273 for gpt2 and q8 " +
-    "says 0.235, a 14 % error on the quantity the whole result turns on. The two pooled " +
-    "numbers shown here do differ by it — that arithmetic is not a measurement, and the " +
-    "difference is not reportable at this dtype. Run the full stack (uvicorn " +
+    "rests on. It is a small number: on the configuration that ships — gpt2, float32, " +
+    `the six default passages, p = 1, seed = 0 — it is ${VACANCY_FP32_REFERENCE.unknownForm} ` +
+    `± ${VACANCY_FP32_REFERENCE.unknownFormSe} nats over ` +
+    `${VACANCY_FP32_REFERENCE.pairedPreserved} paired tokens, and the independent ` +
+    `six-passage study put it at ${VACANCY_PRE_REWRITE_Q8.study.unknownFormRange} on its ` +
+    "own texts. No q8 figure exists for the configuration that ships. The last " +
+    "like-for-like comparison was taken before the swap transform was rewritten, on " +
+    `variant texts that no longer exist: there float32 read ${VACANCY_PRE_REWRITE_Q8.unknownForm.fp32} ` +
+    `and q8 read ${VACANCY_PRE_REWRITE_Q8.unknownForm.q8}, a ` +
+    `${VACANCY_PRE_REWRITE_Q8.unknownForm.errorPercent} % error on the quantity the whole ` +
+    "result turns on, with q8's error reaching 0.28 nats on a single passage and a sign " +
+    "flip in one passage of six per model. Re-running the q8 arm needs a real browser, so " +
+    "until then this difference has no error bound at this dtype — and subtracting a " +
+    "pre-rewrite q8 number from today's float32 one would compare two different passage " +
+    "sets and invent one. The two pooled numbers shown here do differ by it; that " +
+    "arithmetic is not a measurement. Run the full stack (uvicorn " +
     "llm_geometry.api.app:app), which scores at float32, where ONNX and torch agree to " +
     "5.3e-4 nats.",
 };
@@ -750,8 +826,14 @@ export class ArchSection {
       candidates.push("model.embed_tokens.weight", "transformer.wte.weight", "wte.weight");
     }
     for (const c of candidates) {
-      const entry = header.tensors[c];
-      if (entry) return c;
+      // `Object.hasOwn`, not a truthiness test on the value. `header.tensors` is parsed from
+      // a REMOTE JSON header, so a repository could name a tensor `constructor` or
+      // `__proto__` and have the lookup answer with something off `Object.prototype` — a
+      // candidate accepted for a tensor the file does not contain. The parser now refuses
+      // such a header, so this is the second lock rather than the first, and it is here
+      // because the first one lives in another file and could be relaxed without this
+      // reader ever knowing.
+      if (Object.hasOwn(header.tensors, c)) return c;
     }
     throw notFoundError(
       `Tensor '${param}' (tried: ${candidates.join(", ")}) is not in the safetensors ` +
@@ -920,10 +1002,12 @@ export class ArchSection {
       throw staticModeError(
         `Pooled over ${pooledPreserved} preserved tokens, this is below the ` +
           `${VACANCY_MIN_POOLED_PRESERVED} at which q8's error on the pooled difference ` +
-          "was measured (≤ 0.054 nats). Below it the only honest answer is no number: a " +
-          "single-passage delta under q8 was wrong by up to 115 % of its own value. Add " +
-          "more passages, or run the full stack, which scores at float32 and reports " +
-          "every per-passage number.",
+          `was bounded (≤ ${VACANCY_PRE_REWRITE_Q8.study.pooledBoundNats} nats, on the ` +
+          "pre-rewrite variant texts — the bound is retained, not re-measured since). " +
+          "Below it the only honest answer is no number: a single-passage delta under q8 " +
+          `was wrong by up to ${VACANCY_PRE_REWRITE_Q8.study.perPassageWorstPercent} % of ` +
+          "its own value. Add more passages, or run the full stack, which scores at " +
+          "float32 and reports every per-passage number.",
       );
     }
 

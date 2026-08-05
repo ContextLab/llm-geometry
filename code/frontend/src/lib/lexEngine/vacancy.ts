@@ -357,13 +357,25 @@ export function syllables(word: string, minted?: ReadonlyMap<string, string>): n
   return stress(word, minted).length;
 }
 
-/** The repeating feet §6.4 names. */
-export const METER_FEET: Readonly<Record<string, string>> = {
-  anapest: "001",
-  iamb: "01",
-  trochee: "10",
-  dactyl: "100",
-};
+/**
+ * The repeating feet §6.4 names.
+ *
+ * The prototype is dropped deliberately. Python's mirror is a dict and `foot not in FEET`
+ * is a real key test, so `meter_score("…", "constructor")` raises there. A JavaScript object
+ * literal inherits `Object.prototype`, so `METER_FEET["constructor"]` was `Object` — not
+ * `undefined` — and `meterScore` sailed past its own guard and returned a NUMBER computed
+ * against `String(Object)` as the target pattern. A wrong answer with nothing thrown, in the
+ * same class as the four `in`-operator sites closed in round 3, and the reason the guard is
+ * belt AND braces: a null prototype here, `Object.hasOwn` at the lookup.
+ */
+export const METER_FEET: Readonly<Record<string, string>> = Object.freeze(
+  Object.assign(Object.create(null) as Record<string, string>, {
+    anapest: "001",
+    iamb: "01",
+    trochee: "10",
+    dactyl: "100",
+  }),
+);
 
 /** Raw `WORD_RE` matches, case preserved — `stress`'s case-sensitive step 2 needs them.
  *  A fresh RegExp per call: the shared `g`-flagged literal carries `lastIndex`. */
@@ -383,7 +395,7 @@ export function meterScore(
   foot: string = "anapest",
   minted?: ReadonlyMap<string, string>,
 ): number {
-  const pat = METER_FEET[foot];
+  const pat = Object.hasOwn(METER_FEET, foot) ? METER_FEET[foot] : undefined;
   if (pat === undefined) {
     throw new Error(`unknown foot ${JSON.stringify(foot)}; expected ${Object.keys(METER_FEET).join(", ")}`);
   }

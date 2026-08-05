@@ -291,3 +291,11 @@ def test_the_fp32_arm_quoted_in_the_static_client() -> None:
     assert diffs["wrong_content"]["se"] == pytest.approx(0.0539, abs=5e-4)
     assert diffs["total"]["nats"] == pytest.approx(0.9776, abs=5e-4)
     assert diffs["total"]["se"] == pytest.approx(0.0590, abs=5e-4)
+    # `unknown_form` is quoted BY NAME in the static build's `nonce − swap` refusal, which
+    # is the one place a reader is told what this contrast is worth at float32. It was left
+    # unpinned, and the refusal went on asserting the pre-rewrite 0.273 as "measured on this
+    # very configuration" for as long as the rewrite had been in. Pinned now, to the same
+    # tolerance as the two above, against `VACANCY_FP32_REFERENCE` in
+    # `code/frontend/src/lib/staticClient/arch.ts`.
+    assert diffs["unknown_form"]["nats"] == pytest.approx(0.2872, abs=5e-4)
+    assert diffs["unknown_form"]["se"] == pytest.approx(0.0450, abs=5e-4)

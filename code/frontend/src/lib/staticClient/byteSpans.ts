@@ -20,6 +20,7 @@
  */
 
 import { computeError, invalidParamError } from "./errors";
+import { JOINER_CLASS, LETTER_CLASS, MARK_CLASS } from "./wordClasses";
 
 /** GPT-2's unicode→byte table: the inverse of `bytes_to_unicode`. */
 function buildByteDecoder(): Map<string, number> {
@@ -142,19 +143,25 @@ export function wordSpans(text: string, wordRe: RegExp): WordSpan[] {
  * and the score came back 200. Observed: `don’t` → `big’t` (U+2019, what every smart-quotes
  * editor emits), `co<SHY>operate` → `co<SHY>wood`, `cat<ZWJ>sat` → `want<ZWJ>wish`.
  *
- *  - `\p{Pd}` — dash punctuation: hyphens of every width (U+002D, U+2010 hyphen, U+2011
+ *  - `Pd` — dash punctuation: hyphens of every width (U+002D, U+2010 hyphen, U+2011
  *    non-breaking hyphen, U+2012–U+2015, the fullwidth and small forms);
- *  - `\p{Cf}` — invisible format characters: U+00AD soft hyphen, U+200B–U+200F (ZWSP,
+ *  - `Cf` — invisible format characters: U+00AD soft hyphen, U+200B–U+200F (ZWSP,
  *    ZWNJ, ZWJ, the bidi marks), U+2060 word joiner, U+FEFF;
- *  - the apostrophes and word-internal points listed literally, which carry no property
+ *  - `Pc` — connector punctuation: `_`, U+203F undertie, U+2040, U+2054, U+FE33–U+FE34,
+ *    U+FE4D–U+FE4F, U+FF3F. **Missing from both stacks until 2026-08-04**, which is why
+ *    `don‿t` scored 200 in the full stack and swapped to `warm‿t`;
+ *  - the apostrophes and word-internal points the table names, which carry no property
  *    that separates them from ordinary quotation marks.
  *
  * Combining marks are not joiners — a mark belongs to the letter it sits on — so they are
- * part of the letter atom `\p{L}\p{M}*` below. NFC composes most of them away, but only
- * most: `k` + U+0301 has no precomposed form, so `wor`+U+0301+`d` stayed two `WORD_RE`
- * words and was rewritten as a fragment.
+ * part of the letter atom `L M*` below. NFC composes most of them away, but only most:
+ * `k` + U+0301 has no precomposed form, so `wor`+U+0301+`d` stayed two `WORD_RE` words and
+ * was rewritten as a fragment.
+ *
+ * The three classes come from `wordClasses.ts` — a PINNED table both stacks share — and no
+ * longer from `\p{...}`, which is this runtime's Unicode and not Python's. See that file
+ * for the 9 993-character disagreement that made the two stacks refuse different passages.
  */
-const WORD_JOINER_CLASS = "\\p{Pd}\\p{Cf}'‘’ʹʼ՚′＇·‧−";
 
 /**
  * A run of characters a READER would call one word.
@@ -162,14 +169,21 @@ const WORD_JOINER_CLASS = "\\p{Pd}\\p{Cf}'‘’ʹʼ՚′＇·‧−";
  * Grammar: `(L M*)+ ( J+ (L M*)+ )*` — letters with the marks that sit on them, then any number of
  * joiner-separated continuations. A trailing joiner is punctuation and is left out (the
  * group requires a letter after it); a trailing mark is part of its letter. MIRROR of
- * `wordlike_runs` (Python), which scans rather than matches because Python's `re` has
- * neither `\p{Pd}` nor `\p{Cf}` nor `\p{M}`. Both suites carry the same case table.
+ * `wordlike_runs` (Python), which scans rather than matches because Python's `re` has no
+ * character-class syntax for a range table. Both suites carry the same case table.
  */
-const LETTER_RUN = "(?:\\p{L}\\p{M}*)+";
+const LETTER_RUN = `(?:[${LETTER_CLASS}][${MARK_CLASS}]*)+`;
 const WORDLIKE_RE = new RegExp(
-  `${LETTER_RUN}(?:[${WORD_JOINER_CLASS}]+${LETTER_RUN})*`,
+  `${LETTER_RUN}(?:[${JOINER_CLASS}]+${LETTER_RUN})*`,
   "gu",
 );
+
+/**
+ * The joiners `WORD_RE` itself accepts. A run built only from these and ASCII letters is
+ * written entirely in the alphabet the refusal message tells the reader to use, so it is
+ * not an alphabet problem — see `fragmentedWords`.
+ */
+const WORD_RE_ALPHABET = /^[A-Za-z'-]+$/;
 
 /**
  * Words of `text` that `wordRe` splits or truncates, in order of appearance.
@@ -182,6 +196,18 @@ const WORDLIKE_RE = new RegExp(
  * `wordRe` matches entirely (`don't`, `good-bye`) are fine, and so are runs it never
  * touches (CJK, emoji): those are never vacated, are byte-identical in all three variants,
  * and are attributed to no word — the same treatment punctuation gets.
+ *
+ * A run written ENTIRELY in `wordRe`'s own alphabet is not an alphabet problem, even when
+ * `wordRe` splits it. The Gutenberg em-dash convention `legs--upon` is one run under the
+ * grammar above (`J+` accepts a run of joiners) and two matches under `WORD_RE` (which
+ * accepts exactly one), so it was refused — while the refusal message tells the reader to
+ * "use a passage written in the ASCII alphabet, with straight apostrophes and hyphens",
+ * which `legs--upon` already is. There was no way to comply, and this project's own corpus
+ * contains `ba--are`, `hea--art`, `Lady--loves` and `legs--upon`. The split is real but
+ * harmless there: each piece is a whole ASCII word the transform vacates AS a word, and no
+ * character survives inside a rewritten fragment. That is exactly what does NOT hold for
+ * `don’t` or `co<SHY>operate`, where a character `WORD_RE` cannot see is left sitting
+ * between two halves of a word it rewrote — so those still refuse.
  */
 export function fragmentedWords(text: string, wordRe: RegExp): string[] {
   const runs = new RegExp(WORDLIKE_RE.source, "gu");
@@ -191,7 +217,9 @@ export function fragmentedWords(text: string, wordRe: RegExp): string[] {
   while ((m = runs.exec(text)) !== null) {
     const run = m[0];
     const parts = run.match(inner) ?? [];
-    if (parts.length > 0 && (parts.length > 1 || parts[0] !== run)) out.push(run);
+    if (parts.length === 0 || (parts.length === 1 && parts[0] === run)) continue;
+    if (WORD_RE_ALPHABET.test(run)) continue;
+    out.push(run);
   }
   return out;
 }

@@ -204,6 +204,45 @@ describe("F1 (round 3) — the quantization term does not call itself measured",
     expect(errorBarTerms(STATIC_TOTAL)[1]).toContain("± 0.2");
     expect(secondaryLine(STATIC_TOTAL)).toContain("0.879");
   });
+
+  /**
+   * Round 5. The two assertions above test two TOKENS of the label — `/(?<!re-)measured/`
+   * and `/retained/` — and a claim is not its tokens. Mutation-verified: rewriting the
+   * constant to
+   *
+   *     "quantization, retained bound — re-measured on the shipped swap"
+   *
+   * satisfies both patterns (`re-measured` is exempted, `retained` is present) while
+   * asserting the exact thing `architecture.md` §8.3a forbids in as many words — and all
+   * 596 unit tests passed. Only `tests/e2e/static.spec.ts` caught it, and the e2e suite is
+   * not what most contributors run.
+   *
+   * So the label is pinned as a string. It is one sentence on one surface; if it is
+   * reworded, the rewording is a claim about provenance and belongs in the same commit as
+   * whatever changed the provenance.
+   */
+  it("prints exactly the label §8.3a leaves it, character for character", () => {
+    expect(QUANTIZATION_TERM).toBe(
+      "quantization, retained bound — not re-measured since the swap rewrite",
+    );
+    // …and it is the string both renderers actually emit, so pinning it pins the surface.
+    expect(errorBarTerms(STATIC_TOTAL)[1]).toBe(`± 0.2 (${QUANTIZATION_TERM})`);
+    expect(secondaryLine(STATIC_WRONG_CONTENT)).toContain(`(${QUANTIZATION_TERM})`);
+  });
+
+  it("does not claim the bound was re-measured, however the sentence is spelled", () => {
+    // The mutant's exact phrase, and the family it belongs to: any assertion that the
+    // measurement happened is false until a browser q8 run exists.
+    for (const forbidden of [
+      /re-measured on/,
+      /re-derived/,
+      /measured on the shipped/,
+      /fresh measurement of/,
+    ]) {
+      expect(QUANTIZATION_TERM).not.toMatch(forbidden);
+    }
+    expect(QUANTIZATION_TERM).toMatch(/not re-measured/);
+  });
 });
 
 describe("F5 — the reply tooltip names the temperature the reply was drawn at", () => {

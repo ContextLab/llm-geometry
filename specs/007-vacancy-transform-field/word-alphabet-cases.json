@@ -1,0 +1,142 @@
+{
+ "format": "word-alphabet-cases-v1",
+ "contract": "specs/007-vacancy-transform-field/architecture.md",
+ "note": "The shared case table for the word-alphabet refusal of §8.2. Both stacks read THIS file: `fragmented_words` (llm_geometry/arch/vacancy_score.py) and `fragmentedWords` (src/lib/staticClient/byteSpans.ts) must return `fragmented` exactly, in order. A case is here because it names a rule, not because it is an example — see `why`.",
+ "cases": [
+  {
+   "text": "the cat sat on the mat",
+   "fragmented": [],
+   "why": "plain ASCII: nothing is fragmented, so nothing is refused"
+  },
+  {
+   "text": "don't",
+   "fragmented": [],
+   "why": "WORD_RE's own apostrophe: it matches the run entirely"
+  },
+  {
+   "text": "good-bye",
+   "fragmented": [],
+   "why": "WORD_RE's own hyphen: it matches the run entirely"
+  },
+  {
+   "text": "don’t",
+   "fragmented": ["don’t"],
+   "why": "U+2019, the apostrophe every smart-quotes editor emits. Scored 200 and swapped to 'big’t' before the joiner class existed"
+  },
+  {
+   "text": "don‿t",
+   "fragmented": ["don‿t"],
+   "why": "U+203F undertie, general category Pc. Pc was missing from BOTH stacks until 2026-08-04: this scored 200 and swapped to 'warm‿t'"
+  },
+  {
+   "text": "don_t",
+   "fragmented": ["don_t"],
+   "why": "U+005F low line, the commonest Pc there is"
+  },
+  {
+   "text": "don＿t",
+   "fragmented": ["don＿t"],
+   "why": "U+FF3F fullwidth low line — Pc reached through the fullwidth forms"
+  },
+  {
+   "text": "don﹍t",
+   "fragmented": ["don﹍t"],
+   "why": "U+FE4D dashed low line — Pc reached through the presentation forms"
+  },
+  {
+   "text": "don࢐t",
+   "fragmented": ["don࢐t"],
+   "why": "U+0890 is genuinely Cf, but only from Unicode 14. Python 3.10 carries Unicode 13.0 and used to call it unassigned, so the backend scored this and swapped it to 'warm࢐t' while the browser refused it. The pinned table is why both now refuse"
+  },
+  {
+   "text": "don⹝t",
+   "fragmented": ["don⹝t"],
+   "why": "U+2E5D oblique hyphen — Pd from Unicode 14, the same skew on the dash half of the class"
+  },
+  {
+   "text": "don𐵮t",
+   "fragmented": ["don𐵮t"],
+   "why": "U+10D6E is Pd from Unicode 16 and is ASTRAL — it also pins that the run scanner works in code points, not UTF-16 units"
+  },
+  {
+   "text": "co­operate",
+   "fragmented": ["co­operate"],
+   "why": "U+00AD soft hyphen: invisible, so a reader cannot see why the score would be wrong"
+  },
+  {
+   "text": "cat‍sat",
+   "fragmented": ["cat‍sat"],
+   "why": "U+200D zero-width joiner: invisible, same class"
+  },
+  {
+   "text": "don؜t",
+   "fragmented": ["don؜t"],
+   "why": "U+061C Arabic letter mark — Cf both runtimes have always known, so this stays green even if the pin moves"
+  },
+  {
+   "text": "don‐t",
+   "fragmented": ["don‐t"],
+   "why": "U+2010 hyphen — Pd, and NOT the ASCII hyphen WORD_RE accepts"
+  },
+  {
+   "text": "don׳t",
+   "fragmented": ["don׳t"],
+   "why": "U+05F3 Hebrew geresh — a named joiner: category Po, indistinguishable from a quotation mark by property alone"
+  },
+  {
+   "text": "l·la",
+   "fragmented": ["l·la"],
+   "why": "U+00B7 middle dot, the Catalan l·l — another named joiner"
+  },
+  {
+   "text": "café",
+   "fragmented": ["café"],
+   "why": "the LETTER half of the alphabet: WORD_RE sees 'caf', and 'a café' vacated to 'a washé'"
+  },
+  {
+   "text": "naïvely",
+   "fragmented": ["naïvely"],
+   "why": "the letter half again, and the shape that produced a 500 rather than a wrong number"
+  },
+  {
+   "text": "woŕd",
+   "fragmented": ["woŕd"],
+   "why": "combining acute on 'r' has no precomposed form, so NFC does not remove it; a mark belongs to the letter it sits on, so this is one run"
+  },
+  {
+   "text": "legs--upon",
+   "fragmented": [],
+   "why": "the Gutenberg em-dash convention, present in this project's own corpus. Written entirely in WORD_RE's alphabet, so refusing it offered the reader no way to comply. Each piece is a whole ASCII word the transform vacates AS a word"
+  },
+  {
+   "text": "ba--are hea--art Lady--loves",
+   "fragmented": [],
+   "why": "the other three real instances from the corpus, in one passage"
+  },
+  {
+   "text": "don''t",
+   "fragmented": [],
+   "why": "the apostrophe half of the same rule: a doubled ASCII apostrophe is still WORD_RE's own alphabet"
+  },
+  {
+   "text": "co­­operate",
+   "fragmented": ["co­­operate"],
+   "why": "a RUN of joiners still joins when the joiners are not WORD_RE's own — the ASCII escape hatch above must not become a hole for repeated invisible characters"
+  },
+  {
+   "text": "don‿ t",
+   "fragmented": [],
+   "why": "a joiner with no letter after it is punctuation, not a joiner: the run ends at 'don'"
+  },
+  {
+   "text": "the cat - the dog",
+   "fragmented": [],
+   "why": "the same rule for the ASCII hyphen used as a dash between words"
+  },
+  {
+   "text": "ア・イ 🙂",
+   "fragmented": [],
+   "why": "runs WORD_RE never touches are not fragmented: they are never vacated, are byte-identical in all three variants, and are attributed to no word"
+  }
+ ]
+}

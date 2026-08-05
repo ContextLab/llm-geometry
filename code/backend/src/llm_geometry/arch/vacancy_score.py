@@ -86,6 +86,7 @@ from ..lex.vacancy import (
 from ..lex.vocab import WORD_RE, tokenize
 from ..models.loader import LoadedModel, load_model
 from .tracing import _TRACE_LOCK
+from .word_classes import is_joiner, is_letter, is_mark
 
 #: The three variants, in the order the UI reads them. ``english`` is the reference;
 #: ``swap`` sits between the other two by construction, which is what makes the
@@ -131,49 +132,36 @@ MIN_PAIRED_PRESERVED = 2
 #: ``WORD_RE`` matched in full — so :func:`fragmented_words` found nothing, the transform
 #: rewrote half a word, and the endpoint returned a score. Observed: ``don’t`` → ``big’t``
 #: (U+2019, the apostrophe every smart-quotes editor emits), ``co<SHY>operate`` →
-#: ``co<SHY>wood``, ``cat<ZWJ>sat`` → ``want<ZWJ>wish``.
+#: ``co<SHY>wood``, ``cat<ZWJ>sat`` → ``want<ZWJ>wish``, ``don<U+203F>t`` → ``warm<U+203F>t``.
 #:
-#: Membership is by Unicode property wherever one exists, so unlisted members of the same
-#: class are covered too:
+#: Membership is by Unicode general category wherever one applies, so unlisted members of
+#: the same class are covered too:
 #:
 #:  - ``Pd`` — dash punctuation, i.e. hyphens of every width (U+002D, U+2010 hyphen,
 #:    U+2011 non-breaking hyphen, U+2012–U+2015, the fullwidth and small forms);
 #:  - ``Cf`` — invisible format characters: U+00AD soft hyphen, U+200B–U+200F (ZWSP,
 #:    ZWNJ, ZWJ and the bidi marks), U+2060 word joiner, U+FEFF;
+#:  - ``Pc`` — connector punctuation: ``_``, U+203F undertie, U+2040, U+2054, U+FE33–U+FE34,
+#:    U+FE4D–U+FE4F, U+FF3F. **Missing from both stacks until 2026-08-04**, which is why
+#:    ``don<U+203F>t`` answered 200 and swapped to ``warm<U+203F>t``;
 #:  - ``M*`` — combining marks, handled in :func:`wordlike_runs` itself: a mark belongs to
 #:    the letter it sits on. NFC composes most of them away, but only most — ``k`` +
 #:    U+0301 has no precomposed form, so ``wor``+U+0301+``d`` stayed two ``WORD_RE`` words;
-#:  - the apostrophes and word-internal points below, which carry no property that
-#:    separates them from ordinary quotation marks and so are named.
+#:  - the apostrophes and word-internal points named in the table, which carry no property
+#:    that separates them from ordinary quotation marks.
+#:
+#: The membership test does NOT come from :mod:`unicodedata`. It comes from the pinned
+#: table both stacks share (:mod:`llm_geometry.arch.word_classes`), because this runtime's
+#: Unicode is 13.0 and the browser's is 16.0, and asking each runtime its own question made
+#: the two stacks disagree about 11 joiners and 9 993 letters and marks — U+0890 among them,
+#: a real ``Cf`` this stack scored and the browser refused.
 #:
 #: Widening ``WORD_RE`` to accept these instead is a change to the shared transform and its
 #: contract (§8.2); refusing is what this module may do on its own.
-WORD_JOINER_CATEGORIES = ("Pd", "Cf")
-WORD_JOINER_CHARS = frozenset(
-    "'"  # U+0027 apostrophe — the one WORD_RE accepts, listed so the class is complete
-    "‘"  # left single quotation mark
-    "’"  # right single quotation mark — the default apostrophe of pasted text
-    "ʹ"  # modifier letter prime
-    "ʼ"  # modifier letter apostrophe (the Unicode-recommended word-internal one)
-    "՚"  # Armenian apostrophe
-    "′"  # prime
-    "＇"  # fullwidth apostrophe
-    "·"  # middle dot — Catalan l·l
-    "‧"  # hyphenation point
-    "−"  # minus sign, category Sm rather than Pd
-)
-
-
-def _is_letter(ch: str) -> bool:
-    return unicodedata.category(ch).startswith("L")
-
-
-def _is_mark(ch: str) -> bool:
-    return unicodedata.category(ch).startswith("M")
-
-
-def _is_joiner(ch: str) -> bool:
-    return ch in WORD_JOINER_CHARS or unicodedata.category(ch) in WORD_JOINER_CATEGORIES
+#: The joiners ``WORD_RE`` itself accepts. A run built only from these and ASCII letters is
+#: written entirely in the alphabet the refusal message tells the reader to use, so it is not
+#: an alphabet problem — see :func:`fragmented_words`.
+WORD_RE_JOINERS = frozenset("'-")
 
 
 def wordlike_runs(text: str) -> list[str]:
@@ -192,22 +180,22 @@ def wordlike_runs(text: str) -> list[str]:
     runs: list[str] = []
     i, n = 0, len(text)
     while i < n:
-        if not _is_letter(text[i]):
+        if not is_letter(text[i]):
             i += 1
             continue
         start = end = i
         while i < n:
             ch = text[i]
-            if _is_letter(ch) or _is_mark(ch):
+            if is_letter(ch) or is_mark(ch):
                 i += 1
                 end = i
-            elif _is_joiner(ch):
+            elif is_joiner(ch):
                 # A joiner only joins when a letter follows it; otherwise the run ended
                 # and this is punctuation.
                 j = i
-                while j < n and _is_joiner(text[j]):
+                while j < n and is_joiner(text[j]):
                     j += 1
-                if j < n and _is_letter(text[j]):
+                if j < n and is_letter(text[j]):
                     i = j
                 else:
                     break
@@ -400,12 +388,28 @@ def fragmented_words(text: str) -> list[str]:
     touch at all (CJK, emoji): those are never vacated, are byte-identical in all three
     variants, and are attributed to no word — which is the same treatment punctuation gets
     and is correct.
+
+    A run written ENTIRELY in ``WORD_RE``'s own alphabet is not an alphabet problem, even
+    when ``WORD_RE`` splits it. The Gutenberg em-dash convention ``legs--upon`` is one run
+    under the grammar of :func:`wordlike_runs` (``J+`` accepts a run of joiners) and two
+    matches under ``WORD_RE`` (which accepts exactly one), so it was refused — while the
+    refusal message tells the reader to "use a passage written in the ASCII alphabet, with
+    straight apostrophes and hyphens", which ``legs--upon`` already is. There was no way to
+    comply, and this project's own corpus contains ``ba--are``, ``hea--art``,
+    ``Lady--loves`` and ``legs--upon``. The split is real but harmless there: each piece is
+    a whole ASCII word the transform vacates AS a word, and no character survives inside a
+    rewritten fragment. That is exactly what does NOT hold for ``don’t`` or
+    ``co<SHY>operate``, where a character ``WORD_RE`` cannot see is left sitting between two
+    halves of a word it rewrote — so those still refuse.
     """
     out: list[str] = []
     for run in wordlike_runs(text):
         parts = WORD_RE.findall(run)
-        if parts and (len(parts) > 1 or parts[0] != run):
-            out.append(run)
+        if not parts or (len(parts) == 1 and parts[0] == run):
+            continue
+        if all(ch.isascii() and (ch.isalpha() or ch in WORD_RE_JOINERS) for ch in run):
+            continue
+        out.append(run)
     return out
 
 

@@ -25,7 +25,10 @@ import {
   staticVacancyDifferences,
   vacancyVariantTexts,
   VACANCY_ABSOLUTE_REFUSAL,
+  VACANCY_FP32_REFERENCE,
   VACANCY_PER_PASSAGE_REFUSAL,
+  VACANCY_PRE_REWRITE_Q8,
+  VACANCY_UNKNOWN_FORM_REFUSAL,
 } from "../../src/lib/staticClient/arch";
 import {
   checkWordAlphabet,
@@ -285,8 +288,64 @@ describe("what the quantized static build may say (§8.3a, FR-720a)", () => {
     expect(d.refused?.message).toMatch(/full stack/);
     expect(d.refused?.message).toMatch(/uvicorn/);
     // It must say WHY, in measured terms — not "unavailable in this demo".
-    expect(d.refused?.message).toMatch(/0\.16–0\.27/);
     expect(d.refused?.message).toMatch(/sign flip/);
+  });
+
+  /**
+   * Round 5, and the THIRD instance of one failure in this campaign: a number in a
+   * user-facing sentence that describes a configuration which no longer exists.
+   *
+   * What shipped, verbatim: "Measured on this very configuration: float32 says 0.273 for
+   * gpt2 and q8 says 0.235, a 14 % error". Both values are pre-rewrite — the swap rewrite
+   * of 2026-08-04 moved `unknown_form` to 0.2872 — so the sentence asserted a measurement
+   * of "this very configuration" taken on a different one. Round 3 fixed the *label*
+   * (`QUANTIZATION_TERM`) and left the *prose*.
+   *
+   * The fix is structural: the sentence is interpolated from `VACANCY_FP32_REFERENCE` and
+   * `VACANCY_PRE_REWRITE_Q8`, the fp32 constant is pinned to a real gpt2 run by
+   * `test_the_fp32_arm_quoted_in_the_static_client`, and this test pins the sentence to the
+   * constants. Changing either without the other now fails somewhere.
+   */
+  it("quotes the CURRENT float32 arm, from the constant that is pinned to a real run", () => {
+    const msg = byId.unknown_form.refused!.message;
+    expect(msg).toContain(String(VACANCY_FP32_REFERENCE.unknownForm));
+    expect(msg).toContain(String(VACANCY_FP32_REFERENCE.unknownFormSe));
+    expect(msg).toContain(String(VACANCY_FP32_REFERENCE.pairedPreserved));
+    // The stale pair, and the stale range that excluded the value that ships.
+    expect(msg).not.toContain("0.16–0.27");
+    expect(msg).not.toMatch(/Measured on this very configuration/);
+  });
+
+  it("labels the retained q8 figures as pre-rewrite wherever it quotes them", () => {
+    const msg = byId.unknown_form.refused!.message;
+    // The pre-rewrite pair may be quoted — it is the only like-for-like comparison that
+    // exists — but only as history, and never as the arithmetic of a current bound.
+    expect(msg).toContain(String(VACANCY_PRE_REWRITE_Q8.unknownForm.fp32));
+    expect(msg).toContain(String(VACANCY_PRE_REWRITE_Q8.unknownForm.q8));
+    expect(msg).toMatch(/before the swap transform was rewritten/);
+    expect(msg).toMatch(/no longer exist/);
+    expect(msg).toMatch(/No q8 figure exists for the configuration that ships/);
+  });
+
+  /**
+   * The sweep the round-3 fix did not do: every user-facing string this module can hand a
+   * reader, checked for the claim FR-720a governs. "measured" is a claim about provenance,
+   * and no q8 quantity in this build has current provenance.
+   */
+  it("makes no unqualified q8 measurement claim on any refusal it can emit", () => {
+    const surfaces = [
+      VACANCY_ABSOLUTE_REFUSAL.message,
+      VACANCY_PER_PASSAGE_REFUSAL.message,
+      VACANCY_UNKNOWN_FORM_REFUSAL.message,
+    ];
+    for (const msg of surfaces) {
+      expect(msg).not.toMatch(/Measured on this very configuration/);
+      expect(msg).not.toMatch(/has a measured bound/);
+      // Any sentence that still uses the word must say which configuration it belongs to.
+      if (/(?<!re-)measured/.test(msg)) {
+        expect(msg, msg).toMatch(/before the swap|pre-rewrite|retained|no longer exist/);
+      }
+    }
   });
 
   it("reports the two pooled differences it has a bound for", () => {
