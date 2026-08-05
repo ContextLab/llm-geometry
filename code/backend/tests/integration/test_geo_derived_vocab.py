@@ -42,6 +42,7 @@ from llm_geometry.geo.weights import (
     load_weight_set,
     own_vocab_json,
     save_weight_set,
+    weight_set_owns_vocab,
     weights_token,
 )
 
@@ -523,6 +524,95 @@ def test_non_ascii_vocabulary_words_are_escaped_identically() -> None:
     assert payload.isascii()
     assert "\\u00e9" in payload
     assert GeoTokenizer.from_json(payload).words[:2] == ["é", "—"]
+
+
+# -- round 7: the two properties `own_vocab_json` exists for --------------------------
+#
+# Both were stated in a docstring and pinned by nothing. `own_vocab_json` reduced to
+# `return vocab_json` left every test in this module green — the module whose whole
+# subject is which model a set of weights IS — while one model acquired two identities;
+# and `import_bundle`'s `own_vocab_json(canonical_vocab)` could be swapped for
+# `own_vocab_json(vocab_json)` with the same result. Every case below is a behaviour
+# probe: build a real file, load it, and compare the identity that comes back.
+
+
+def test_own_vocab_json_treats_the_shipped_word_list_as_nothing_to_own() -> None:
+    """The function's contract, as three cases rather than a paragraph.
+
+    A model whose words ARE the shipped words has nothing of its own to substitute, so it
+    must hash as the checkpoint does; a model with its own list hashes with it. Reduced to
+    `return vocab_json`, the first case is what breaks, and it breaks silently.
+    """
+    shipped = get_tokenizer().to_json()
+    assert own_vocab_json(shipped) is None
+    assert own_vocab_json(None) is None
+    mine = GeoTokenizer(_invented_words(VOCAB_WORDS)).to_json()
+    assert own_vocab_json(mine) == mine
+
+
+def test_a_file_spelling_out_the_shipped_word_list_is_the_same_model_as_the_checkpoint(
+    scratch_model: dict, tmp_path
+) -> None:
+    """One model, one identity, whichever door it came through.
+
+    A checkpoint-descended set stores no vocabulary; a file always spells one out. If the
+    file's copy of the SHIPPED list counted as a vocabulary of its own, the same weights
+    would be two models — `3ae5df00…` as a checkpoint and `a4d2510f…` as a file — the
+    store would hold both, and the two entries would disagree about which words the ids
+    mean while every digest in each of them verified.
+    """
+    store = CacheStore(tmp_path / "one-identity")
+    ws = load_weight_set(scratch_model["result"]["weights_token"], store=scratch_model["store"])
+
+    as_checkpoint = save_weight_set(ws, source="learned", store=store)
+    as_file = import_bundle(_bundle_for(ws, get_tokenizer().to_json()), store=store)
+
+    assert as_file["weights_token"] == as_checkpoint
+    assert weight_set_owns_vocab(as_file["weights_token"], store=store) is False
+    assert tokenizer_for(as_file["weights_token"], store=store).words == get_tokenizer().words
+
+
+def test_a_writers_key_order_does_not_change_which_model_a_file_is(
+    scratch_model: dict, tmp_path
+) -> None:
+    """A file's identity is its word LIST, not the bytes a writer chose to spell it with.
+
+    `import_bundle` hashes `own_vocab_json(canonical_vocab)` — the serialization this
+    build would have emitted — precisely so that a third-party writer using a different
+    key order or indentation produces the same model. Hashing the file's own bytes instead
+    refuses it: `this model file is corrupt: its weights and vocabulary hash to 88f44a3b…`,
+    on a file that is entirely honest.
+
+    `vocab_sha256` still covers the bytes as written (it is a transport checksum), so the
+    variant recomputes it — that is what an honest writer does.
+    """
+    store = CacheStore(tmp_path / "key-order")
+    ws = load_weight_set(scratch_model["result"]["weights_token"], store=scratch_model["store"])
+    words = _invented_words(VOCAB_WORDS)
+    canonical = GeoTokenizer(words).to_json()
+    as_written_here = _bundle_for(ws, canonical)
+
+    data = json.loads(canonical)
+    # Same object, emitted by a writer that does not sort keys and indents its output.
+    reordered = json.dumps(
+        {"words": data["words"], "specials": data["specials"], "format": data["format"]},
+        indent=2,
+    )
+    assert reordered != canonical, "the variant must differ in bytes to test anything"
+    assert json.loads(reordered) == data, "…and must not differ in meaning"
+    as_written_elsewhere = {
+        **as_written_here,
+        "vocab": reordered,
+        "vocab_sha256": vocab_digest(reordered),
+    }
+
+    here = import_bundle(as_written_here, store=store)
+    elsewhere = import_bundle(as_written_elsewhere, store=store)
+
+    assert elsewhere["weights_token"] == here["weights_token"]
+    assert tokenizer_for(elsewhere["weights_token"], store=store).words == words
+    # And what the store kept is the canonical spelling, so re-saving it is byte-stable.
+    assert export_bundle(elsewhere["weights_token"], store=store)["vocab"] == canonical
 
 
 # -- round 5: three wrong-answer paths around the identity fix ---------------------------
