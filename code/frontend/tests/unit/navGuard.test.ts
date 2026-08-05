@@ -399,14 +399,165 @@ describe("a panel's registration survives being driven for real", () => {
   });
 });
 
+describe("every panel that owns destructible work is DRIVEN, and registers it", () => {
+  /**
+   * All four panels, clicked for real, with no backend and no mock.
+   *
+   * The claim this block used to rest on — "the three panels here cannot be driven to
+   * `busy` in jsdom" — was false, and it cost the suite its teeth: `let busy = $state(false)`
+   * → `let busy = false` (the effect never re-runs, the panel never registers, i.e. the
+   * ORIGINAL silent-loss bug) survived all 17 cases here. Source text cannot see that;
+   * a click can.
+   *
+   * Every one of these panels sets `busy = true` BEFORE anything that can fail —
+   * `geo/TrainPanel.run` and `geo/FinetunePanel.run` before their first `await`,
+   * `lex/TrainPanel.resetRun` before `new Worker` — so the registration is observable in
+   * this environment even though the work itself cannot finish here. What is being tested
+   * is the registration, not the training: the training is exercised for real in the
+   * VacancyPanel block above and in the engine suites.
+   */
+
+  /**
+   * jsdom has no `Worker`, so `lex/TrainPanel`'s click throws AFTER setting `busy`. The
+   * throw is the environment, not the panel, and a listener that swallows it must not be
+   * allowed to swallow anything else — so it is installed for exactly one click and the
+   * error it caught is returned for inspection.
+   */
+  function clickCatchingEnvironmentError(button: HTMLButtonElement): string {
+    let caught = "";
+    const onError = (e: ErrorEvent) => {
+      caught = e.message ?? String(e.error);
+      e.preventDefault();
+    };
+    window.addEventListener("error", onError);
+    try {
+      button.click();
+    } finally {
+      window.removeEventListener("error", onError);
+    }
+    return caught;
+  }
+
+  /** `[file, work id, label, mount]` — one entry per panel that opts into the registry. */
+  async function mountPanel(name: string, url: string) {
+    const stores = await loadShell(url);
+    const svelte = await import("svelte");
+    const target = document.createElement("div");
+    document.body.appendChild(target);
+    const done = (app: unknown) => () => (svelte.unmount(app as never), target.remove());
+
+    if (name === "geo-train") {
+      const Panel = (await import("../../src/viz/geo/TrainPanel.svelte")).default;
+      const app = svelte.mount(Panel, { target });
+      svelte.flushSync();
+      const box = target.querySelector<HTMLTextAreaElement>('[data-testid="geo-train-text"]')!;
+      box.value = "alice followed the white rabbit down the hole";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      svelte.flushSync();
+      return {
+        stores,
+        target,
+        flush: svelte.flushSync,
+        done: done(app),
+        run: target.querySelector<HTMLButtonElement>('[data-testid="geo-train-run"]')!,
+      };
+    }
+    if (name === "geo-finetune") {
+      const Panel = (await import("../../src/viz/geo/FinetunePanel.svelte")).default;
+      const app = svelte.mount(Panel, { target });
+      svelte.flushSync();
+      const box = target.querySelector<HTMLTextAreaElement>("textarea")!;
+      box.value = "alice followed the white rabbit down the hole";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      svelte.flushSync();
+      const run = [...target.querySelectorAll("button")].find(
+        (b) => b.textContent?.trim() === "Fine-tune",
+      ) as HTMLButtonElement;
+      return { stores, target, flush: svelte.flushSync, done: done(app), run };
+    }
+    // lex/TrainPanel: a real config and a real corpus, nothing stubbed.
+    const Panel = (await import("../../src/viz/lex/TrainPanel.svelte")).default;
+    const app = svelte.mount(Panel, {
+      target,
+      props: {
+        cfg: { vocabRows: 24, dModel: 8, nLayers: 1, nHeads: 1, ctx: 8, tied: true, dropout: 0 },
+        budgetSource: "dolch" as const,
+        budgetName: "pre_primer",
+        corpusText: "the little children ran through the garden and picked the flowers",
+        corpusLabel: "a corpus",
+        vocabWords: null,
+        baseModel: null,
+        baseVocab: null,
+        baseNote: "random initialization",
+        onTrained: () => {},
+        onAdoptCorpus: () => {},
+      },
+    });
+    svelte.flushSync();
+    return {
+      stores,
+      target,
+      flush: svelte.flushSync,
+      done: done(app),
+      run: target.querySelector<HTMLButtonElement>('[data-testid="lex-train-run"]')!,
+    };
+  }
+
+  const DRIVEN = [
+    ["geo-train", "a from-scratch training run in the Geometry Lab", "geometry"],
+    ["geo-finetune", "a fine-tuning run in the Geometry Lab", "geometry"],
+    ["lex-train", "a training run in the Lexicon Lab", "lexicon"],
+  ] as const;
+
+  for (const [id, label, tab] of DRIVEN) {
+    it(`${id}: a real click registers it, holds a tab switch, and releases on destroy`, async () => {
+      const { stores, run, flush, done } = await mountPanel(id, `#${tab}`);
+      let released = false;
+      try {
+        expect(run, `${id}: the panel's Run button did not render`).toBeTruthy();
+        expect(run.disabled, `${id}: Run is disabled, so nothing was driven`).toBe(false);
+        expect(get(stores.pendingWork).map((w) => w.id), "an idle panel registers nothing").toEqual(
+          [],
+        );
+
+        if (id === "lex-train") {
+          // No `Worker` here, so the run fails immediately AFTER `resetRun` — which is the
+          // point: the registration must already exist by then.
+          expect(clickCatchingEnvironmentError(run)).toMatch(/Worker/);
+        } else {
+          run.click();
+        }
+        flush();
+
+        expect(
+          get(stores.pendingWork).map((w) => w.id),
+          `${id}: the run was never registered, so a tab click would destroy it in silence`,
+        ).toEqual([id]);
+
+        // ...and the registration is what saves it: the tab switch is held, and NAMED.
+        stores.view.set("info");
+        expect(get(stores.view), `${id}: the tab switch was performed`).toBe(tab);
+        expect(get(stores.pendingNavigation)?.work.map((w) => w.label)).toEqual([label]);
+        stores.cancelNavigation();
+
+        // Destroying the panel releases it, or the registry latches and every later
+        // navigation is held against work that no longer exists.
+        done();
+        released = true;
+        flush();
+        expect(get(stores.pendingWork).map((w) => w.id), `${id}: the registry latched`).toEqual([]);
+      } finally {
+        if (!released) done();
+      }
+    });
+  }
+});
+
 describe("the panels that own destructible work register it", () => {
-  // The three panels here cannot be driven to `busy` in jsdom — `lex/TrainPanel` needs a
-  // real `Worker` and the two geo panels need the backend — so what is asserted for them
-  // is the WIRING: that each registers on the same flag it disables its button with, and
-  // releases in `onDestroy`. That is a source-text check and it cannot see a semantic
-  // change; `viz/lex/VacancyPanel.svelte`, the one panel whose work runs inline in Node,
-  // is driven for real in the block above, and the store-level behaviour further up is
-  // exercised for real too.
+  // The source-text half, kept alongside the driven half above: a click proves the
+  // registration happens, and these pin the SHAPE that makes it happen for the right
+  // reason — a reactive `$effect` on the same flag the button is disabled with, and a
+  // release in `onDestroy` (which a click cannot distinguish from a release on completion).
   //
   // `[file, work id, the panel's own busy flag]`. The registry only protects work that
   // OPTS IN, so the list is the whole guarantee: with three entries the Lexicon Lab's
@@ -437,8 +588,8 @@ describe("the panels that own destructible work register it", () => {
       // statements in a bare `{ … }` block run ONCE, at init, with the flag still false —
       // so the panel releases an id nobody registered and never registers again. Both
       // forms contain `if (busy) registerWork(…) else releaseWork(…)`, which is why the
-      // wrapper has to be matched too; VacancyPanel's is additionally driven for real
-      // above, and this is the closest the other three can be pinned without a Worker.
+      // wrapper has to be matched too. All four panels are ALSO driven by a real click
+      // above, which is what catches a non-reactive `busy` that this regex cannot see.
       expect(src, `${file} does not register REACTIVELY on \`${flag}\``).toMatch(
         new RegExp(
           `\\$effect\\(\\(\\) => \\{\\s*if \\(${flag}\\) registerWork\\(WORK_ID,` +
