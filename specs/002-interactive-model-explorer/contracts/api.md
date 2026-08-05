@@ -124,7 +124,7 @@ train on *before* submitting it.
 
 `?weights_token=<hash|"learned">` → `200` a portable, self-describing bundle:
 
-`{ "format": "llm-geometry/geo-model", "version": 2, "weights_token": <hash>,
+`{ "format": "llm-geometry/geo-model", "version": 3, "weights_token": <hash>,
    "config": { "d_model", "n_layers", "n_heads", "mlp_hidden", "vocab_size",
                "context_window" },
    "vocab": <tokenizer JSON string>,
@@ -141,10 +141,23 @@ every non-ASCII character escaped (`\uXXXX`). `vocab_sha256` is the digest of ex
 those bytes, so the Python backend and the in-browser build write byte-identical files
 for the same model.
 
-*(`version: 2` and `vocab_sha256` were shipped by feature 004's vocabulary-integrity
-fix but never written down here; the canonical serialization and the derived-model rule
-were added 2026-08-04 for red-team 007 F1/F6. Recorded now so "frozen" means frozen,
-not undocumented.)*
+*(`vocab_sha256` was shipped by feature 004's vocabulary-integrity fix but never written
+down here; the canonical serialization and the derived-model rule were added 2026-08-04
+for red-team 007 F1/F6. Recorded now so "frozen" means frozen, not undocumented.)*
+
+*(`version: 2` → `3`, 2026-08-04, red-team 007 round 5 F10. `weights_token` changed
+meaning when it began hashing the word list as well as the weights — so the FIELD in the
+file changed meaning, and the format had to move with it. It did not, and the consequence
+was that every file written before the change, for a model with its own vocabulary, failed
+the re-hash and was refused as `this model file is corrupt` — an accusation against an
+intact file, and against the very file the cache's schema-bump message tells the reader to
+open. `POST /api/geo/model` therefore reads **versions 2 and 3**: a version-2 payload is
+checked against the weights-only hash its own format put in it, and its current identity is
+re-derived from the (weights, word list) pair it carries. Refusing it instead would strand
+an intact file and buy nothing — the binding a version-3 token provides is absent from
+every version-2 file, including the ones that load unchanged because their word list is the
+shipped one and takes no part in either hash. A file that DECLARES version 3 is held to
+version 3.)*
 
 ### POST /api/geo/model
 
