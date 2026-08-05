@@ -32,6 +32,20 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 FP32_RECORD = REPO_ROOT / "specs" / "007-vacancy-transform-field" / "fp32-reference.json"
 STATIC_CLIENT = REPO_ROOT / "code" / "frontend" / "src" / "lib" / "staticClient" / "arch.ts"
 
+#: How far the live model may sit from the recorded run before we call it a real change.
+#:
+#: A float from a transformer forward pass is not reproducible across platforms, only
+#: within one. gpt2's `wrong_content` is 0.6904174945163003 on the macOS machine that
+#: wrote the record and 0.6904156026288308 on CI's Linux — 1.9e-6 apart, from BLAS, the
+#: same divergence this repo already documents for geo training.
+#:
+#: Chosen from both sides of that gap rather than picked to make CI pass: ~50x above the
+#: divergence observed, and ~150x below the smallest legitimate movement this pin has had
+#: to catch (rewriting the swap arm moved `unknown_form` by 1.46e-2). Tightening it to
+#: 1e-9 asserts bit-identical floats across machines, which is false; loosening it past
+#: ~1e-3 would stop catching a real change to the transform.
+FP32_NATS_TOL = 1e-4
+
 
 def _static_client_fp32_reference() -> dict[str, float | str]:
     """`VACANCY_FP32_REFERENCE`, read out of the TypeScript source the browser ships.
@@ -346,9 +360,23 @@ def test_the_fp32_arm_quoted_in_the_static_client() -> None:
     assert preserved == record["preserved"]
     diffs = {d["id"]: d for d in result["differences"]}
     for name, measured in record["differences"].items():
+        # Counts are exact everywhere: they are integers out of the tokenizer, and a change
+        # in any of them means the transform or the alignment moved, not the arithmetic.
         assert diffs[name]["nPairs"] == measured["nPairs"], name
-        assert diffs[name]["nats"] == pytest.approx(measured["nats"], abs=1e-9), name
-        assert diffs[name]["se"] == pytest.approx(measured["se"], abs=1e-9), name
+        # The nats are NOT bit-reproducible across platforms, and this test asserted that
+        # they were (abs=1e-9). It passed on the macOS machine that wrote the record and
+        # failed on CI's Linux at the first push:
+        #
+        #     assert 0.6904156026288308 == 0.6904174945163003 ± 1.0e-09   (wrong_content)
+        #
+        # i.e. 1.9e-6 apart — ordinary BLAS divergence between the two platforms, the same
+        # effect this repo already documents for geo training. FP32_NATS_TOL is set from
+        # both sides of that gap: ~50x above the divergence actually observed, and ~150x
+        # below the smallest LEGITIMATE move we have had to catch (the swap rewrite shifted
+        # unknown_form by 1.46e-2). It still kills the mutation this pin exists for --
+        # editing the record or the constant moves a figure by ~1e-1.
+        assert diffs[name]["nats"] == pytest.approx(measured["nats"], abs=FP32_NATS_TOL), name
+        assert diffs[name]["se"] == pytest.approx(measured["se"], abs=FP32_NATS_TOL), name
 
     # (2) the TypeScript constant the browser build ships IS that record, to the precision
     # it quotes. Read out of the file, not restated here: a literal restated in a second
