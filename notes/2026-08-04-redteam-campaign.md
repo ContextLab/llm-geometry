@@ -11,15 +11,19 @@
 >
 > ### Do these three things first, in order
 >
-> 1. **Check CI.** It was `in_progress` on `8826d36` when the session ended, and `091da03`
->    will have triggered another run.
+> 1. **Check CI on the CURRENT HEAD of origin/main** — not on a specific sha below. The
+>    workflow's concurrency group has `cancel-in-progress: true`, so each push CANCELS the
+>    previous run: `8826d36` and `091da03` both show `cancelled`, which is that, not a
+>    failure. The last commit of the session is the only one whose run matters.
 >    ```bash
 >    gh run list --limit 4 --json workflowName,status,conclusion,headSha
 >    ```
->    `8826d36` is the fix for the campaign's ONLY CI failure: the fp32 pin asserted
->    bit-identical floats across machines (macOS `0.6904174945163003` vs Linux
->    `0.6904156026288308`, 1.9e-6 apart, BLAS). If CI is red for a DIFFERENT reason, that is
->    new — treat it as a finding, do not assume it is this.
+>    **The tolerance fix has therefore NEVER been confirmed on Linux.** `8826d36` fixes the
+>    campaign's only real CI failure — the fp32 pin asserted bit-identical floats across
+>    machines (macOS `0.6904174945163003` vs Linux `0.6904156026288308`, 1.9e-6 apart, BLAS).
+>    It is verified locally (680 passed; mutation four-state proven) but the Linux half of
+>    the claim is still open. If CI is red for a DIFFERENT reason, that is new — treat it as
+>    a finding, do not assume it is this one.
 >
 > 2. **Re-run verification round 8.** It was running when the session ended and **never
 >    wrote its report**, so its results are LOST. Do not record it as done. Its charter is
