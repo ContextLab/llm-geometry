@@ -53,7 +53,20 @@ test.describe("a tab switch during a real training run is held", () => {
   });
 
   test("Discard leaves the tab, and browser Back is held the same way", async ({ page }) => {
-    await page.goto("/#lexicon");
+    // The entry point matters, and this test originally got it wrong. Landing directly on
+    // `/#lexicon` makes the Lexicon Lab the FIRST history entry, so Back leaves the document
+    // altogether — and `stores.ts` is explicit that this is "the one navigation the in-app
+    // prompt cannot handle: the browser will not wait for a component to render". That case
+    // is covered by `beforeunload`, whose dialog is the browser's own and which Playwright
+    // auto-dismisses, so `nav-hold` correctly never appears and the assertion below could
+    // never have passed.
+    //
+    // Arriving the way a reader does — landing on the app, then clicking into the Lexicon
+    // Lab — leaves a real in-document entry behind, so Back fires `popstate` inside the page
+    // and the in-app prompt is the mechanism actually under test.
+    await page.goto("/#architecture");
+    await page.getByTestId("tab-lexicon").click();
+    await expect(page.getByTestId("lex-train")).toBeVisible();
     await page.getByTestId("lex-dmodel").getByRole("radio", { name: "16" }).click();
     await page.getByTestId("lex-steps").fill("400");
     await page.getByTestId("lex-train-run").click();
