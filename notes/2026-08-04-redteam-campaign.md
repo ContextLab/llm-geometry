@@ -1,8 +1,34 @@
 # Session notes — the red-team campaign against all four tabs (2026-08-04)
 
-> **UPDATE after rounds 5–8.** Everything below the "Where things stand" section is the
-> record as of the pause; the campaign continued. Current state is at the END of this file,
-> under "Rounds 5–8". Read that first.
+> **SUSPENDED after round 7, mid-round-8. Read this box, then "Rounds 5–8" at the END of
+> this file. The material between them is the record as of an EARLIER pause and is stale.**
+>
+> ### State
+> `main` = `091da03`, **pushed**, working tree clean, no stray files, one worktree.
+> Local suite fully green: backend 680 · vitest 851 · svelte-check 1186/0/0 · e2e **68/68**
+> (incl. webgpu on a real `apple/metal-3 (shader-f16)` adapter) · build ✓.
+> Pages deployed and verified by use.
+>
+> ### Do these three things first, in order
+>
+> 1. **Check CI.** It was `in_progress` on `8826d36` when the session ended, and `091da03`
+>    will have triggered another run.
+>    ```bash
+>    gh run list --limit 4 --json workflowName,status,conclusion,headSha
+>    ```
+>    `8826d36` is the fix for the campaign's ONLY CI failure: the fp32 pin asserted
+>    bit-identical floats across machines (macOS `0.6904174945163003` vs Linux
+>    `0.6904156026288308`, 1.9e-6 apart, BLAS). If CI is red for a DIFFERENT reason, that is
+>    new — treat it as a finding, do not assume it is this.
+>
+> 2. **Re-run verification round 8.** It was running when the session ended and **never
+>    wrote its report**, so its results are LOST. Do not record it as done. Its charter is
+>    reconstructable from "Method notes" below; the essential instruction is to open with
+>    the campaign's failure history rather than a task list, and to assume round 7 contains
+>    a defect of the same shape. Target: `notes/agent-reports/verify-007-round7.md`.
+>
+> 3. **Watch for the warm-cache flake** (item 2 under "Open / carried forward"). CI's
+>    `restore-keys` supply the warm state I could not reproduce locally. Absence is not proof.
 
 ## Where things stand
 
