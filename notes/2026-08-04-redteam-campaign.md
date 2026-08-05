@@ -1,6 +1,8 @@
 # Session notes — the red-team campaign against all four tabs (2026-08-04)
 
-**PAUSED mid-flight.** Read this first on resume.
+> **UPDATE after rounds 5–8.** Everything below the "Where things stand" section is the
+> record as of the pause; the campaign continued. Current state is at the END of this file,
+> under "Rounds 5–8". Read that first.
 
 ## Where things stand
 
@@ -126,3 +128,125 @@ Before that run, the suite stood at **63 passed / 2 failed**, and those 2 are ex
 
 Agent reports (all findings, with verbatim evidence) are in `notes/agent-reports/`:
 `redteam-007-{arch,geo,lex,docs-shell}.md`, `fix-007-*.md`, `verify-007-*.md`.
+
+---
+
+# Rounds 5–8 (current state)
+
+## Where it actually stands
+
+`main` = `8826d36`, pushed. Pages deployed and verified **by use**. CI green through
+`34027ae` except one backend failure, fixed in `8826d36` (running at the time of writing).
+
+Local, all independently re-run by me rather than taken from agent reports:
+
+| Check | Result |
+|-|-|
+| backend `pytest` | **680 passed** |
+| `ruff` / `black` | clean / 88 files unchanged |
+| `svelte-check` | **1186 files, 0 errors, 0 warnings** |
+| `vitest` | **851 passed, 1 skipped** |
+| `npm run test:e2e` | **68/68**, incl. webgpu on a real `apple/metal-3 (shader-f16)` adapter |
+
+## The arc, because the SHAPE of each round's findings is the useful signal
+
+| Round | What it found |
+|-|-|
+| 1 (4 agents) | 37 findings — behavioural: wrong numbers, crashes, silent substitutions |
+| 2 (verify) | the critical bug SURVIVED its fix, via a path nobody had considered |
+| 3 (fix) | fixed it at the *identity* level, not the caching policy |
+| 4 (verify) | 27 findings — critical HELD, but the same wrong ANSWER reached around it |
+| 5 (fix) | mostly structural: constants, one Unicode table, un-conflated sentinels |
+| 6 (verify) | 16 findings, **3 REFUTED** — incl. a fix that REOPENED its own defect |
+| 7 (fix) | real pins with proven teeth; every fix mutation-verified |
+| 8 (verify) | running |
+
+Convergence is behaviour → prose → structure → test teeth. It is NOT monotonic: round 5
+reopened a defect and shipped a facade, which is why rounds kept being worth running.
+
+## Defects that recurred, and what finally worked
+
+- **Vocabulary substitution with self-consistent digests** — 3 fix attempts. Only the third
+  held, because it changed the model's IDENTITY (`weights_token` now covers weights **and**
+  canonical vocab JSON) instead of the caching policy. Side benefit: a tampered file with a
+  recomputed `vocab_sha256` is now refused — the hole the two digests could never close.
+- **A stale/unearned error bar** — wrong 3 times: a ± never earned; a retained bound called
+  "measured"; then numbers from a configuration that no longer existed. Fixed structurally
+  (constants + interpolation) — and that fix was a FACADE (see below) until round 7.
+- **Inherited-key lookups** (`x in OBJ`, truthiness index, `{}` as a table) — **five
+  consecutive rounds each found MORE**: 2 → 4 → 3 → 2 → 3. Worst: a remote safetensors
+  header naming a tensor `__proto__` ran `Object.prototype`'s setter (tensor vanished, its
+  `dtype`/`shape` readable on the map); a `dtype:"constructor"` decoded as F16 and returned
+  real-looking numbers; `ONNX_REPOS["constructor"]` handed the `Object` function to the ONNX
+  runtime. Assume the next sweep is also incomplete.
+
+## Tests that were green for the wrong reason (the campaign's real lesson)
+
+- A test module built its fixtures with the function under test (`_bundle_for` →
+  `own_vocab_json`), so writer and reader mutated together: **20 passed while one model had
+  two identities**.
+- The "structural" constants fix: changing `VACANCY_FP32_REFERENCE.unknownForm`
+  0.2872 → 0.4872 **passed all 815 tests**. The Python pin asserted its own literal; the TS
+  pin did `toContain(String(constant))` — a tautology. Exchanging two interpolation slots
+  also passed 815/815 and restored the exact original defect.
+- A nav-guard test asserted on **source text** via `readFileSync` + regex: removing the
+  `$effect` wrapper (de-reactifying the wiring entirely) left it green.
+- A brand-new e2e test could never have passed on any build — it drove a mechanism the code
+  documents as inapplicable (`goto("/#lexicon")` makes Back leave the DOCUMENT, which is
+  `beforeunload`'s job, not the in-app prompt's).
+- 5 of 7 mutations survived one round; 3 survived all 596 unit tests.
+
+**So: "all tests pass" was repeatedly true and repeatedly meaningless.** Mutation testing is
+the only thing that reliably distinguished a pin from a decoration. Require four-state
+evidence: mutate → old test passes → new test fails → restore (`shasum`-verified).
+
+## Things I got wrong (recorded so they are not re-learned)
+
+- `d6e9d5d`'s message claimed "the full stack was never affected". False — 2 of 4 sources.
+- I called the constants+interpolation change a structural fix that meant "prose can no
+  longer disagree with the measurement". It was a facade; a verifier refuted it.
+- I transcribed `2.74%` from an agent report into the normative contract, then my own spot
+  check said `0.00%` — **my check was wrong** (one map over concatenated passages; the code
+  builds one per passage). Re-deriving it correctly found two OTHER figures that were wrong.
+- I reported the webgpu project produced no output. It ran and passed; I had grepped a log
+  I truncated with `tail`.
+- I nearly reported a live TS↔Python divergence in the word-alphabet rule. The UI probe was
+  racing with re-render; testing both stacks directly showed they agree on all 10 cases.
+- I merged five branches locally and kept going for 36 commits without pushing.
+
+## Method notes that paid off
+
+- **Isolated worktrees + disjoint file ownership**: 5 concurrent fix branches, zero
+  conflicts. The one integration failure was a stale fixture, and regenerating it PROVED
+  the TS engine reproduces the new Python swap byte-for-byte.
+- **Verifiers must never be the fixer.** Every verification round found something its
+  fixer counterpart had missed or overclaimed.
+- **"Sweep for the pattern, don't patch the instance"** turned 2 known bugs into 4, then 3
+  more, then 3 more.
+- **Charter the verifier with the failure history**, not a task list. Round 8's brief opens
+  with "the central bug survived two complete fixes; assume it is happening again".
+- Agents cannot run e2e (it binds the shared ports). Run it yourself — it found a bug a
+  fixer AND a verifier had both signed off on.
+- Tell agents to use `cp`/`shasum` backups for mutation testing, **never `git checkout`** —
+  siblings have uncommitted work.
+- `black src/` is repo-wide; scope it while others are editing.
+
+## Open / carried forward
+
+1. **Verification round 8** — results pending.
+2. **A warm-cache flake I could not reproduce**: `test_geo_finetune…mints_new_checkpoint`
+   failed for one agent on a warm cache (`assert result["cached"] is False`); passes for me
+   5/5 cold and warm. May have been fixed incidentally by the round-7 identity/caching work.
+   **CI's `restore-keys` are the real test** — watch for it there; do not treat absence as
+   proof.
+3. Known-and-open, all documented in the agent reports: `ArchitectureExplorer:238`
+   unregistered with the nav guard; the 3 geo tablists have `role="tab"` but no `tabpanel`,
+   no `aria-controls`, `tabindex 0` on every tab, no keydown handler (**issue #7, left
+   open**); issue #6 fixed but **left open for a human to close**; a file whose author
+   recomputes EVERY digest is still self-consistent by construction (needs a signature +
+   migration); the q8 arm of `VACANCY_Q8_UNCERTAINTY_NATS` can only be re-measured in a
+   browser.
+4. One source-text assertion remains (`shell.test.ts:355`) with a stated reason —
+   `geo-mode`/`geo-layer` need `phase === "ready"`, unreachable in jsdom.
+
+All reports: `notes/agent-reports/{redteam,fix,verify}-007-*.md`.
