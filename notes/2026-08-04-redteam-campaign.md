@@ -9,7 +9,39 @@
 > (incl. webgpu on a real `apple/metal-3 (shader-f16)` adapter) · build ✓.
 > Pages deployed and verified by use.
 >
-> ### Do these three things first, in order
+> ### ⚠ FIRST: a CRITICAL regression is PUSHED AND DEPLOYED
+>
+> Verification round 8 completed after all (an earlier note in this file said its results
+> were lost — that was wrong; the report is
+> `notes/agent-reports/verify-007-round7.md`). **1 critical, 3 high, 4 medium, 3 low.**
+>
+> **F7 (critical): round 7's `BUNDLE_VERSION` 2→3 migration re-opened the campaign's central
+> bug.** Editing ONE field in a model file — `version: 3` → `2` — makes the v2 migration path
+> accept a substituted vocabulary. Same payload, both stacks:
+>
+> ```
+> v3: REFUSED … corrupt
+> v2: ACCEPTED  owns_vocab=True   words ['vanished','stick','left',…]
+>                                 canonical ['"', ',', 'the', …]
+> ```
+>
+> and the tab then reports the vocabulary **verified**. Before round 7 this was refused. The
+> fix for a false remedy reintroduced the vulnerability the whole campaign was about.
+> It needs a deliberate design decision (a v2 file's vocabulary claim is not verifiable —
+> that is *why* it was refused), so it was NOT rushed at the end of the session.
+>
+> **F8 (high): the word alphabet has never covered DIGITS.** `covid19` → swap `window19`,
+> nonce `kranking19`; real gpt2 returns numbers (`wrong_content 0.3818`). That is the
+> `café`→`washé` silent wrong answer with a digit, and 30 fixture cases contain zero digits.
+>
+> **F1 (high, surviving): the constants facade persists** for everything except
+> `VACANCY_FP32_REFERENCE` — five fabricated measurements ship with 851 frontend + 27
+> backend tests green.
+>
+> Verdicts: word-alphabet **REFUTED**, `BUNDLE_VERSION` **REFUTED**, fp32 pin / sweep /
+> parity / teeth **PARTIAL**, SC-703 + §10 **VERIFIED** (re-derived identical).
+>
+> ### Then these three, in order
 >
 > 1. **Check CI on the CURRENT HEAD of origin/main** — not on a specific sha below. The
 >    workflow's concurrency group has `cancel-in-progress: true`, so each push CANCELS the
